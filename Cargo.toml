@@ -1,0 +1,6 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/cli_application",
+    "crates/lib_sprite_shrink",
+]
