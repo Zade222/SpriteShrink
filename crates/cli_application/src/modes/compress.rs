@@ -203,7 +203,7 @@ pub fn run_compression(
     longer needed.*/
     drop(chunk_index);
 
-    let dictionary_size = args.dictionary_size.as_u64();
+    let dictionary_size = args.dictionary.as_u64();
     
     /*Assembles the final archive from its constituent parts, structures it 
     according to the ssmc spec and returns the byte data ready to be written.*/

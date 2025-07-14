@@ -69,9 +69,11 @@ pub struct Args {
     ///Determines the dictionary size for the compression algorithm.
     ///(e.g., "256K", "4KB", "64KiB")
     #[arg(short, long, help_heading = "Tuning Parameters", default_value_t = ByteSize::b(16*1024))]
-    pub dictionary_size: ByteSize,
+    pub dictionary: ByteSize,
 
-    ///Automi
+    ///Autotune both the window size and dictionary size. Will findly the 
+    /// reasonably optimal size for each. If vlaues for either the window or 
+    /// dictionary are provide they will be used instead of autotuning.
     #[arg(short, long, help_heading = "Tuning Parameters", 
     default_value_t = false)]
     pub auto_tune: bool,
