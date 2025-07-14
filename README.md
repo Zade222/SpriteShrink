@@ -20,7 +20,7 @@ It also includes `lib_sprite_shrink`, a Rust library for seamless integration in
 
 ### Installation
 
-Pre-compiled binaries for supported platforms will be made available on the [releases page](https://github.com/Zadeis/sprite_shrink/releases) (link will be updated upon first release).
+Pre-compiled binaries for supported platforms will be made available on the [releases page](https://github.com/Zadeis/sprite_shrink/releases).
 
 Alternatively, you can build SpriteShrink from source:
 
