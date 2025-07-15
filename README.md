@@ -111,9 +111,9 @@ Here's a quick reference for the main arguments:
 | Short Flag | Long Flag         | Description                                                                                             | Default     |
 |------------|-------------------|---------------------------------------------------------------------------------------------------------|-------------|
 | `-i`       | `--input`         | Path to a single ROM file or directory of ROMs for input. Can be specified multiple times.              | Required    |
-| `-o`       | `--output`        | Path for the output archive (compression) or directory (extraction).                                    | Required    |
+| `-o`       | `--output`        | Path for the output archive (compression) or directory (extraction).                                    | Mode Dependent    |
 | `-m`       | `--metadata`      | Activates metadata retrieval mode. Used with `-i` (input archive).                                      | N/A         |
-| `-e`       | `--extract`       | Specifies ROM index(s) to extract (e.g., `1,3,5-7`). Requires `-o` and `-i`.                            | N/A         |
+| `-e`       | `--extract`       | Specifies ROM indices to extract (e.g., `1,3,5-7`). Requires `-o` and `-i`.                            | N/A         |
 | `-c`       | `--compression`   | Sets the compression algorithm (choices: `zstd`, `lzma`, `deflate`).                                    | `zstd`      |
 |            | `--compression-level` | Sets the numerical compression level.                                                                   | `19`        |
 | `-w`       | `--window`        | Hashing algorithm window size (e.g., `256K`, `4KB`).                                                    | `2KB`       |
