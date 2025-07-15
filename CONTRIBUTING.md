@@ -85,7 +85,7 @@ git checkout -b your-branch-name
 
 ### Making Changes
 
-Implement your changes in your new branch. Remember to adhere to the [Coding Standards](#coding-standards) outlined below.
+Implement your changes in your new branch. Remember to adhere to the [Coding Standards](#3-coding-standards) outlined below.
 
 ### Commit Messages
 
