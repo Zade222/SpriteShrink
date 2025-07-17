@@ -71,9 +71,11 @@ pub struct Args {
     #[arg(short, long, help_heading = "Tuning Parameters", default_value_t = ByteSize::b(16*1024))]
     pub dictionary: ByteSize,
 
-    ///Autotune both the window size and dictionary size. Will findly the 
-    /// reasonably optimal size for each. If vlaues for either the window or 
-    /// dictionary are provide they will be used instead of autotuning.
+    ///Autotune both the window size and dictionary size. Will find the 
+    /// reasonably optimal size for each. This uses a somewhat inefficient 
+    /// algorithm and can take time but will lead to a smaller file size
+    /// more easily. If vlaues for either the window or dictionary are 
+    /// provided they will be used instead of autotuning.
     #[arg(short, long, help_heading = "Tuning Parameters", 
     default_value_t = false)]
     pub auto_tune: bool,
