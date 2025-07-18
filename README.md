@@ -5,7 +5,7 @@ SpriteShrink is a powerful command-line tool that revolutionizes how retro game 
 
 It also includes `lib_sprite_shrink`, a Rust library for seamless integration into applications like emulators, enabling direct ROM extraction from archives.
 
-## ✨ Features
+## Features
 
 * **Intelligent Deduplication**: Analyzes multiple ROMs of a single game to identify and eliminate shared byte data, storing only unique copies.
 * **High Compression Ratios**: Achieves superior space savings compared to traditional compression methods by leveraging content-defined chunking and shared dictionary compression (Zstandard).
@@ -16,7 +16,7 @@ It also includes `lib_sprite_shrink`, a Rust library for seamless integration in
 * **Cross-Platform Compatibility**: Fully operational on 64-bit Linux (Ubuntu LTS, RHEL), macOS (latest stable versions), and Windows (10/11) on x86-64 and AArch64 architectures.
 * **Resource Control**: Options to limit CPU thread usage and enable a low-memory mode for resource-constrained environments.
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Installation
 
@@ -126,18 +126,18 @@ Here's a quick reference for the main arguments:
 | `-q`       | `--quiet`         | Activates quiet mode, suppressing non-essential output.                                                 | `false`     |
 | `-h`       | `--help`          | Prints comprehensive help information and exits.                                                        | N/A         |
 
-## 🤝 Contributing
+## Contributing
 
 We welcome contributions to SpriteShrink! If you're interested in contributing, please refer to our [CONTRIBUTING.md](CONTRIBUTING.md) (link will be added once the file is created) for guidelines on setting up your development environment, coding standards, and submitting pull requests.
 
-## 🐛 Error Handling & Reliability
+## Error Handling & Reliability
 
 SpriteShrink is designed to be robust. It gracefully handles malformed inputs, ensures data integrity (byte-for-byte identical extraction), and provides clear, actionable error messages. Operations are atomic, meaning partially written output files are automatically cleaned up in case of cancellation or failure.
 
-## 📄 License
+## License
 
 This project is open-source and available under the [GPLv3 License](https://www.gnu.org/licenses/gpl-3.0.en.html). Please see the `LICENSE` file for more details.
 
-## 📞 Support and Contact
+## Support and Contact
 
 If you have any questions, encounter issues, or would like to provide feedback, please open an issue on the [GitHub Issues page](https://github.com/your-username/sprite-shrink/issues).
