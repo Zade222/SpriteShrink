@@ -8,7 +8,7 @@
 
 use std::{collections::HashMap, io::Write};
 use std::mem;
-//use std::time::Instant;
+use std::time::Instant;
 
 use bincode;
 
@@ -23,6 +23,8 @@ use crate::lib_structs::{
 };  
 
 use crate::parsing::{MAGIC_NUMBER, SUPPORTED_VERSION};
+
+use crate::processing::gen_zstd_opt_dict;
 
 use crate::serialization::{serialize_compressed_store};
 
@@ -122,8 +124,10 @@ fn compress_with_dict(data_payload: &[u8], dict: &[u8], level: &i32) ->
 /// * `data_store`: A `HashMap` of all unique, uncompressed data chunks.
 /// * `sorted_hashes`: A sorted vector of all unique chunk hashes.
 /// * `file_count`: The total number of files being added.
-/// * `level`: The Zstandard compression level to be used.
+/// * `compression_level`: The Zstandard compression level to be used.
+/// * `dictionary_size`: The target size for the compression dictionary.
 /// * `worker_threads`: The number of threads for parallel compression.
+/// * `opt_dict`: A bool to enable dictionary optimization.
 ///
 /// # Returns
 ///
@@ -138,7 +142,8 @@ pub fn finalize_archive(
     file_count: u32,
     compression_level: i32,
     dictionary_size: u64,
-    worker_threads: usize
+    worker_threads: usize,
+    opt_dict: bool
 ) -> Result<Vec<u8>, LibError> {
     //Sort to prepare data to be analyzed to build dictionary.
     let samples_for_dict: Vec<&[u8]> = sorted_hashes
@@ -146,17 +151,27 @@ pub fn finalize_archive(
         .filter_map(|hash| data_store.get(hash).map(|data| data.as_slice()))
         .collect();
     
-    //let dict_start_time = Instant::now();
+    let dict_start_time = Instant::now();
 
     //Make dictionary from sorted data.
-    let dictionary = zstd::dict::from_samples(
+    
+    let mut dictionary: Vec<u8> = Vec::new();
+    if opt_dict{
+        dictionary = gen_zstd_opt_dict(
+        samples_for_dict, 
+        dictionary_size as usize, 
+        worker_threads, 
+        compression_level)?;
+    } else {
+        dictionary = zstd::dict::from_samples(
         &samples_for_dict,
         dictionary_size as usize, // dictionary size in bytes
-    ).map_err(|e| LibError::CompressionError(e.to_string()))?;
+        ).map_err(|e| LibError::CompressionError(e.to_string()))?;
+    }
 
-    //let dict_elapsed_time = dict_start_time.elapsed();
+    let dict_elapsed_time = dict_start_time.elapsed();
 
-    //println!("The building dictionary took: {:?}", dict_elapsed_time);
+    println!("The building dictionary took: {:?}", dict_elapsed_time);
     
     let task_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(worker_threads)

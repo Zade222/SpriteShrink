@@ -47,4 +47,7 @@ pub enum LibError {
 
     #[error("Compression failed: {0}")]
     CompressionError(String),
+
+    #[error("Dictionary creation failed: {0}")]
+    DictionaryError(String),
 }

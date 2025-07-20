@@ -7,11 +7,13 @@
 //! verifying files from their chunks.
 
 use std::collections::HashMap;
+use std::ffi::c_void;
 
 use dashmap::DashMap;
 use fastcdc::v2020::{Chunk, FastCDC, Normalization};
 use sha2::{Digest,Sha512};
 use xxhash_rust::xxh3::xxh3_64_with_seed;
+use zstd_sys::{self, ZDICT_params_t};
 
 
 use crate::lib_error_handling::LibError;
@@ -224,4 +226,105 @@ pub fn rebuild_and_verify_single_file(
     }
 
     Ok(())
+}
+
+
+/// Generates a Zstandard compression dictionary from sample data and optimizes
+/// the dictionary.
+///
+/// This function uses the `zstd-sys` crate to train a dictionary that can
+/// improve compression ratios for similar data blocks. It can operate
+/// in a multi-threaded fashion to speed up the dictionary generation
+/// process on large sets of sample data. The COVER algorithm is used for
+/// training, which is generally a good default.
+///
+/// # Arguments
+///
+/// * `samples`: A vector of byte slices, where each slice is a sample
+///   of data to be used for training the dictionary.
+/// * `max_dict_size`: The maximum desired size for the generated
+///   dictionary in bytes. The actual size may be smaller.
+/// * `workers`: The number of threads to utilize for dictionary
+///   training. A value of 0 will let zstd decide.
+/// * `compression_level`: The zstd compression level to target during
+///   training. This should match the level used for compression.
+///
+/// # Returns
+///
+/// A `Result` which is:
+/// - `Ok(Vec<u8>)` containing the generated dictionary data.
+/// - `Err(LibError::DictionaryError)` if the underlying zstd library
+///   encounters an error during the dictionary training process.
+///
+/// # Safety
+///
+/// This function contains `unsafe` code as it calls directly into the
+/// C `zstd-sys` library. It makes assumptions about pointer validity
+/// and buffer lengths that must be upheld to prevent memory errors.
+pub fn gen_zstd_opt_dict(samples: Vec<&[u8]>,
+    max_dict_size: usize,
+    workers: usize,
+    compression_level: i32
+) -> Result<Vec<u8>, LibError> {
+    /*Prepares the samples for the zstd_sys function. */
+    let samples_buffer: Vec<u8> = samples.concat();
+
+    /*This vector will store the size of each sample. */
+    let sample_sizes: Vec<usize> = samples.iter().map(|s| s.len()).collect();
+
+    /*This buffer will store the dictionary to be returned.*/
+    let mut dict_buffer = Vec::with_capacity(max_dict_size);
+
+
+    /*Set and store the ZDICT parameters to be used by the cover algorithm.
+    Any values marked as default are either not used by 
+    ZDICT_optimizeTrainFromBuffer_cover or is the default value that is
+    used for the vast majority of applications.*/
+    let z_params = ZDICT_params_t { 
+        compressionLevel: compression_level, 
+        notificationLevel: 0, //Default
+        dictID: 0 //Default
+    };
+    /*params is declared mutable as the function tunes values as it 
+    processes.*/
+    let mut params = zstd_sys::ZDICT_cover_params_t {
+        k:          0, //Dynamically set by below function.
+        d:          0, //Dynamically set by below function.
+        steps:      4, //Default
+        nbThreads:  workers as u32,
+        splitPoint: 0.0, //Default
+        shrinkDict: 0, //Default, not used
+        shrinkDictMaxRegression: 0, //Default, not used
+        zParams: z_params
+    };
+
+    //Run the C function with the defined paramters and prepared vectors.
+    let dict_size = unsafe {
+        zstd_sys::ZDICT_optimizeTrainFromBuffer_cover(
+            dict_buffer.as_mut_ptr() as *mut c_void, 
+            max_dict_size, 
+            samples_buffer.as_ptr() as *const c_void, 
+            sample_sizes.as_ptr(), 
+            sample_sizes.len() as u32, 
+            &mut params
+        )
+    };
+
+    //Verify if any errors occured in the unsafe function.
+    if unsafe { zstd_sys::ZDICT_isError(dict_size) } != 0 {
+        let e = unsafe {
+            std::ffi::CStr::from_ptr(zstd_sys::ZDICT_getErrorName(
+                dict_size)).to_string_lossy()
+        };
+        return Err(LibError::DictionaryError(e.to_string()))
+    }
+
+    /*Set final length of buffer so that Rust knows how much data is within 
+    it as the unsafe C function from zstd has written to it.*/
+    unsafe {
+        dict_buffer.set_len(dict_size);
+    }
+
+    /*Return the dictionary buffer.*/
+    Ok(dict_buffer)
 }

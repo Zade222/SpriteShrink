@@ -80,17 +80,23 @@ pub struct Args {
     default_value_t = false)]
     pub auto_tune: bool,
 
+    ///When finalizing the archive, optimize the dictionary for better compression.
+    /// NOT recommended for large files as it can be very slow. 
+    #[arg(long, help_heading = "Tuning Parameters", 
+    default_value_t = false)]
+    pub optimize_dictionary: bool,
+
+    //Behavior and Output Control
+
     ///Sets the maximum number of worker threads to use.
     ///Defaults to all available logical cores.
-    #[arg(short, long, help_heading = "Tuning Parameters")]
+    #[arg(short, long, help_heading = "Behavior and Output Control")]
     pub threads: Option<usize>,
 
     ///Forces low-memory mode by processing files sequentially and
     ///limiting worker threads to 4 for compression.
-    #[arg(long, help_heading = "Tuning Parameters", default_value_t = false)]
+    #[arg(long, help_heading = "Behavior and Output Control", default_value_t = false)]
     pub low_memory: bool,
-
-    //Behavior and Output Control
 
     ///Forces the system to overwrite the output file if it exists.
     #[arg(short, long, help_heading = "Behavior and Output Control", 

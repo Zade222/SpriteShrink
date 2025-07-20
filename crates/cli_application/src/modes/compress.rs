@@ -214,7 +214,8 @@ pub fn run_compression(
         file_paths.len() as u32, 
         level, 
         dictionary_size,
-        _task_threads)?;
+        _task_threads,
+        args.optimize_dictionary)?;
 
     println!("Total file size will be: {} bytes.", ssmc_data.len());
 
