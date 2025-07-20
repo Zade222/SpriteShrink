@@ -155,15 +155,15 @@ pub fn finalize_archive(
 
     //Make dictionary from sorted data.
     
-    let mut dictionary: Vec<u8> = Vec::new();
+    let mut _dictionary: Vec<u8> = Vec::new();
     if opt_dict{
-        dictionary = gen_zstd_opt_dict(
+        _dictionary = gen_zstd_opt_dict(
         samples_for_dict, 
         dictionary_size as usize, 
         worker_threads, 
         compression_level)?;
     } else {
-        dictionary = zstd::dict::from_samples(
+        _dictionary = zstd::dict::from_samples(
         &samples_for_dict,
         dictionary_size as usize, // dictionary size in bytes
         ).map_err(|e| LibError::CompressionError(e.to_string()))?;
@@ -187,7 +187,7 @@ pub fn finalize_archive(
             if let Some(data) = data_store.get(hash){
                 let compressed_chunk = compress_with_dict(
                     data.as_slice(), 
-                    &dictionary, 
+                    &_dictionary, 
                     &compression_level)
                     .map_err(|e| LibError::CompressionError(e.to_string()))?;
 
@@ -228,7 +228,7 @@ pub fn finalize_archive(
     let file_header = build_file_header(
         file_count,
         bin_file_manifest.len() as u64,
-        dictionary.len() as u64,
+        _dictionary.len() as u64,
         bin_chunk_index.len() as u64,
     );
 
@@ -239,7 +239,7 @@ pub fn finalize_archive(
 
     final_data.extend_from_slice(file_header.as_bytes());
     final_data.extend_from_slice(&bin_file_manifest);
-    final_data.extend_from_slice(&dictionary);
+    final_data.extend_from_slice(&_dictionary);
     final_data.extend_from_slice(&bin_chunk_index);
     final_data.extend_from_slice(&compressed_data_store);
 

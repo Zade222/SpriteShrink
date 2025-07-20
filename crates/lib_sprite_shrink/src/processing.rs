@@ -290,7 +290,7 @@ pub fn gen_zstd_opt_dict(samples: Vec<&[u8]>,
     let mut params = zstd_sys::ZDICT_cover_params_t {
         k:          0, //Dynamically set by below function.
         d:          0, //Dynamically set by below function.
-        steps:      4, //Default
+        steps:      4, 
         nbThreads:  workers as u32,
         splitPoint: 0.0, //Default
         shrinkDict: 0, //Default, not used
