@@ -97,7 +97,9 @@ pub fn run_compression(
     host system supports) */
     if args.low_memory {
         _process_threads = 1 as usize;
-        println!("Low memory mode engaged.")
+        if args.verbose{
+            println!("Low memory mode engaged.")
+        }
     } else {
         /*0 lets Rayon decide the optimal number when thread parameter isn't 
         used, otherwise set to thread parameter.*/
@@ -129,7 +131,9 @@ pub fn run_compression(
         if args.window.is_none() {
 
             loop {
-                println!("Testing window size: {}", current_window_size);
+                if args.verbose{
+                    println!("Testing window size: {}", current_window_size);
+                }
 
                 /*Set starting time for determining the compressed size 
                 using the current window size*/
@@ -164,18 +168,22 @@ pub fn run_compression(
 
                 if compressed_size > last_compressed_size {
                     //Process passed the optimal point, stop.
-                    println!("Optimal window size found to be {} bytes.", 
-                        best_window_size);
+                    if args.verbose{
+                        println!("Optimal window size found to be {} bytes.", 
+                            best_window_size);
+                    }
                     break;
                 }
 
                 if let Some(timeout) = timeout_dur {
                     if elapsed > timeout {
-                        println!(
-                            "Autotune for window size {} took too long (>{:?}). \
-                            Using best result so far: {}.",
-                            current_window_size, timeout, best_window_size
-                        );
+                        if args.verbose{
+                            println!(
+                                "Autotune for window size {} took too long (>{:?}). \
+                                Using best result so far: {}.",
+                                current_window_size, timeout, best_window_size
+                            );
+                        }
                         break; // Exit the loop
                     }
                 }
@@ -209,8 +217,10 @@ pub fn run_compression(
 
         loop {
             if args.dictionary.is_none() {
-                println!("Testing dictionary size: {}", current_dict_size);
-                
+                if args.verbose{
+                    println!("Testing dictionary size: {}", current_dict_size);
+                }
+
                 let compressed_size = test_compression(
                     &_data_store, 
                     &sorted_hashes,
@@ -219,8 +229,10 @@ pub fn run_compression(
                 
                 if compressed_size > last_compressed_size {
                     //Process passed the optimal point, stop.
-                    println!("Optimal dictionary size found to be {} bytes.", 
-                        best_dictionary_size);
+                    if args.verbose{
+                        println!("Optimal dictionary size found to be {} bytes.", 
+                            best_dictionary_size);
+                    }
                     break;
                 }
                 //This iteration was successful and an improvement
@@ -245,10 +257,11 @@ pub fn run_compression(
                 &_process_pool)?;
     }
 
-    println!("{} unique chunks in data store.", _data_store.len());
+    if args.verbose{
+        println!("{} unique chunks in data store.", _data_store.len());
 
-    println!("All files processed. Verifying data...");
-
+        println!("All files processed. Verifying data...");
+    }
     /*If low memory is set limit reads to four workers else set to the user 
     specified argument or let Rayon decide (which is the amount of threads the
     host system supports) */
@@ -304,22 +317,32 @@ pub fn run_compression(
                     &fmp, &ser_data_store, &chunk_index, &_veri_hashes)
             })
     })?;
-    println!("File verification passed! Compressing data and \
-        finalizing archive...");
+    
+    if args.verbose{
+        println!("File verification passed! Compressing data and \
+            finalizing archive...");
+    }
 
     /*chunk index was storing non compressed data_store locations and is no 
     longer needed.*/
     drop(chunk_index);
 
+    //Define progress bar to be used by callback
     let progress_bar = Mutex::new(None);
-
-    //Define progress callback closure
+    
+    /*Creates a callback function that updates the progress as milestones are
+    met and prints a progress bar.
+    If statement enables or disables callback messages depending on mode.*/
     let progress_callback = |progress| {
+        if args.quiet {
+            return; //Do nothing in quiet mode
+        }
+        
         match progress {
-            Progress::GeneratingDictionary => {
+            Progress::GeneratingDictionary if args.verbose => {
                 println!("Generating compression dictionary...");
             }
-            Progress::DictionaryDone => {
+            Progress::DictionaryDone if args.verbose => {
                 println!("Dictionary created.");
             }
             Progress::Compressing { total_chunks } => {
@@ -343,28 +366,39 @@ pub fn run_compression(
                     bar.inc(1);
                 }
             }
-            Progress::Finalizing => {
+            Progress::Finalizing if args.verbose => {
                 println!("Finalizing archive...");
             }
+            _ =>{
+
+            }
         }
-    };
-    
+    };  
+
     /*Assembles the final archive from its constituent parts, structures it 
     according to the ssmc spec and returns the byte data ready to be written.*/
     let ssmc_data = finalize_archive(
-        &ser_file_manifest, 
-        &_data_store, 
-        &sorted_hashes, 
-        file_paths.len() as u32, 
-        level, 
-        best_dictionary_size,
-        _compute_threads,
-        args.optimize_dictionary,
-        &progress_callback
-    )?;
+            &ser_file_manifest, 
+            &_data_store, 
+            &sorted_hashes, 
+            file_paths.len() as u32, 
+            level, 
+            best_dictionary_size,
+            _compute_threads,
+            args.optimize_dictionary,
+            &progress_callback
+        )?;
 
-    println!("Total file size will be: {} bytes.", ssmc_data.len());
-
+    if !args.quiet {
+        if let Some(bar) = progress_bar.lock().unwrap().take() {
+            bar.finish_with_message("Compression complete.");
+        }
+    }
+    
+    if args.verbose{
+        println!("Total file size will be: {} bytes.", ssmc_data.len());
+    }
+    
     /*Takes the specified output file destination and adds the ssmc file 
     extension if it's not present or replaces the specified extension with
     ssmc.*/
@@ -375,6 +409,9 @@ pub fn run_compression(
 
     //Write ssmc archive to disk.
     write_final_archive(&final_output_path, &ssmc_data)?;
+
+    println!("Successfully created sprite-shrink multicart archive at: \
+        {:?}", final_output_path);
 
     Ok(())
 }
