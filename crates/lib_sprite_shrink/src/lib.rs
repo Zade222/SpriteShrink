@@ -21,5 +21,5 @@ pub use serialization::{serialize_uncompressed_data};
 
 mod lib_structs;
 pub use lib_structs::{
-    FileData, FileHeader, FileManifestParent, ProcessedFileData, SSAChunkMeta,
-    ChunkLocation};
+    FileData, FileHeader, FileManifestParent, ProcessedFileData, Progress, 
+    SSAChunkMeta, ChunkLocation};

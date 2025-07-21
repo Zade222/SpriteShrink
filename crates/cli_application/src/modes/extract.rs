@@ -145,8 +145,10 @@ pub fn run_extraction(file_path: &PathBuf,
                 .iter()
                 .map(Vec::as_slice)
                 .collect();
-
+            
             write_file(&final_output_path, file_data_ref)?;
+
+            println!("{} extracted successfully", &fmp.filename);
 
             Ok(())
         })

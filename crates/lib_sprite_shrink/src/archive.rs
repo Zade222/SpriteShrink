@@ -19,7 +19,7 @@ use dashmap::DashMap;
 use crate::lib_error_handling::LibError;
 
 use crate::lib_structs::{
-    FileHeader, FileManifestParent,
+    FileHeader, FileManifestParent, Progress
 };  
 
 use crate::parsing::{MAGIC_NUMBER, SUPPORTED_VERSION};
@@ -118,6 +118,13 @@ pub fn compress_with_dict(data_payload: &[u8], dict: &[u8], level: &i32) ->
 /// parallel, serializing all metadata, and combining everything into a
 /// single, contiguous byte vector.
 ///
+/// # Progress Reporting
+///
+/// This function accepts a callback closure to report its progress to the
+/// calling application. It will report on distinct stages of the process,
+/// such as dictionary creation and chunk compression, allowing for detailed
+/// user feedback (e.g., a progress bar).
+///
 /// # Arguments
 ///
 /// * `ser_file_manifest`: A reference to the file manifest data.
@@ -128,6 +135,8 @@ pub fn compress_with_dict(data_payload: &[u8], dict: &[u8], level: &i32) ->
 /// * `dictionary_size`: The target size for the compression dictionary.
 /// * `worker_threads`: The number of threads for parallel compression.
 /// * `opt_dict`: A bool to enable dictionary optimization.
+/// * `progress_callback`: A thread-safe closure that receives `Progress`
+///   updates.
 ///
 /// # Returns
 ///
@@ -135,7 +144,7 @@ pub fn compress_with_dict(data_payload: &[u8], dict: &[u8], level: &i32) ->
 /// - `Ok(Vec<u8>)` containing the complete binary data of the archive.
 /// - `Err(LibError)` if any step fails, such as dictionary training,
 ///   compression, or serialization.
-pub fn finalize_archive(
+pub fn finalize_archive<F>(
     ser_file_manifest: &[FileManifestParent],
     data_store: &HashMap<u64, Vec<u8>>,
     sorted_hashes: &[u64],
@@ -143,8 +152,12 @@ pub fn finalize_archive(
     compression_level: i32,
     dictionary_size: u64,
     worker_threads: usize,
-    opt_dict: bool
-) -> Result<Vec<u8>, LibError> {
+    opt_dict: bool,
+    progress_callback: &F
+) -> Result<Vec<u8>, LibError> 
+where
+    F: Fn(Progress) + Sync + Send,
+{
     //Sort to prepare data to be analyzed to build dictionary.
     let samples_for_dict: Vec<&[u8]> = sorted_hashes
         .iter()
@@ -154,8 +167,11 @@ pub fn finalize_archive(
     let dict_start_time = Instant::now();
 
     //Make dictionary from sorted data.
-    
     let mut _dictionary: Vec<u8> = Vec::new();
+
+    //Report progress before starting a dictionary generation
+    progress_callback(Progress::GeneratingDictionary);
+    
     if opt_dict{
         _dictionary = gen_zstd_opt_dict(
         samples_for_dict, 
@@ -171,6 +187,9 @@ pub fn finalize_archive(
 
     let dict_elapsed_time = dict_start_time.elapsed();
 
+    //Report progress after dictionary generation is done.
+    progress_callback(Progress::DictionaryDone);
+
     println!("The building dictionary took: {:?}", dict_elapsed_time);
     
     let task_pool = rayon::ThreadPoolBuilder::new()
@@ -183,6 +202,11 @@ pub fn finalize_archive(
     //let comp_start_time = Instant::now();
 
     let comp_result: Result<(), LibError> = task_pool.install(|| {
+        //Report that compression is starting
+        progress_callback(Progress::Compressing {
+            total_chunks: sorted_hashes.len() as u64 
+        });
+        
         sorted_hashes.par_iter().try_for_each(|hash| {
             if let Some(data) = data_store.get(hash){
                 let compressed_chunk = compress_with_dict(
@@ -192,6 +216,8 @@ pub fn finalize_archive(
                     .map_err(|e| LibError::CompressionError(e.to_string()))?;
 
                 compressed_dash.insert(*hash, compressed_chunk);
+
+                progress_callback(Progress::ChunkCompressed);
             }
             Ok(())
         })
@@ -213,6 +239,9 @@ pub fn finalize_archive(
     compressed_data store
     chunk_index
     dictionary*/
+
+    //Report that process is in the final stage
+    progress_callback(Progress::Finalizing);
 
     let config = bincode::config::standard();
 

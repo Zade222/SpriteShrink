@@ -8,14 +8,16 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use lib_sprite_shrink::{
-    FileManifestParent, 
+    FileManifestParent, Progress,
     create_file_manifest_and_chunks, finalize_archive, process_file_in_memory, 
     rebuild_and_verify_single_file, serialize_uncompressed_data, test_compression
 };
+use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 
 use crate::arg_handling::Args;
@@ -309,7 +311,43 @@ pub fn run_compression(
     longer needed.*/
     drop(chunk_index);
 
-    //let dictionary_size = args.dictionary.as_u64();
+    let progress_bar = Mutex::new(None);
+
+    //Define progress callback closure
+    let progress_callback = |progress| {
+        match progress {
+            Progress::GeneratingDictionary => {
+                println!("Generating compression dictionary...");
+            }
+            Progress::DictionaryDone => {
+                println!("Dictionary created.");
+            }
+            Progress::Compressing { total_chunks } => {
+                let new_bar = ProgressBar::new(total_chunks);
+                new_bar.set_style(ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] [{bar:40}] {pos}/{len} ({eta})")
+                    .unwrap()
+                    .progress_chars("#>-"));
+                new_bar.set_message("Compressing chunks...");
+                
+                //Lock the mutex and place the new bar inside the Option.
+                *progress_bar.lock().unwrap() = Some(new_bar);
+                
+            }
+            Progress::ChunkCompressed => {
+                //Verify if the progress bar exists, if yes increment it.
+                if let Some(bar) = progress_bar
+                .lock()
+                .unwrap()
+                .as_ref() {
+                    bar.inc(1);
+                }
+            }
+            Progress::Finalizing => {
+                println!("Finalizing archive...");
+            }
+        }
+    };
     
     /*Assembles the final archive from its constituent parts, structures it 
     according to the ssmc spec and returns the byte data ready to be written.*/
@@ -321,7 +359,9 @@ pub fn run_compression(
         level, 
         best_dictionary_size,
         _compute_threads,
-        args.optimize_dictionary)?;
+        args.optimize_dictionary,
+        &progress_callback
+    )?;
 
     println!("Total file size will be: {} bytes.", ssmc_data.len());
 
