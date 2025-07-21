@@ -8,7 +8,7 @@
 
 use std::path::{Path, PathBuf};
 use std::fs::{self, File};
-use std::io::{self, BufWriter, Read, Seek, SeekFrom, Write};
+use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 
 use lib_sprite_shrink::{FileData};
 
@@ -34,39 +34,6 @@ fn is_regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|m| m.file_type().is_file()) 
         .unwrap_or(false) 
-}
-
-/// Checks if a directory contains at least one file.
-///
-/// This function iterates through the immediate entries of a directory to
-/// determine if any of them are files. It does not recurse into
-/// subdirectories. Entries that cannot be processed due to I/O errors
-/// are skipped.
-///
-/// # Arguments
-///
-/// * `path`: A reference to a `Path` for the directory to check.
-///
-/// # Returns
-///
-/// An `io::Result<bool>` which is:
-/// - `Ok(true)` if the directory contains one or more files.
-/// - `Ok(false)` if the directory is empty or only contains subdirs.
-/// - `Err` if the path is not a directory or cannot be accessed.
-pub fn dir_contains_files(path: &Path) -> io::Result<bool> {
-    /*Read directory for a result. */
-    let has_files = std::fs::read_dir(path)?.any(|entry_result| {
-        //If found store DirEntry in entry.
-        if let Ok(entry) = entry_result {
-            /*If the target of DirEntry has a file type then return the 
-            filetype is a file.*/
-            if let Ok(file_type) = entry.file_type() {
-                return file_type.is_file();
-            }
-        }
-        false
-    });
-    Ok(has_files)
 }
 
 /// Sorts input paths into separate vectors of files and directories.

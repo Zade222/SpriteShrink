@@ -11,7 +11,6 @@ use bytesize::ByteSize;
 use clap::Parser;
 
 use crate::error_handling::CliError;
-use crate::storage_io::dir_contains_files;
 
 const CUSTOM_HELP_TEMPLATE: &str = "\
 {before-help}{name} {version}
@@ -33,7 +32,8 @@ pub struct Args {
     
     ///Path to single ROM file or directory of ROMs for input. 
     ///Can be specified more than once.
-    #[arg(short, long, help_heading = "Primary Options")]
+    #[arg(short, long, help_heading = "Primary Options", 
+    required = true)]
     pub input: Vec<PathBuf>,
 
     ///Path for the output archive or extracted files.
@@ -41,7 +41,8 @@ pub struct Args {
     pub output: Option<PathBuf>,
 
     ///Activates metadata retrieval mode, used in combination with -i.
-    #[arg(short, long, help_heading = "Primary Options")]
+    #[arg(short, long, help_heading = "Primary Options", 
+    conflicts_with = "extract")]
     pub metadata: bool,
 
     ///Specifies the index number(s) of the ROM(s) to be extracted,
@@ -102,7 +103,8 @@ pub struct Args {
 
     ///Forces low-memory mode by processing files sequentially and
     ///limiting worker threads to 4 for compression.
-    #[arg(long, help_heading = "Behavior and Output Control", default_value_t = false)]
+    #[arg(long, help_heading = "Behavior and Output Control", 
+    default_value_t = false)]
     pub low_memory: bool,
 
     ///Forces the system to overwrite the output file if it exists.
@@ -165,40 +167,6 @@ pub fn validate_args(args: &Args) -> Result<(), CliError> {
         _ => unreachable!(),
     }*/
 
-    /*The following check(s) are for Primary Operations */
-    
-    if args.metadata && args.extract.is_some() {
-        return Err(CliError::ConflictingFlagsError(
-            "Metadata and extraction modes cannot be used simultaneously."
-            .to_string()));
-    }
-
-    if args.input.is_empty() {
-        return Err(CliError::MissingFlag(
-            "At least one input path (-i) is required.".to_string()
-        ));
-    }
-
-    let has_files_to_process = args.input.iter().any(|path| {
-        if !path.exists() {
-            return true;
-        }
-        path.is_file() || (path.is_dir() && dir_contains_files(path).unwrap_or(false))
-    });
-
-    if !has_files_to_process && !args.metadata && args.extract.is_none() {
-         return Err(CliError::NoFilesError());
-    }
-
-    //Extraction Mode
-    if args.input.len() == 1{
-        if args.extract.is_none() && !args.metadata && !args.input[0].is_dir(){
-            return Err(CliError::MissingFlag(
-                "A ROM index selection (-r) is required for extraction.".to_string(),
-            ));
-        }
-    }   
-
     //Extraction Mode ROM Index Validation 
     if let Some(rom_range) = &args.extract {
         if args.input.len() > 1 {
@@ -211,9 +179,22 @@ pub fn validate_args(args: &Args) -> Result<(), CliError> {
                 "The ROM index range format is invalid. Use a comma-separated list or a range (e.g., 1,3,5-7).".to_string(),
             ));
         }
+        if let Some(output_path) = &args.output {
+            if !output_path.is_dir() && output_path.exists() {
+                return Err(CliError::InvalidPath(
+                    "The output path for extraction must be a directory."
+                        .to_string(),
+                ));
+            }
+        }
         if args.output.is_none() {
             return Err(CliError::MissingFlag(
                 "Output path (-o, --output) is required for extraction.".to_string(),
+            ));
+        }
+        if args.force {
+            return Err(CliError::ConflictingFlagsError(
+                "--force cannot be used with --extract".to_string(),
             ));
         }
     }
@@ -236,6 +217,16 @@ pub fn validate_args(args: &Args) -> Result<(), CliError> {
 
         if args.input.len() == 1 && args.input[0].is_file() {
             return Err(CliError::SingleFileError());
+        }
+    }
+
+    //Check for existence of input paths
+    for path in &args.input {
+        if !path.exists() {
+            return Err(CliError::InvalidPath(format!(
+                "Input path does not exist: {}",
+                path.display()
+            )));
         }
     }
 
