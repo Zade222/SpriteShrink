@@ -128,6 +128,38 @@ pub struct ProcessedFileData {
     pub file_data: Vec<u8>,
 }
 
+/// Represents the state of a long-running operation in the library.
+///
+/// This enum is used with a callback function to report the progress of
+/// time-consuming tasks, such as compression or dictionary creation. It
+/// allows the calling application to provide detailed feedback to the user.
+///
+/// # Variants
+///
+/// * `GeneratingDictionary` - Indicates that the compression dictionary
+///   generation process has started.
+/// * `DictionaryDone` - Signals that the dictionary has been successfully
+///   created.
+/// * `Compressing` - Reports that the data chunk compression phase has
+///   begun. It includes the total number of chunks to be processed.
+/// * `ChunkCompressed` - Sent after each individual data chunk is
+///   compressed. This is useful for incrementing a progress bar.
+/// * `Finalizing` - Indicates that the final archive assembly is in
+///   progress.
+#[derive(Debug, Clone)]
+pub enum Progress {
+    /// Dictionary generation has started.
+    GeneratingDictionary,
+    /// Dictionary generation is complete.
+    DictionaryDone,
+    /// Compression has started, reports total chunks to compress.
+    Compressing { total_chunks: u64 },
+    /// Reports that a single chunk has been compressed.
+    ChunkCompressed,
+    /// Finalizing the archive file.
+    Finalizing,
+}
+
 /// Contains metadata for a single chunk in a file's manifest.
 ///
 /// This struct stores essential information used to identify and place a
