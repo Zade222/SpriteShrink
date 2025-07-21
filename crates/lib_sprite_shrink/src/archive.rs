@@ -87,7 +87,7 @@ fn build_file_header(file_count: u32,
 /// A `Result` which is:
 /// - `Ok(Vec<u8>)` containing the compressed data as a byte vector.
 /// - `Err` if the compression process fails.
-fn compress_with_dict(data_payload: &[u8], dict: &[u8], level: &i32) -> 
+pub fn compress_with_dict(data_payload: &[u8], dict: &[u8], level: &i32) -> 
     Result<Vec<u8>, LibError>
 {
     //Create and initiate vector for storing compressed data bytes.

@@ -63,22 +63,29 @@ pub struct Args {
 
     ///Determines the window size for the hashing algorithm.
     ///(e.g., "256K", "4KB", "64KiB")
-    #[arg(short, long, help_heading = "Tuning Parameters", default_value_t = ByteSize::b(2*1024))]
-    pub window: ByteSize,
+    ///Recommended value is 2kb.
+    #[arg(short, long, help_heading = "Tuning Parameters")]
+    pub window: Option<ByteSize>,
 
     ///Determines the dictionary size for the compression algorithm.
     ///(e.g., "256K", "4KB", "64KiB")
-    #[arg(short, long, help_heading = "Tuning Parameters", default_value_t = ByteSize::b(16*1024))]
-    pub dictionary: ByteSize,
+    ///Recommended value is 16kb.
+    #[arg(short, long, help_heading = "Tuning Parameters")]
+    pub dictionary: Option<ByteSize>,
 
     ///Autotune both the window size and dictionary size. Will find the 
     /// reasonably optimal size for each. This uses a somewhat inefficient 
     /// algorithm and can take time but will lead to a smaller file size
     /// more easily. If vlaues for either the window or dictionary are 
     /// provided they will be used instead of autotuning.
-    #[arg(short, long, help_heading = "Tuning Parameters", 
+    #[arg(long, help_heading = "Tuning Parameters", 
     default_value_t = false)]
     pub auto_tune: bool,
+
+    ///Sets the maximum time in seconds for each autotune iteration.
+    ///If an iteration exceeds this time, the latest result is used.
+    #[arg(long, help_heading = "Tuning Parameters")]
+    pub autotune_timeout: Option<u64>,
 
     ///When finalizing the archive, optimize the dictionary for better compression.
     /// NOT recommended for large files as it can be very slow. 
