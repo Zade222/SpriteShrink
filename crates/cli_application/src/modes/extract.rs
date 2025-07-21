@@ -147,8 +147,10 @@ pub fn run_extraction(file_path: &PathBuf,
                 .collect();
             
             write_file(&final_output_path, file_data_ref)?;
-
-            println!("{} extracted successfully", &fmp.filename);
+            
+            if args.verbose{
+                println!("{} extracted successfully", &fmp.filename);
+            }
 
             Ok(())
         })

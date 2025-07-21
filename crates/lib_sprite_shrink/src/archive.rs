@@ -8,7 +8,6 @@
 
 use std::{collections::HashMap, io::Write};
 use std::mem;
-use std::time::Instant;
 
 use bincode;
 
@@ -163,8 +162,6 @@ where
         .iter()
         .filter_map(|hash| data_store.get(hash).map(|data| data.as_slice()))
         .collect();
-    
-    let dict_start_time = Instant::now();
 
     //Make dictionary from sorted data.
     let mut _dictionary: Vec<u8> = Vec::new();
@@ -185,12 +182,8 @@ where
         ).map_err(|e| LibError::CompressionError(e.to_string()))?;
     }
 
-    let dict_elapsed_time = dict_start_time.elapsed();
-
     //Report progress after dictionary generation is done.
     progress_callback(Progress::DictionaryDone);
-
-    println!("The building dictionary took: {:?}", dict_elapsed_time);
     
     let task_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(worker_threads)
@@ -198,8 +191,6 @@ where
         .map_err(|e| LibError::InternalLibError(format!("Failed to create thread pool: {}", e)))?;
 
     let compressed_dash: DashMap<u64, Vec<u8>> = DashMap::new();
-
-    //let comp_start_time = Instant::now();
 
     let comp_result: Result<(), LibError> = task_pool.install(|| {
         //Report that compression is starting
@@ -222,10 +213,6 @@ where
             Ok(())
         })
     });
-
-    //let elapsed_time = comp_start_time.elapsed();
-
-    //println!("The compression function took: {:?}", elapsed_time);
 
     //Check if any of the parallel operations failed.
     comp_result?;
