@@ -134,3 +134,8 @@ SpriteShrink is designed to be robust. It gracefully handles malformed inputs, e
 ## License
 
 This project is open-source and available under the [GPLv3 License](https://www.gnu.org/licenses/gpl-3.0.en.html). Please see the `LICENSE` file for more details.
+
+
+## Support and Contact
+
+If you have any questions, encounter issues, or would like to provide feedback, please open an issue on the [GitHub Issues page](https://github.com/your-username/sprite-shrink/issues).
