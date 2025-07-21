@@ -45,12 +45,14 @@ pub enum CliError {
     #[error("Too many files provided. Only one is required for flag. {0}")]
     MultiFileError(String),
 
+    #[error("File exists. {0}")]
+    FileExistsError(String),
+
     #[error("Directory not supported by provided flags. {0}")]
     DirError(String),
 
     #[error("Conflicting flags. {0}")]
     ConflictingFlagsError(String),
-
 
     #[error("An internal logic error occurred: {0}")]
     InternalError(String),

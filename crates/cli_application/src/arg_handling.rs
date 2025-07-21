@@ -167,6 +167,17 @@ pub fn validate_args(args: &Args) -> Result<(), CliError> {
         _ => unreachable!(),
     }*/
 
+    if !args.force && !args.metadata && args.extract.is_none() {
+        if let Some(output_path) = &args.output {
+            if output_path.exists() {
+                return Err(CliError::FileExistsError(format!(
+                    "Output file already exists: {}. Use --force to overwrite.",
+                    output_path.display()
+                )));
+            }
+        }
+    }
+
     //Extraction Mode ROM Index Validation 
     if let Some(rom_range) = &args.extract {
         if args.input.len() > 1 {
