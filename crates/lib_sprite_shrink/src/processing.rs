@@ -11,11 +11,12 @@ use std::ffi::c_void;
 
 use dashmap::DashMap;
 use fastcdc::v2020::{Chunk, FastCDC, Normalization};
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use sha2::{Digest,Sha512};
 use xxhash_rust::xxh3::xxh3_64_with_seed;
 use zstd_sys::{self, ZDICT_params_t};
 
-
+use crate::archive::compress_with_dict;
 use crate::lib_error_handling::LibError;
 use crate::lib_structs::{
     ChunkLocation, FileData, FileManifestParent, ProcessedFileData, 
@@ -327,4 +328,75 @@ pub fn gen_zstd_opt_dict(samples: Vec<&[u8]>,
 
     /*Return the dictionary buffer.*/
     Ok(dict_buffer)
+}
+
+/// Estimates the total compressed size of the data store.
+///
+/// This function simulates a full compression cycle to provide a size
+/// estimate for a given set of parameters. It first builds a temporary
+/// Zstandard dictionary from the provided data chunks. It then compresses
+/// all chunks in parallel using this dictionary.
+///
+/// The final returned size is the sum of the dictionary's size and the
+/// size of all compressed chunks. This is used during the auto-tuning
+/// process to evaluate different parameters without creating a full archive.
+///
+/// # Arguments
+///
+/// * `data_store`: A map of chunk hashes to their raw byte data.
+/// * `sorted_hashes`: A sorted slice of all unique chunk hashes to process.
+/// * `worker_count`: The number of threads to use for parallel compression.
+/// * `dictionary_size`: The target size for the temporary dictionary.
+///
+/// # Returns
+///
+/// A `Result` which is:
+/// - `Ok(usize)` containing the total estimated compressed size in bytes.
+/// - `Err(LibError)` if dictionary creation or compression fails.
+pub fn test_compression(
+    data_store: &HashMap<u64, Vec<u8>>,
+    sorted_hashes: &[u64],
+    worker_count: usize,
+    dictionary_size: usize,
+) -> Result<usize, LibError>{
+    let samples_for_dict: Vec<&[u8]> = sorted_hashes
+        .iter()
+        .filter_map(|hash| data_store.get(hash).map(|data| data.as_slice()))
+        .collect();
+
+    let dictionary = zstd::dict::from_samples(
+        &samples_for_dict,
+        dictionary_size, // dictionary size in bytes
+        ).map_err(|e| LibError::DictionaryError(e.to_string()))?;
+    
+    let task_pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(worker_count)
+        .build()
+        .map_err(|e| LibError::InternalLibError(format!("Failed to create thread pool: {}", e)))?; 
+
+    let compressed_dash: DashMap<u64, Vec<u8>> = DashMap::new();
+
+    let comp_result: Result<(), LibError> = task_pool.install(|| {
+        sorted_hashes.par_iter().try_for_each(|hash| {
+            if let Some(data) = data_store.get(hash){
+                let compressed_chunk = compress_with_dict(
+                    data.as_slice(), 
+                    &dictionary, 
+                    &7)
+                    .map_err(|e| LibError::CompressionError(e.to_string()))?;
+
+                compressed_dash.insert(*hash, compressed_chunk);
+            }
+            Ok(())
+        })
+    });
+
+    //Check if any of the parallel operations failed.
+    comp_result?;
+
+    let compressed_size:usize = compressed_dash.iter()
+        .map(|entry| entry.value().len()) //Get the length of each Vec
+        .sum(); //Add everything up.
+    
+    Ok((dictionary.len() as usize) + compressed_size)
 }
