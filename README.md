@@ -23,6 +23,18 @@ It also includes `lib_sprite_shrink`, a Rust library for seamless integration in
 
 ---
 
+## The .ssmc File Format
+
+SpriteShrink uses a custom archive format called **SpriteShrink Multi-Cart (`.ssmc`)**. This format is specifically designed for the efficient storage of file collections with a high degree of redundant data, such as ROM sets with multiple regional versions or revisions.
+
+By using content-defined chunking and deduplication, the `.ssmc` format stores each unique piece of data only once, leading to significant storage savings compared to traditional compression tools.
+
+A complete technical document detailing the binary layout, data structures, and design principles of the format is available for developers and enthusiasts.
+
+[**Read the full .ssmc File Specification**](./SSMC_File_Specification/SPECIFICATION.md)
+
+---
+
 ## How It Works
 
 The compression process follows a multi-stage pipeline to ensure maximum efficiency:
@@ -103,25 +115,25 @@ SpriteShrink is a command-line interface (CLI) tool. All interactions are done v
 
 Here's a quick reference for the main arguments:
 
-| Short Flag | Long Flag | Description | Default |
-| :--- | :--- | :--- | :--- |
-| `-i` | `--input` | Path to a file or directory for input. Can be specified multiple times. | Required |
-| `-o` | `--output` | Path for the output archive (compression) or directory (extraction). | Mode Dependent |
-| `-m` | `--metadata` | Activates metadata retrieval mode. Used with `-i` (input archive). | N/A |
-| `-e` | `--extract` | Specifies file indices to extract (e.g., `1,3,5-7`). Requires `-o` and `-i`. | N/A |
-| `-c` | `--compression` | Sets the compression algorithm. | `zstd` |
-| | `--compression-level` | Sets the numerical compression level for the chosen algorithm. | `19` |
-| `-w` | `--window` | Hashing algorithm window size (e.g., "2KB", "4KB"). Recommended: 2KB. | `2KB` |
-| `-d` | `--dictionary` | Compression algorithm dictionary size (e.g., "16KB", "32KB"). Recommended: 16KB. | `16KB` |
-| `-a` | `--auto-tune` | Autotune window and dictionary sizes for optimal size. Overrides manual settings. | `false` |
-| | `--autotune-timeout` | Sets the maximum time in seconds for each autotune iteration. | N/A |
-| | `--optimize-dictionary` | When finalizing the archive, optimize the dictionary for better compression. **Very slow**. | `false` |
-| `-t` | `--threads` | Sets max worker threads. Defaults to all available logical cores. | All cores |
-| | `--low-memory` | Forces low-memory mode (sequential I/O, 4 threads for compression). | `false` |
-| `-f` | `--force` | Overwrites the output file if it exists. | `false` |
-| `-v` | `--verbose` | Activates verbose output for detailed diagnostic information. | `false` |
-| `-q` | `--quiet` | Activates quiet mode, suppressing non-essential output. | `false` |
-| `-h` | `--help` | Prints comprehensive help information and exits. | N/A |
+| Short Flag | Long Flag             | Description                                                                              | Default       |
+| :---       | :---                  | :---                                                                                     | :---          |
+| `-i`       | `--input`             | Path to a file or directory for input. Can be specified multiple times.                  | Required      |
+| `-o`       | `--output`            | Path for the output archive (compression) or directory (extraction).                     | Mode Dependent|
+| `-m`       | `--metadata`          | Activates metadata retrieval mode. Used with `-i` (input archive).                       | N/A           |
+| `-e`       | `--extract`           | Specifies file indices to extract (e.g., `1,3,5-7`). Requires `-o` and `-i`.             | N/A           |
+| `-c`       | `--compression`       | Sets the compression algorithm.                                                          | `zstd`        |
+|            | `--compression-level` | Sets the numerical compression level for the chosen algorithm.                           | `19`          |
+| `-w`       | `--window`            | Hashing algorithm window size (e.g., "2KB", "4KB"). Recommended: 2KB.                    | `2KB`         |
+| `-d`       | `--dictionary`        | Compression algorithm dictionary size (e.g., "16KB", "32KB"). Recommended: 16KB.         | `16KB`        |
+| `-a`       | `--auto-tune`         | Autotune window and dictionary sizes for optimal size. Overrides manual settings.        | `false`       |
+|            | `--autotune-timeout`  | Sets the maximum time in seconds for each autotune iteration.                            | N/A           |
+|            | `--optimize-dictionary`| When finalizing the archive, optimize the dictionary for better compression. **Very slow**. | `false`       |
+| `-t`       | `--threads`           | Sets max worker threads. Defaults to all available logical cores.                        | All cores     |
+|            | `--low-memory`        | Forces low-memory mode (sequential I/O, 4 threads for compression).                      | `false`       |
+| `-f`       | `--force`             | Overwrites the output file if it exists.                                                 | `false`       |
+| `-v`       | `--verbose`           | Activates verbose output for detailed diagnostic information.                            | `false`       |
+| `-q`       | `--quiet`             | Activates quiet mode, suppressing non-essential output.                                  | `false`       |
+| `-h`       | `--help`              | Prints comprehensive help information and exits.                                         | N/A           |
 
 ---
 
@@ -133,9 +145,10 @@ SpriteShrink is designed to be robust. It gracefully handles malformed inputs, e
 
 ## License
 
-This project is open-source and available under the [GPLv3 License](https://www.gnu.org/licenses/gpl-3.0.en.html). Please see the `LICENSE` file for more details.
+This project is open-source and available under the [GPLv3 License](https://www.gnu.org/licenses/gpl-3.0.en.html). Please see the `LICENSE` file for more details [**here**](./LICENSE).
 
+The documentation for the `.ssmc` file format specification is licensed separately under the [Creative Commons Attribution 4.0 International License](https://creativecommons.org/licenses/by/4.0/) (CC-BY-4.0). The specification license can be found [**here**](./SSMC_File_Specification/LICENSE).
 
 ## Support and Contact
 
-If you have any questions, encounter issues, or would like to provide feedback, please open an issue on the [GitHub Issues page](https://github.com/your-username/sprite-shrink/issues).
+If you have any questions, encounter issues, or would like to provide feedback, please open an issue on the [GitHub Issues page](https://github.com/Zade222/SpriteShrink/issues).
