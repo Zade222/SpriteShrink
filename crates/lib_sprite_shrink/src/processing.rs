@@ -205,7 +205,7 @@ pub fn rebuild_and_verify_single_file(
             let end = start + location.length as usize;
             data_vec.extend_from_slice(&ser_data_store[start..end]);
         } else {
-            return Err(LibError::InternalLibError(format!(
+            return Err(LibError::VerificationError(format!(
                 "Verification failed: Missing chunk with hash {} for file '{}'",
                 scm.hash, fmp.filename
             )));
@@ -220,7 +220,7 @@ pub fn rebuild_and_verify_single_file(
         }
     } else {
         // This case would also indicate an internal inconsistency.
-        return Err(LibError::InternalLibError(format!(
+        return Err(LibError::VerificationError(format!(
             "Verification failed: Missing original hash for file '{}'",
             fmp.filename
         )));
@@ -372,7 +372,7 @@ pub fn test_compression(
     let task_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(worker_count)
         .build()
-        .map_err(|e| LibError::InternalLibError(format!("Failed to create thread pool: {}", e)))?; 
+        .map_err(|e| LibError::ThreadPoolError(format!("Failed to create thread pool: {}", e)))?; 
 
     let compressed_dash: DashMap<u64, Vec<u8>> = DashMap::new();
 
