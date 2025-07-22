@@ -8,7 +8,7 @@ pub struct FFISSAChunkMeta {
 }
 
 //FFI-safe equivalent of FileManifestParent
-//Note: We use raw pointers for strings and vectors.
+//Note: Uses raw pointers for strings and vectors.
 #[repr(C)]
 pub struct FFIFileManifestParent {
     pub filename: *const libc::c_char,
