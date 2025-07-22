@@ -1,6 +1,8 @@
 mod archive;
 pub use archive::ArchiveBuilder;
 
+mod ffi_structs;
+
 mod lib_error_handling;
 pub use lib_error_handling::LibError;
 
