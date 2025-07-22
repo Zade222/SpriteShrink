@@ -1,16 +1,125 @@
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::slice;
 
 use dashmap::DashMap;
+use fastcdc::v2020::Chunk;
 
 use crate::ffi::ffi_structs::{
-    FFIChunkIndexEntry, FFIDataStoreEntry, FFIVeriHashesEntry
+    FFIChunk, FFIChunkIndexEntry, FFIDataStoreEntry, FFIFileData, 
+    FFIFileManifestParent, FFIProcessedFileData, FFIVeriHashesEntry
 };
-use crate::ffi::{FFIFileManifestParent};
 use crate::lib_error_handling::LibError;
 use crate::lib_structs::{ChunkLocation, SSAChunkMeta};
-use crate::processing::{rebuild_and_verify_single_file, test_compression};
-use crate::FileManifestParent;
+use crate::processing::{
+    process_file_in_memory, rebuild_and_verify_single_file, test_compression};
+use crate::{FileData, FileManifestParent};
+
+/// Processes a single file from memory via an FFI-safe interface.
+///
+/// Takes file data from C, processes it, and returns a pointer to a struct
+/// containing the processed data. Returns a null pointer if the input file is
+/// empty or an error occurs during processing.
+///
+/// # Safety
+/// The caller MUST ensure that the `file_data` argument contains valid 
+/// pointers for the specified lengths and that the filename is a valid, 
+/// null-terminated C string. The pointer returned by this function is owned
+/// by the caller and MUST be freed by passing it to 
+/// `free_processed_file_data_ffi` to prevent memory leaks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn process_file_in_memory_ffi(
+    file_data: FFIFileData,
+    window_size: u64
+) -> *mut FFIProcessedFileData {
+    let native_file_data = unsafe{
+        FileData {
+            file_name: std::ffi::CStr::from_ptr(file_data.filename)
+                .to_string_lossy()
+                .into_owned(),
+            file_data: slice::from_raw_parts(
+                file_data.file_data, 
+                file_data.file_data_len
+            ).to_vec()
+        }
+    };
+
+    
+    let processed_data = match process_file_in_memory(
+        native_file_data, 
+        window_size){
+        Ok(Some(data)) => data,
+        _ => return std::ptr::null_mut()
+    };
+
+    /*Convert filename String to *mut c_char to be compatible with return 
+    struct.*/
+    let filename_cstring = CString::new(processed_data.file_name).unwrap();
+    let filename_len = filename_cstring.as_bytes().len();
+    let filename_ptr = filename_cstring.into_raw();
+        
+    /*Convert veri_hash [u8; 64] to *mut [u8; 64] to be compatible with return 
+    struct.*/
+    let veri_hash_ptr = Box::into_raw(Box::new(processed_data.veri_hash));
+
+    /*Convert file_data Vec<u8> to *mut u8 to be compatible with return 
+    struct.*/
+    let mut file_data_vec = processed_data.file_data;
+    let file_data_len = file_data_vec.len();
+    let file_data_ptr = file_data_vec.as_mut_ptr();
+    std::mem::forget(file_data_vec); //Give up ownership, no longer needed
+
+    /*Convert chunks Vec<Chunk> to *mut FFIChunk to be compatible with return
+    struct.*/
+    let mut chunks_vec: Vec<FFIChunk> = processed_data.chunks
+        .into_iter()
+        .map(|c: Chunk| FFIChunk {
+            hash: c.hash,
+            offset: c.offset,
+            length: c.length,
+        })
+        .collect();
+    let chunks_len = chunks_vec.len();
+    let chunks_ptr = chunks_vec.as_mut_ptr();
+    std::mem::forget(chunks_vec); //Give up ownership, no longer needed
+
+    //Prepare and return FFIProcessedFileData
+    let output = Box::new(FFIProcessedFileData {
+        filename: filename_ptr,
+        filename_len,
+        veri_hash: veri_hash_ptr,
+        chunks: chunks_ptr,
+        chunks_len,
+        file_data: file_data_ptr,
+        file_data_len,
+    });
+
+    Box::into_raw(output)
+}
+
+/// Frees the memory allocated by `process_file_in_memory_ffi`.
+///
+/// # Safety
+/// The caller MUST ensure that `ptr` is a valid pointer returned from
+/// `process_file_in_memory_ffi` and that it is not used after this call.
+/// This function should only be called once for any given pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_processed_file_data_ffi(ptr: *mut FFIProcessedFileData) {
+    if ptr.is_null() {
+        return;
+    }
+
+    /*Retake ownership of the main struct Box to deallocate it and retake 
+    ownership of each pointer within the struct to deallocate them*/
+    unsafe{
+        let output_box = Box::from_raw(ptr);
+
+        let _ = CString::from_raw(output_box.filename);
+        let _ = Box::from_raw(output_box.veri_hash);
+        let _ = Vec::from_raw_parts(output_box.chunks, output_box.chunks_len, output_box.chunks_len);
+        let _ = Vec::from_raw_parts(output_box.file_data, output_box.file_data_len, output_box.file_data_len);
+    }
+}
 
 /// Rebuilds a single file from chunks and verifies its integrity via an 
 /// FFI-safe interface.
@@ -44,7 +153,7 @@ use crate::FileManifestParent;
 /// hash for the file.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rebuild_and_verify_single_file_ffi(
-    ffi_fmp: *const FFIFileManifestParent,
+    file_manifest_parent: *const FFIFileManifestParent,
     ser_data_store_array_ptr: *const u8,
     ser_data_store_len: usize,
     chunk_index_array_ptr: *const FFIChunkIndexEntry,
@@ -53,7 +162,7 @@ pub unsafe extern "C" fn rebuild_and_verify_single_file_ffi(
     veri_hashes_len: usize
 ) -> i8 {
     //Immediately check for null pointers to fail early.
-    if ffi_fmp.is_null()
+    if file_manifest_parent.is_null()
         || ser_data_store_array_ptr.is_null()
         || chunk_index_array_ptr.is_null()
         || veri_hashes_array_ptr.is_null()
@@ -63,7 +172,7 @@ pub unsafe extern "C" fn rebuild_and_verify_single_file_ffi(
 
     let(fmp, ser_data_store, chunk_index, veri_hashes) = unsafe {
         //Dereference the main struct pointer once.
-        let ffi_fmp_ref = &*ffi_fmp;
+        let ffi_fmp_ref = &*file_manifest_parent;
         
         /*Prepare data_store, which is the second parameter of the original 
         rebuild_and_verify_single_file function, from C input.*/

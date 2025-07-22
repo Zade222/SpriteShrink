@@ -1,5 +1,18 @@
 use libc::c_char;
 
+//Note: Many of these structs use raw pointers for strings and vectors.
+
+//FFI-safe equivalent of SSAChunkMeta, derived from the Chunk struct in FastCDC
+#[derive(Clone, Copy)]
+pub struct FFIChunk{
+    /// The gear hash value as of the end of the chunk.
+    pub hash: u64,
+    /// Starting byte position within the source.
+    pub offset: usize,
+    /// Length of the chunk in bytes.
+    pub length: usize,
+}
+
 //FFI-safe equivalent of ChunkLocation
 #[repr(C)]
 #[derive(Clone)]
@@ -24,8 +37,15 @@ pub struct FFISSAChunkMeta {
     pub length: u32,
 }
 
+//FFI-safe equivalent of FileData
+#[repr(C)]
+pub struct FFIFileData {
+    pub filename: *const c_char,
+    pub file_data: *const u8,
+    pub file_data_len: usize
+}
+
 //FFI-safe equivalent of FileManifestParent
-//Note: Uses raw pointers for strings and vectors.
 #[repr(C)]
 pub struct FFIFileManifestParent {
     pub filename: *const c_char,
@@ -39,6 +59,16 @@ pub struct FFIDataStoreEntry {
     pub hash: u64,
     pub data: *const u8,
     pub data_len: usize,
+}
+
+pub struct FFIProcessedFileData {
+    pub filename: *mut c_char,
+    pub filename_len: usize,
+    pub veri_hash: *mut [u8; 64],
+    pub chunks: *mut FFIChunk,
+    pub chunks_len: usize,
+    pub file_data: *mut u8,
+    pub file_data_len: usize
 }
 
 //Holds all the output data from the serialize_uncompressed_data_ffi function.
