@@ -265,13 +265,6 @@ pub fn run_compression(
     /*If low memory is set limit reads to four workers else set to the user 
     specified argument or let Rayon decide (which is the amount of threads the
     host system supports) */
-    /*if args.low_memory {
-        compute_threads = 4;
-    } else {
-        /*0 lets Rayon decide the optimal number when thread parameter isn't 
-        used, otherwise set to thread parameter.*/
-        compute_threads = args.threads.unwrap_or(0) as usize;
-    };*/
 
     let _compute_threads = 
         if args.low_memory { 4 } 
