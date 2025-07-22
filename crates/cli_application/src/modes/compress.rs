@@ -410,8 +410,10 @@ pub fn run_compression(
     //Write ssmc archive to disk.
     write_final_archive(&final_output_path, &ssmc_data)?;
 
-    println!("Successfully created sprite-shrink multicart archive at: \
-        {:?}", final_output_path);
+    if !args.quiet {
+        println!("Successfully created sprite-shrink multicart archive at: \
+            {:?}", final_output_path);
+    }
 
     Ok(())
 }
