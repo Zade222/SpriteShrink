@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{PathBuf};
 
-use lib_sprite_shrink::{ChunkLocation, SSAChunkMeta};
+use sprite_shrink::{ChunkLocation, SSAChunkMeta};
 
 use crate::error_handling::CliError;
 use crate::storage_io::{read_file_data};

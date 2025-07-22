@@ -8,7 +8,7 @@
 
 use std::io;
 
-use lib_sprite_shrink::LibError;
+use sprite_shrink::LibError;
 use range_parser::RangeError;
 use thiserror::Error;
 

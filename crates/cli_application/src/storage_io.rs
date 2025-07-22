@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::fs::{self, File};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 
-use lib_sprite_shrink::{FileData};
+use sprite_shrink::{FileData};
 
 use crate::error_handling::CliError;
 

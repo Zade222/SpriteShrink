@@ -423,24 +423,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lib_sprite_shrink"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "bytemuck",
- "dashmap",
- "fastcdc",
- "rayon",
- "serde",
- "sha2",
- "thiserror 2.0.12",
- "xxhash-rust",
- "zerocopy",
- "zstd",
- "zstd-sys",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.174"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -682,16 +664,34 @@ name = "sprite_shrink"
 version = "0.1.0"
 dependencies = [
  "bincode",
+ "bytemuck",
+ "dashmap",
+ "fastcdc",
+ "rayon",
+ "serde",
+ "sha2",
+ "thiserror 2.0.12",
+ "xxhash-rust",
+ "zerocopy",
+ "zstd",
+ "zstd-sys",
+]
+
+[[package]]
+name = "sprite_shrink_application"
+version = "0.1.0"
+dependencies = [
+ "bincode",
  "bytesize",
  "clap",
  "dashmap",
  "fastcdc",
  "indicatif",
- "lib_sprite_shrink",
  "range-parser",
  "rayon",
  "serde",
  "sha2",
+ "sprite_shrink",
  "thiserror 2.0.12",
  "xxhash-rust",
  "zerocopy",

@@ -1,10 +1,10 @@
 [package]
-name = "sprite_shrink"
+name = "sprite_shrink_application"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-lib_sprite_shrink = {path = "../lib_sprite_shrink"}
+sprite_shrink = {path = "../lib_sprite_shrink"}
 
 clap = { version = "4.5.40", features = ["derive"] }
 thiserror = "2.0.12"

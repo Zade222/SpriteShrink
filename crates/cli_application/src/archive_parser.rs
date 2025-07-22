@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::mem;
 use std::path::{PathBuf};
 
-use lib_sprite_shrink::{
+use sprite_shrink::{
     ChunkLocation, FileHeader, FileManifestParent, parse_file_chunk_index, 
     parse_file_header, parse_file_metadata,
 };

@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
-use lib_sprite_shrink::{
+use sprite_shrink::{
     FileManifestParent, Progress,
     create_file_manifest_and_chunks, finalize_archive, process_file_in_memory, 
     rebuild_and_verify_single_file, serialize_uncompressed_data, test_compression
