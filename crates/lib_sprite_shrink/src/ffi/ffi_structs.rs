@@ -1,3 +1,20 @@
+use libc::c_char;
+
+//FFI-safe equivalent of ChunkLocation
+#[repr(C)]
+#[derive(Clone)]
+pub struct FFIChunkLocation {
+    pub offset: u64,
+    pub length: u32,
+}
+
+//FFI-safe representation for a single entry in the ChunkIndex HashMap
+#[repr(C)]
+pub struct FFIChunkIndexEntry {
+    pub hash: u64,
+    pub data: FFIChunkLocation,
+}
+
 //FFI-safe equivalent of SSAChunkMeta
 #[repr(C)]
 #[derive(Clone)]
@@ -11,7 +28,7 @@ pub struct FFISSAChunkMeta {
 //Note: Uses raw pointers for strings and vectors.
 #[repr(C)]
 pub struct FFIFileManifestParent {
-    pub filename: *const libc::c_char,
+    pub filename: *const c_char,
     pub chunk_count: u64,
     pub chunk_metadata: *const FFISSAChunkMeta,
 }
@@ -35,4 +52,11 @@ pub struct FFISerializedOutput {
     pub ser_chunk_index_len: usize,
     pub sorted_hashes_ptr: *const u64,
     pub sorted_hashes_len: usize,
+}
+
+//FFI-safe representation for a single entry in the ChunkIndex HashMap
+#[repr(C)]
+pub struct FFIVeriHashesEntry {
+    pub key: *const c_char,
+    pub value: *const [u8; 64],
 }
