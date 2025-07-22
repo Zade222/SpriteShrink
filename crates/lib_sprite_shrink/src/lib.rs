@@ -1,5 +1,5 @@
 mod archive;
-pub use archive::finalize_archive;
+pub use archive::ArchiveBuilder;
 
 mod lib_error_handling;
 pub use lib_error_handling::LibError;

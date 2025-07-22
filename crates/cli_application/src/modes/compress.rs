@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use sprite_shrink::{
-    FileManifestParent, Progress,
-    create_file_manifest_and_chunks, finalize_archive, process_file_in_memory, 
+    ArchiveBuilder, FileManifestParent, Progress,
+    create_file_manifest_and_chunks, process_file_in_memory, 
     rebuild_and_verify_single_file, serialize_uncompressed_data, test_compression
 };
 use indicatif::{ProgressBar, ProgressStyle};
@@ -377,17 +377,16 @@ pub fn run_compression(
 
     /*Assembles the final archive from its constituent parts, structures it 
     according to the ssmc spec and returns the byte data ready to be written.*/
-    let ssmc_data = finalize_archive(
-            &ser_file_manifest, 
-            &_data_store, 
-            &sorted_hashes, 
-            file_paths.len() as u32, 
-            level, 
-            best_dictionary_size,
-            _compute_threads,
-            args.optimize_dictionary,
-            &progress_callback
-        )?;
+    let ssmc_data = ArchiveBuilder::new(
+        &ser_file_manifest, 
+        &_data_store, 
+        &sorted_hashes, 
+        file_paths.len() as u32)
+        .compression_level(level)
+        .dictionary_size(best_dictionary_size)
+        .optimize_dictionary(args.optimize_dictionary)
+        .with_progress(&progress_callback)
+        .build()?;
 
     if !args.quiet {
         if let Some(bar) = progress_bar.lock().unwrap().take() {
