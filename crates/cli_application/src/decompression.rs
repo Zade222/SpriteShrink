@@ -6,10 +6,9 @@
 //! file extraction process.
 
 use std::collections::HashMap;
-use std::io::Read;
 use std::path::{PathBuf};
 
-use sprite_shrink::{ChunkLocation, SSAChunkMeta};
+use sprite_shrink::{ChunkLocation, SSAChunkMeta, decompress_chunk};
 
 use crate::error_handling::CliError;
 use crate::storage_io::{read_file_data};
@@ -65,16 +64,11 @@ pub fn get_decomp_chunk(file_path: &PathBuf,
         &file_path, 
         &absolute_offset, 
         &chunk_length)?;
-    
-    /*Create a zstd decoder with the prepared dictionary from the file
-    archive.*/
-    let mut decoder = zstd::stream::Decoder::with_dictionary(
-        comp_chunk_data.as_slice(), 
-        &dictionary)?;
 
-    // Decompress the data into a new vector.
-    let mut decompressed_chunk_data = Vec::new();
-    decoder.read_to_end(&mut decompressed_chunk_data)?;
+    let decompressed_chunk_data = decompress_chunk(
+        comp_chunk_data, 
+        dictionary
+    )?;
 
     /*Return decompressed chunk data. */
     Ok(decompressed_chunk_data)
