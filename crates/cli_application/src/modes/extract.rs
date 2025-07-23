@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 use rayon::prelude::*;
 
+use sprite_shrink::{decompress_chunk};
 
 use crate::archive_parser::{
     get_chunk_index, get_file_header, get_file_manifest, 
@@ -129,14 +130,34 @@ pub fn run_extraction(file_path: &PathBuf,
             let file_data: Vec<Vec<u8>> = fmp
                 .chunk_metadata
                 .par_iter()
-                .map(|scm| get_decomp_chunk(
-                    file_path, 
-                    &chunk_index, 
-                    &dictionary, 
-                    scm, 
-                    header.data_offset
-                ))
-                .collect::<Result<_, _>>()?;
+                .map(|scm| -> Result<Vec<u8>, CliError> {
+                    /*Get the chunk location from the chunk index.*/
+                        let chunk_location = chunk_index.get(&scm.hash).ok_or_else(|| {
+                            CliError::InternalError(format!(
+                                "Decompression failed: Missing chunk with hash {}",
+                                scm.hash
+                            ))
+                        })?;
+                        /*Store the chunk data offset within the compressed 
+                        store, from the ChunkLocation struct.*/
+                        let absolute_offset = 
+                            chunk_location.offset + 
+                            header.data_offset;
+                        
+                        let comp_chunk_data = read_file_data(
+                        &file_path, 
+                        &absolute_offset, 
+                        &chunk_length
+                        )?;
+
+                        let decompressed_chunk_data = decompress_chunk(
+                            &comp_chunk_data, 
+                            &dictionary
+                        )?;
+
+                        Ok(decompressed_chunk_data)
+                
+                }).collect::<Result<_,_ >>()?;
 
             let final_output_path = out_dir.join(
                 &fmp.filename);
