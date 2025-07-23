@@ -7,6 +7,7 @@
 //! verifying files from their chunks.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::ffi::c_void;
 
 use dashmap::DashMap;
@@ -399,4 +400,21 @@ pub fn test_compression(
         .sum(); //Add everything up.
     
     Ok((dictionary.len() as usize) + compressed_size)
+}
+
+pub fn decompress_chunk(
+    comp_chunk_data: Vec<u8>,
+    dictionary: &[u8]
+) -> Result<Vec<u8>, LibError> {
+    /*Create a zstd decoder with the prepared dictionary from the file
+    archive.*/
+    let mut decoder = zstd::stream::Decoder::with_dictionary(
+        comp_chunk_data.as_slice(), 
+        &dictionary)?;
+
+    //Decompress the data into a new vector.
+    let mut decompressed_chunk_data = Vec::new();
+    decoder.read_to_end(&mut decompressed_chunk_data)?;
+
+    Ok(decompressed_chunk_data)
 }
