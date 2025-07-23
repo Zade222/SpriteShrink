@@ -4,16 +4,165 @@ use std::slice;
 
 use dashmap::DashMap;
 use fastcdc::v2020::Chunk;
+use libc::c_char;
 
 use crate::ffi::ffi_structs::{
-    FFIChunk, FFIChunkIndexEntry, FFIDataStoreEntry, FFIFileData, 
-    FFIFileManifestParent, FFIProcessedFileData, FFIVeriHashesEntry
+    FFIChunk, FFIChunkIndexEntry, FFIFileManifestChunks, FFIDataStoreEntry, 
+    FFIFileData, FFIFileManifestParent, FFIHashedChunkData, FFIProcessedFileData, 
+    FFIVeriHashesEntry
 };
+use crate::ffi::FFISSAChunkMeta;
 use crate::lib_error_handling::LibError;
 use crate::lib_structs::{ChunkLocation, SSAChunkMeta};
 use crate::processing::{
-    process_file_in_memory, rebuild_and_verify_single_file, test_compression};
+    create_file_manifest_and_chunks, process_file_in_memory, 
+    rebuild_and_verify_single_file, test_compression};
 use crate::{FileData, FileManifestParent};
+
+/// Creates a file manifest and a list of hashed data chunks via an FFI-safe 
+/// interface.
+///
+/// # Safety
+/// The caller MUST ensure that all pointer arguments are valid for their 
+/// specified lengths
+/// and that `file_name_ptr` is a valid, null-terminated C string.
+/// The pointer returned by this function is owned by the caller and MUST be 
+/// freed by passing it to `free_file_manifest_and_chunks_ffi` to prevent 
+/// memory leaks.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi(
+    file_name_ptr: *const c_char,
+    file_data_array_ptr: *const u8,
+    file_data_len: usize,
+    chunks_array_ptr: *const FFIChunk,
+    chunks_len: usize,
+) -> *mut FFIFileManifestChunks{
+    let (file_name, file_data, chunks) = unsafe {
+        /*Prepare file_name, which is the first parameter of the original 
+        create_file_manifest_and_chunks function, from C input.*/
+        let file_name = std::ffi::CStr::from_ptr(file_name_ptr)
+            .to_string_lossy()
+            .into_owned();
+
+        /*Prepare file_data, which is the second parameter of the original 
+        create_file_manifest_and_chunks function, from C input.*/
+        let file_data = slice::from_raw_parts(
+            file_data_array_ptr, 
+            file_data_len
+        );
+
+        /*Prepare chunks, which is the third parameter of the original 
+        create_file_manifest_and_chunks function, from C input.*/
+        let chunks = {
+            let chunk_slice = 
+                slice::from_raw_parts(
+                    chunks_array_ptr, 
+                    chunks_len
+                );
+            
+            chunk_slice.iter()
+                .map(|chunk| {
+                    Chunk {
+                        hash: chunk.hash,
+                        offset: chunk.offset,
+                        length: chunk.length,
+                    }
+                })
+                .collect::<Vec<_>>()
+        };
+
+        (file_name, file_data, chunks)
+    };
+
+    /*Call original function to process data.*/
+    let (fmp, hashed_chunks) = 
+    create_file_manifest_and_chunks(&file_name, file_data, &chunks);
+
+    let mut ffi_chunk_metadata: Vec<FFISSAChunkMeta> = fmp.chunk_metadata.into_iter()
+        .map(|meta| FFISSAChunkMeta {
+            hash: meta.hash,
+            offset: meta.offset,
+            length: meta.length
+        }).collect();
+    let fmp_meta_ptr = ffi_chunk_metadata.as_mut_ptr();
+    std::mem::forget(ffi_chunk_metadata);
+
+    let ffi_fmp = FFIFileManifestParent {
+        filename: CString::new(fmp.filename).unwrap().into_raw(),
+        chunk_count: fmp.chunk_count,
+        chunk_metadata: fmp_meta_ptr,
+    };
+
+    //Convert vector of hashed chunks
+    let mut ffi_hashed_chunks: Vec<FFIHashedChunkData> = hashed_chunks.into_iter()
+        .map(|(hash, mut data_vec)| {
+            let data_ptr = data_vec.as_mut_ptr();
+            let data_len = data_vec.len();
+            std::mem::forget(data_vec); //Give up ownership of the inner Vec<u8>
+            FFIHashedChunkData {
+                hash,
+                chunk_data: data_ptr,
+                chunk_data_len: data_len
+            }
+        }).collect();
+    
+    let hashed_chunks_ptr = ffi_hashed_chunks.as_mut_ptr();
+    let hashed_chunks_len = ffi_hashed_chunks.len();
+    std::mem::forget(ffi_hashed_chunks);
+
+    /*Prepare return data in struct.*/
+    let output = Box::new(FFIFileManifestChunks{
+        fmp: ffi_fmp,
+        hashed_chunks: hashed_chunks_ptr,
+        hashed_chunks_len,
+    });
+
+    Box::into_raw(output)
+}
+
+/// Frees the memory allocated by `create_file_manifest_and_chunks_ffi`.
+///
+/// # Safety
+/// The caller MUST ensure that `ptr` is a valid pointer returned from
+/// `create_file_manifest_and_chunks_ffi` and that it is not used after this 
+/// call. This function should only be called once for any given pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_file_manifest_and_chunks_ffi(ptr: *mut FFIFileManifestChunks) {
+    if ptr.is_null() {
+        return;
+    }
+
+    unsafe {
+        //Retake ownership of the main struct to deallocate it at the end.
+        let output_box = Box::from_raw(ptr);
+
+        //Deallocate contents of the FFIFileManifestParent
+        let _ = CString::from_raw(output_box.fmp.filename);
+
+        //Reclaim and drop the Vec for the chunk metadata.
+        let _ = Vec::from_raw_parts(
+            output_box.fmp.chunk_metadata as *mut FFISSAChunkMeta,
+            output_box.fmp.chunk_count as usize,
+            output_box.fmp.chunk_count as usize,
+        );
+
+        //Deallocate the array of FFIHashedChunk and their inner data
+        let hashed_chunks_vec = Vec::from_raw_parts(
+            output_box.hashed_chunks,
+            output_box.hashed_chunks_len,
+            output_box.hashed_chunks_len,
+        );
+
+        /*Iterate through the chunks to deallocate the inner Vec<u8> data for
+        each.*/
+        for chunk in hashed_chunks_vec {
+            let _ = Vec::from_raw_parts(
+                chunk.chunk_data, 
+                chunk.chunk_data_len, 
+                chunk.chunk_data_len);
+        }
+    }
+}
 
 /// Processes a single file from memory via an FFI-safe interface.
 ///
@@ -104,7 +253,8 @@ pub unsafe extern "C" fn process_file_in_memory_ffi(
 /// `process_file_in_memory_ffi` and that it is not used after this call.
 /// This function should only be called once for any given pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_processed_file_data_ffi(ptr: *mut FFIProcessedFileData) {
+pub unsafe extern "C" fn free_processed_file_data_ffi(
+    ptr: *mut FFIProcessedFileData) {
     if ptr.is_null() {
         return;
     }
@@ -198,7 +348,7 @@ pub unsafe extern "C" fn rebuild_and_verify_single_file_ffi(
             chunk_metadata: vec_chunk_metadata
         };
         
-        /*Prepare data_store, which is the second parameter of the original 
+        /*Prepare ser_data_store, which is the second parameter of the original 
         rebuild_and_verify_single_file function, from C input.*/
         let ser_data_store = slice::from_raw_parts(
             ser_data_store_array_ptr, 

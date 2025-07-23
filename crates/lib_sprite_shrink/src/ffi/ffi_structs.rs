@@ -28,6 +28,21 @@ pub struct FFIChunkIndexEntry {
     pub data: FFIChunkLocation,
 }
 
+//Holds all the output data from the create_file_manifest_and_chunks_ffi function.
+#[repr(C)]
+pub struct FFIFileManifestChunks {
+    pub fmp: FFIFileManifestParent,
+    pub hashed_chunks: *mut FFIHashedChunkData,
+    pub hashed_chunks_len: usize,
+}
+
+#[repr(C)]
+pub struct FFIHashedChunkData {
+    pub hash: u64,
+    pub chunk_data: *mut u8,
+    pub chunk_data_len: usize,
+}
+
 //FFI-safe equivalent of SSAChunkMeta
 #[repr(C)]
 #[derive(Clone)]
@@ -48,7 +63,7 @@ pub struct FFIFileData {
 //FFI-safe equivalent of FileManifestParent
 #[repr(C)]
 pub struct FFIFileManifestParent {
-    pub filename: *const c_char,
+    pub filename: *mut c_char,
     pub chunk_count: u64,
     pub chunk_metadata: *const FFISSAChunkMeta,
 }
