@@ -15,7 +15,6 @@ use crate::archive_parser::{
     get_chunk_index, get_file_header, get_file_manifest, 
 };
 use crate::arg_handling::Args;
-use crate::decompression::{get_decomp_chunk};
 use crate::error_handling::CliError;
 use crate::storage_io::{
     read_file_data, write_file
