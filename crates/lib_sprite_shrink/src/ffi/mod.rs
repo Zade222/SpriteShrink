@@ -1,3 +1,6 @@
+pub mod archive_ffi;
+pub use archive_ffi::*;
+
 pub mod ffi_structs;
 pub use ffi_structs::*;
 

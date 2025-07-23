@@ -8,12 +8,17 @@
 
 use std::{collections::HashMap, io::Write};
 use std::mem;
+use std::os::raw::c_void;
 
 use bincode;
 
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use zerocopy::IntoBytes;
 use dashmap::DashMap;
+
+use crate::ffi::ffi_structs::{
+    CUserData, FFIProgress, FFIProgressType
+};
 
 use crate::lib_error_handling::LibError;
 
@@ -27,11 +32,17 @@ use crate::processing::gen_zstd_opt_dict;
 
 use crate::serialization::{serialize_compressed_store};
 
-pub struct ArchiveBuilder<'a, F> {
+unsafe impl Send for CUserData {}
+unsafe impl Sync for CUserData {}
+
+//C style progress callback function pointer
+type CProgressCallback = extern "C" fn(FFIProgress, *mut c_void);
+
+pub struct ArchiveBuilder<'cb, F> {
     //Required parameters
-    ser_file_manifest: &'a [FileManifestParent],
-    data_store: &'a HashMap<u64, Vec<u8>>,
-    sorted_hashes: &'a [u64],
+    ser_file_manifest: Vec<FileManifestParent>,
+    data_store: HashMap<u64, Vec<u8>>,
+    sorted_hashes: Vec<u64>,
     file_count: u32,
 
     //Optional parameters, will be set with default values.
@@ -39,7 +50,8 @@ pub struct ArchiveBuilder<'a, F> {
     dictionary_size: u64,
     worker_threads: usize,
     opt_dict: bool,
-    progress_callback: Option<&'a F>,
+    progress_callback: Option<&'cb F>,
+    c_progress_callback: Option<(CProgressCallback, CUserData)>,
 }
 
 /// Constructs the file header for a new archive.
@@ -123,14 +135,14 @@ pub fn compress_with_dict(data_payload: &[u8], dict: &[u8], level: &i32) ->
     Ok(compressed_data)
 }
 
-impl<'a, F> ArchiveBuilder<'a, F>
+impl<'cb, F> ArchiveBuilder<'cb, F>
 where
     F: Fn(Progress) + Sync + Send,
 {
     pub fn new(
-        ser_file_manifest: &'a [FileManifestParent],
-        data_store: &'a HashMap<u64, Vec<u8>>,
-        sorted_hashes: &'a [u64],
+        ser_file_manifest: Vec<FileManifestParent>,
+        data_store: HashMap<u64, Vec<u8>>,
+        sorted_hashes: Vec<u64>,
         file_count: u32
     ) -> Self {
         Self {
@@ -144,6 +156,7 @@ where
             worker_threads: 0, //Let Rayon decide
             opt_dict: false,
             progress_callback: None,
+            c_progress_callback: None,
         }
     }
 
@@ -152,7 +165,7 @@ where
     /// Sets the Zstandard compression level.
     ///
     /// The default value is `19`.
-    pub fn compression_level(mut self, level: i32) -> Self {
+    pub fn compression_level(&mut self, level: i32) -> &mut Self {
         self.compression_level = level;
         self
     }
@@ -160,7 +173,7 @@ where
     /// Sets the target size for the compression dictionary in bytes.
     ///
     /// The default value is `16384` (16 KiB).
-    pub fn dictionary_size(mut self, size: u64) -> Self {
+    pub fn dictionary_size(&mut self, size: u64) -> &mut Self {
         self.dictionary_size = size;
         self
     }
@@ -169,15 +182,25 @@ where
     ///
     /// This can improve compression but is significantly slower.
     /// The default is `false`.
-    pub fn optimize_dictionary(mut self, optimize: bool) -> Self {
+    pub fn optimize_dictionary(&mut self, optimize: bool) -> &mut Self {
         self.opt_dict = optimize;
         self
     }
 
     /// Sets a callback function for progress reporting.
-    pub fn with_progress(mut self, callback: &'a F) -> Self {
+    pub fn with_progress(mut self, callback: &'cb F) -> Self {
         self.progress_callback = Some(callback);
         self
+    }
+
+    /// Sets a callback function for progress reporting when called via C.
+    pub fn with_c_progress(
+            &mut self, 
+            callback: CProgressCallback, 
+            user_data: *mut c_void
+        ) -> &mut Self {
+            self.c_progress_callback = Some((callback, CUserData(user_data)));
+            self
     }
 
     /// Consumes the builder and returns the final archive as a byte vector.
@@ -207,8 +230,20 @@ where
         let mut _dictionary: Vec<u8> = Vec::new();
 
         //Report progress before starting a dictionary generation
-        if let Some(callback) = self.progress_callback {
+        if let Some(callback) = self.progress_callback.as_ref() {
             callback(Progress::GeneratingDictionary);
+        }
+
+        //Same for the C version.
+        if let Some((
+                callback, 
+                user_data_wrapper
+            )) = self.c_progress_callback {
+                let ffi_progress = FFIProgress {
+                    ty: FFIProgressType::GeneratingDictionary,
+                    total_chunks: 0,
+                };
+                callback(ffi_progress, user_data_wrapper.0);
         }
         
         if self.opt_dict{
@@ -225,8 +260,20 @@ where
         }
 
         //Report progress after dictionary generation is done.
-        if let Some(callback) = self.progress_callback {
+        if let Some(callback) = self.progress_callback.as_ref() {
             callback(Progress::DictionaryDone);
+        }
+
+        //Same for the C version.
+        if let Some((
+                callback, 
+                user_data_wrapper
+            )) = self.c_progress_callback {
+                let ffi_progress = FFIProgress{
+                    ty: FFIProgressType::DictionaryDone,
+                    total_chunks: 0,
+                };
+            callback(ffi_progress, user_data_wrapper.0);
         }
         
         let task_pool = rayon::ThreadPoolBuilder::new()
@@ -238,10 +285,21 @@ where
 
         let comp_result: Result<(), LibError> = task_pool.install(|| {
             //Report that compression is starting
-            if let Some(callback) = self.progress_callback {    
+            if let Some(callback) = self.progress_callback.as_ref() {    
                 callback(Progress::Compressing {
                     total_chunks: self.sorted_hashes.len() as u64 
                 });
+            }
+
+            if let Some((
+                callback, 
+                user_data_wrapper
+            )) = self.c_progress_callback {
+                let ffi_progress = FFIProgress{
+                    ty: FFIProgressType::Compressing,
+                    total_chunks: self.sorted_hashes.len() as u64
+                };
+                callback(ffi_progress, user_data_wrapper.0);
             }
             
             self.sorted_hashes.par_iter().try_for_each(|hash| {
@@ -254,8 +312,21 @@ where
 
                     compressed_dash.insert(*hash, compressed_chunk);
 
-                    if let Some(callback) = self.progress_callback {
+                    if let Some(callback) = self.progress_callback.as_ref() {
                         callback(Progress::ChunkCompressed);
+                    }
+
+                    if let Some((
+                        callback, 
+                        user_data_wrapper
+                    )) = self.c_progress_callback {
+                        let ffi_progress = FFIProgress{
+                            ty: FFIProgressType::ChunkCompressed,
+                            total_chunks: 0,
+                        };
+                        callback(
+                            ffi_progress, 
+                            user_data_wrapper.0);
                     }
                 }
                 Ok(())
@@ -266,7 +337,7 @@ where
         comp_result?;
 
         let (compressed_data_store, chunk_index) = 
-            serialize_compressed_store(&compressed_dash, self.sorted_hashes);
+            serialize_compressed_store(&compressed_dash, &self.sorted_hashes);
 
         drop(compressed_dash);
 
@@ -276,9 +347,21 @@ where
         dictionary*/
 
         //Report that process is in the final stage
-        if let Some(callback) = self.progress_callback {
+        if let Some(callback) = self.progress_callback.as_ref() {
             callback(Progress::Finalizing);
         }
+
+        //Same for the C version.
+        if let Some((
+                callback, 
+                user_data_wrapper
+            )) = self.c_progress_callback {
+                let ffi_progress = FFIProgress{
+                    ty: FFIProgressType::Finalizing,
+                    total_chunks: 0,
+                };
+                callback(ffi_progress, user_data_wrapper.0);
+            }
 
         let config = bincode::config::standard();
 

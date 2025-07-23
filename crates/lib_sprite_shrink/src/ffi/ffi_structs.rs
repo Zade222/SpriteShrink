@@ -1,6 +1,18 @@
+use std::os::raw::c_void;
+
 use libc::c_char;
 
 //Note: Many of these structs use raw pointers for strings and vectors.
+
+#[derive(Clone, Copy)]
+pub struct CUserData(pub *mut c_void);
+
+///Holds the final output data from a successful archive build.
+#[repr(C)]
+pub struct FFIArchiveData {
+    pub data: *mut u8,
+    pub data_len: usize,
+}
 
 //FFI-safe equivalent of SSAChunkMeta, derived from the Chunk struct in FastCDC
 #[derive(Clone, Copy)]
@@ -84,6 +96,24 @@ pub struct FFIProcessedFileData {
     pub chunks_len: usize,
     pub file_data: *mut u8,
     pub file_data_len: usize
+}
+
+/// FFI safe enum to represent the type of progress update.
+#[repr(C)]
+pub enum FFIProgressType {
+    GeneratingDictionary,
+    DictionaryDone,
+    Compressing,
+    ChunkCompressed,
+    Finalizing,
+}
+
+/// FFI-safe struct to pass progress information across the C boundary.
+#[repr(C)]
+pub struct FFIProgress {
+    pub ty: FFIProgressType,
+    /// Only valid when `ty` is `Compressing`.
+    pub total_chunks: u64,
 }
 
 //Holds all the output data from the serialize_uncompressed_data_ffi function.

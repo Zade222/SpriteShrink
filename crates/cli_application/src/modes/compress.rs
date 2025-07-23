@@ -370,15 +370,19 @@ pub fn run_compression(
 
     /*Assembles the final archive from its constituent parts, structures it 
     according to the ssmc spec and returns the byte data ready to be written.*/
-    let ssmc_data = ArchiveBuilder::new(
-        &ser_file_manifest, 
-        &_data_store, 
-        &sorted_hashes, 
-        file_paths.len() as u32)
-        .compression_level(level)
+    let mut builder = ArchiveBuilder::new(
+        ser_file_manifest, 
+        _data_store, 
+        sorted_hashes, 
+        file_paths.len() as u32
+    );
+
+    builder.compression_level(level)
         .dictionary_size(best_dictionary_size)
-        .optimize_dictionary(args.optimize_dictionary)
-        .with_progress(&progress_callback)
+        .optimize_dictionary(args.optimize_dictionary);
+        
+        
+    let ssmc_data=builder.with_progress(&progress_callback)
         .build()?;
 
     if !args.quiet {

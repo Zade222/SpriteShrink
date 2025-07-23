@@ -119,9 +119,24 @@ pub unsafe extern "C" fn free_serialized_output(ptr: *mut FFISerializedOutput) {
     unsafe {
         let output = Box::from_raw(ptr);
         // Deallocate all the vectors whose memory was passed to C
-        let _ = Vec::from_raw_parts(output.ser_manifest_ptr as *mut u8, output.ser_manifest_len, output.ser_manifest_len);
-        let _ = Vec::from_raw_parts(output.ser_data_store_ptr as *mut u8, output.ser_data_store_len, output.ser_data_store_len);
-        let _ = Vec::from_raw_parts(output.ser_chunk_index_ptr as *mut u8, output.ser_chunk_index_len, output.ser_chunk_index_len);
-        let _ = Vec::from_raw_parts(output.sorted_hashes_ptr as *mut u64, output.sorted_hashes_len, output.sorted_hashes_len);
+        let _ = Vec::from_raw_parts(
+            output.ser_manifest_ptr as *mut u8, 
+            output.ser_manifest_len, 
+            output.ser_manifest_len
+        );
+        let _ = Vec::from_raw_parts(
+            output.ser_data_store_ptr as *mut u8, 
+            output.ser_data_store_len, 
+            output.ser_data_store_len
+        );
+        let _ = Vec::from_raw_parts(
+            output.ser_chunk_index_ptr as *mut u8, 
+            output.ser_chunk_index_len, 
+            output.ser_chunk_index_len);
+        let _ = Vec::from_raw_parts(
+            output.sorted_hashes_ptr as *mut u64, 
+            output.sorted_hashes_len, 
+            output.sorted_hashes_len
+        );
     }
 }
