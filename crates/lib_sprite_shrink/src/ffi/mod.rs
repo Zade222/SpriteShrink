@@ -4,6 +4,9 @@ pub use archive_ffi::*;
 pub mod ffi_structs;
 pub use ffi_structs::*;
 
+pub mod parsing_ffi;
+pub use parsing_ffi::*;
+
 pub mod processing_ffi;
 pub use processing_ffi::*;
 
