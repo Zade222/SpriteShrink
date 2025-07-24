@@ -88,6 +88,13 @@ pub struct FFIDataStoreEntry {
     pub data_len: usize,
 }
 
+//FFI-safe representation for the return data for parse_file_metadata_ffi
+#[repr(C)]
+pub struct FFIParsedManifestArray {
+    pub manifests: *mut FFIFileManifestParent,
+    pub manifests_len: usize
+}
+
 pub struct FFIProcessedFileData {
     pub filename: *mut c_char,
     pub filename_len: usize,
