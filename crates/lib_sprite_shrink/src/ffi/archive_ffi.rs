@@ -1,5 +1,12 @@
+//! FFI layer for the archive building process.
+//!
+//! This module provides a C-compatible interface for creating, configuring,
+//! and building sprite-shrink archives. It handles the conversion between
+//! Rust and C data types, ensuring memory safety across the FFI boundary.
+
 use std::collections::HashMap;
 use std::os::raw::{c_void};
+use std::ptr;
 use std::slice;
 
 use crate::archive::{ArchiveBuilder};
@@ -15,8 +22,10 @@ type BuilderHandle = *mut ArchiveBuilder<'static, fn(Progress)>;
 /// Creates a new ArchiveBuilder and returns an opaque pointer to it.
 ///
 /// # Safety
-/// All pointer arguments must be valid. The returned pointer must be freed 
-/// with `archive_builder_free` or consumed by `archive_builder_build`.
+/// All pointer arguments must be valid and point to initialized data for their
+/// specified lengths. The returned pointer must be freed with 
+/// `archive_builder_free` or consumed by `archive_builder_build` to prevent
+/// memory leaks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_new(
     manifest_array_ptr: *const FFIFileManifestParent,
@@ -27,57 +36,63 @@ pub unsafe extern "C" fn archive_builder_new(
     sorted_hashes_len: usize,
     file_count: u32,
 ) -> BuilderHandle {
+    //Fail early on null pointers to prevent dereferencing invalid memory.
+    if manifest_array_ptr.is_null() 
+        || data_store_array_ptr.is_null() 
+        || sorted_hashes_array_ptr.is_null() {
+        return ptr::null_mut();
+    }
+    
     let (ser_file_manifest, 
         data_store, 
         sorted_hashes
     ) = unsafe {
-        /*Prepare ser_file_manifest, which is the first parameter of the original 
-        ArchiveBuilder function, from C input.*/
-        let ffi_ser_man_slice = slice::from_raw_parts(
+        /*Prepare ser_file_manifest, which is the first parameter of the 
+        original ArchiveBuilder function, from C input.*/
+        let ser_file_manifest = slice::from_raw_parts(
             manifest_array_ptr, 
             manifest_len
-        );
+        )
+        .iter()
+        .map(|fmp| {
+            let file_name = std::ffi::CStr::from_ptr(fmp.filename)
+                .to_string_lossy()
+                .into_owned();
 
-        let ser_file_manifest = ffi_ser_man_slice
-            .iter()
-            .map(|fmp| {
-                let file_name = std::ffi::CStr::from_ptr(fmp.filename)
-                    .to_string_lossy()
-                    .into_owned();
-
-                let meta_slice = slice::from_raw_parts(
-                    fmp.chunk_metadata, 
-                    fmp.chunk_count as usize
-                );
-
-                let chunk_metadata = meta_slice
-                    .iter()
-                    .map(|meta|{
-                        SSAChunkMeta{
-                            hash: meta.hash,
-                            offset: meta.offset,
-                            length: meta.length,
-                        }
-                    }).collect::<Vec<_>>();
-                
-                FileManifestParent {
-                    filename: file_name,
-                    chunk_count: fmp.chunk_count,
-                    chunk_metadata,
-                }
-            }).collect::<Vec<_>>();
+            let chunk_metadata = slice::from_raw_parts(
+                fmp.chunk_metadata, 
+                fmp.chunk_count as usize
+            )
+                .iter()
+                .map(|meta|{
+                    SSAChunkMeta{
+                        hash: meta.hash,
+                        offset: meta.offset,
+                        length: meta.length,
+                    }
+                }).collect::<Vec<_>>();
+            
+            FileManifestParent {
+                filename: file_name,
+                chunk_count: fmp.chunk_count,
+                chunk_metadata,
+            }
+        }).collect::<Vec<_>>();
 
         /*Prepare data_store, which is the second parameter of the original 
         ArchiveBuilder function, from C input.*/
-        let ffi_data_store = slice::from_raw_parts(
+        //Reconstruct the data_store HashMap via the following.
+        let data_store: HashMap<u64, Vec<u8>> = slice::from_raw_parts(
             data_store_array_ptr, 
             data_store_len
-        );
-
-        //Reconstruct the data_store HashMap via the following.
-        let data_store: HashMap<u64, Vec<u8>> = ffi_data_store.iter().map(|entry| {
-            let data_slice = std::slice::from_raw_parts(entry.data, entry.data_len);
-            (entry.hash, data_slice.to_vec())
+        )
+            .iter()
+            .map(|entry| {
+                let data_slice = std::slice::from_raw_parts(
+                    entry.data, 
+                    entry.data_len
+                );
+                (entry.hash, data_slice.to_vec())
         }).collect();
 
         /*Prepare sorted_hashes, which is the third parameter of the original 
@@ -101,6 +116,10 @@ pub unsafe extern "C" fn archive_builder_new(
 }
 
 /// Sets the compression level on the ArchiveBuilder.
+///
+/// # Safety
+/// The `builder_handle` must be a valid pointer returned from 
+/// `archive_builder_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_compression_level(
     builder_handle: BuilderHandle, level: i32
@@ -116,8 +135,14 @@ pub unsafe extern "C" fn archive_builder_set_compression_level(
 }
 
 /// Sets the dictionary size on the ArchiveBuilder.
+///
+/// # Safety
+/// The `builder_handle` must be a valid pointer returned from .
+/// `archive_builder_new`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn archive_builder_set_dictionary_size(builder_handle: BuilderHandle, size: u64) {
+pub unsafe extern "C" fn archive_builder_set_dictionary_size(
+    builder_handle: BuilderHandle, size: u64) 
+{
     unsafe {
         if !builder_handle.is_null() {
             if let Some(
@@ -130,6 +155,11 @@ pub unsafe extern "C" fn archive_builder_set_dictionary_size(builder_handle: Bui
 }
 
 /// Sets the progress callback for the ArchiveBuilder.
+///
+/// # Safety
+/// The `builder_handle` must be a valid pointer returned from 
+/// `archive_builder_new`. The `callback` function pointer must be valid for 
+/// the lifetime of the builder.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_c_progress(
     builder_handle: BuilderHandle,
@@ -148,12 +178,13 @@ pub unsafe extern "C" fn archive_builder_set_c_progress(
 }
 
 /// Consumes the builder, builds the archive, and returns the data.
-/// Returns a null pointer on failure.
+///
+/// On failure, this function returns a null pointer.
 ///
 /// # Safety
 /// The `builder_handle` must be a valid pointer from `archive_builder_new`.
-/// This function consumes the builder, and `builder_handle` is invalid after this call.
-/// The returned pointer must be freed with `archive_data_free`.
+/// This function consumes the builder, so `builder_handle` is invalid after 
+/// this call. The returned pointer must be freed with `archive_data_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_build(
     builder_handle: BuilderHandle
@@ -184,6 +215,10 @@ pub unsafe extern "C" fn archive_builder_build(
 }
 
 /// Frees the ArchiveBuilder if the build is never run.
+///
+/// # Safety
+/// The `builder_handle` must be a valid pointer from `archive_builder_new` that
+/// has not been passed to `archive_builder_build`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_free(builder_handle: BuilderHandle) {
     unsafe{
@@ -194,12 +229,22 @@ pub unsafe extern "C" fn archive_builder_free(builder_handle: BuilderHandle) {
 }
 
 /// Frees the data returned by a successful build.
+///
+/// # Safety
+/// The `archive_data_ptr` must be a valid pointer from 
+/// `archive_builder_build`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn archive_data_free(archive_data_ptr: *mut FFIArchiveData) {
+pub unsafe extern "C" fn archive_data_free(
+    archive_data_ptr: *mut FFIArchiveData) 
+{
     unsafe{
         if !archive_data_ptr.is_null() {
             let archive_box = Box::from_raw(archive_data_ptr);
-            let _ = Vec::from_raw_parts(archive_box.data, archive_box.data_len, archive_box.data_len);
+            let _ = Vec::from_raw_parts(
+                archive_box.data, 
+                archive_box.data_len, 
+                archive_box.data_len
+            );
         }
     }
 }
