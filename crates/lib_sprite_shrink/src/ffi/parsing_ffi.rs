@@ -1,3 +1,8 @@
+//! FFI-safe parsing functions for sprite-shrink archives.
+//!
+//! This module exposes Rust's parsing logic to C callers, handling the
+//! conversion of data types and memory management across the FFI boundary.
+
 use std::ffi::CString;
 use std::ptr;
 use std::slice;
@@ -36,8 +41,6 @@ pub unsafe extern "C" fn parse_file_chunk_index_ffi(
 
     match parse_file_chunk_index(chunk_index_data){
         Ok(index_map) => {
-            
-
             let mut entries: Vec<FFIChunkIndexEntry> = index_map
                 .into_iter()
                 .map(|(hash, location)| FFIChunkIndexEntry {
@@ -112,6 +115,10 @@ pub unsafe extern "C" fn parse_file_header_ffi(
     header_data_array_ptr: *const u8,
     header_data_len: usize
 ) -> *mut FileHeader {
+    if header_data_array_ptr.is_null() {
+        return ptr::null_mut();
+    }
+    
     /*Prepare header_data, which is the only parameter of the original 
     parse_file_header function, from C input.*/
     let header_data = unsafe {slice::from_raw_parts(
@@ -163,6 +170,10 @@ pub unsafe extern "C" fn parse_file_metadata_ffi(
     manifest_data_array_ptr: *const u8,
     manifest_data_len: usize
 ) -> *mut FFIParsedManifestArray {
+    if manifest_data_array_ptr.is_null() {
+        return ptr::null_mut();
+    }
+    
     let manifest_data = unsafe {
         slice::from_raw_parts(
             manifest_data_array_ptr, 
@@ -196,9 +207,11 @@ pub unsafe extern "C" fn parse_file_metadata_ffi(
 
             FFIFileManifestParent {
                 //Convert filename String to a C string
-                filename: CString::new(fmp.filename).unwrap_or_default().into_raw(),
-                chunk_count: fmp.chunk_count,
-                chunk_metadata: chunk_meta_ptr,
+                filename: CString::new(fmp.filename)
+                .unwrap_or_default()
+                .into_raw(),
+                    chunk_count: fmp.chunk_count,
+                    chunk_metadata: chunk_meta_ptr,
             }
         })
         .collect();
@@ -223,7 +236,9 @@ pub unsafe extern "C" fn parse_file_metadata_ffi(
 /// The `ptr` must be a non-null pointer returned from a successful call
 /// to `parse_file_metadata_ffi`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_parsed_manifest_ffi(ptr: *mut FFIParsedManifestArray) {
+pub unsafe extern "C" fn free_parsed_manifest_ffi(
+    ptr: *mut FFIParsedManifestArray
+) {
     if ptr.is_null() {
         return;
     }
