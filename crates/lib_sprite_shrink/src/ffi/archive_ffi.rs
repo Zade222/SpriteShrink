@@ -123,6 +123,27 @@ pub unsafe extern "C" fn archive_builder_new(
     FFIStatus::Ok
 }
 
+/// Sets the numerical compression code on the ArchiveBuilder.
+///
+/// # Safety
+/// The `builder_handle` must be a valid, non-null pointer from 
+/// `archive_builder_new`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn archive_builder_set_compression_algorithm(
+    builder_handle: BuilderHandle, 
+    code: u16
+) -> FFIStatus {
+    unsafe {
+        if let Some(builder) = 
+            builder_handle.as_mut() {
+                builder.compression_algorithm(code);
+                FFIStatus::Ok
+        } else {
+            FFIStatus::NullArgument
+        }
+    }
+}
+
 /// Sets the compression level on the ArchiveBuilder.
 ///
 /// # Safety
