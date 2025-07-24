@@ -102,8 +102,13 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi(
     let fmp_meta_ptr = ffi_chunk_metadata.as_mut_ptr();
     std::mem::forget(ffi_chunk_metadata);
 
+    let c_filename = match CString::new(fmp.filename) {
+        Ok(s) => s.into_raw(),
+        Err(_) => return FFIStatus::InvalidString,
+    };
+
     let ffi_fmp = FFIFileManifestParent {
-        filename: CString::new(fmp.filename).unwrap().into_raw(),
+        filename: c_filename,
         chunk_metadata: fmp_meta_ptr,
         chunk_metadata_len: fmp.chunk_count as usize,
     };
