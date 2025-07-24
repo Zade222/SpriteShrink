@@ -22,4 +22,7 @@ pub enum FFIStatus {
     UnsupportedVersion = -3,
     ManifestDecodeError = -4,
     InternalError = -5,
+    DictionaryError = -6,
+    CompressionError = -7,
+    ThreadPoolError = -8
 }

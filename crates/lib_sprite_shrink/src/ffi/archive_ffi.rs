@@ -6,11 +6,12 @@
 
 use std::collections::HashMap;
 use std::os::raw::{c_void};
-use std::ptr;
 use std::slice;
 
 use crate::archive::{ArchiveBuilder};
+use crate::lib_error_handling::LibError;
 use crate::lib_structs::{Progress};
+use crate::ffi::FFIStatus;
 use crate::ffi::ffi_structs::{
     FFIArchiveData, FFIFileManifestParent, FFIDataStoreEntry, FFIProgress
 };
@@ -19,13 +20,14 @@ use crate::{FileManifestParent, SSAChunkMeta};
 //Type alias for clarity in other functions
 type BuilderHandle = *mut ArchiveBuilder<'static, fn(Progress)>;
 
-/// Creates a new ArchiveBuilder and returns an opaque pointer to it.
+/// Creates a new ArchiveBuilder and returns it via an out-parameter.
 ///
 /// # Safety
-/// All pointer arguments must be valid and point to initialized data for their
-/// specified lengths. The returned pointer must be freed with 
-/// `archive_builder_free` or consumed by `archive_builder_build` to prevent
-/// memory leaks.
+/// - All input pointers must be valid and non-null.
+/// - `out_builder` must be a valid pointer to a `BuilderHandle`.
+/// - On success, the pointer written to `out_builder` is owned by the caller
+///   and MUST be freed with `archive_builder_free` or consumed by 
+/// `archive_builder_build`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_new(
     manifest_array_ptr: *const FFIFileManifestParent,
@@ -35,12 +37,15 @@ pub unsafe extern "C" fn archive_builder_new(
     sorted_hashes_array_ptr: *const u64,
     sorted_hashes_len: usize,
     file_count: u32,
-) -> BuilderHandle {
+    out_ptr: *mut BuilderHandle,
+) -> FFIStatus {
     //Fail early on null pointers to prevent dereferencing invalid memory.
-    if manifest_array_ptr.is_null() 
-        || data_store_array_ptr.is_null() 
-        || sorted_hashes_array_ptr.is_null() {
-        return ptr::null_mut();
+    if manifest_array_ptr.is_null()
+        || data_store_array_ptr.is_null()
+        || sorted_hashes_array_ptr.is_null()
+        || out_ptr.is_null()
+    {
+        return FFIStatus::NullArgument;
     }
     
     let (ser_file_manifest, 
@@ -112,44 +117,50 @@ pub unsafe extern "C" fn archive_builder_new(
         file_count,
     );
 
-    Box::into_raw(Box::new(builder))
+    unsafe {
+        *out_ptr = Box::into_raw(Box::new(builder));
+    };
+    FFIStatus::Ok
 }
 
 /// Sets the compression level on the ArchiveBuilder.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid pointer returned from 
+/// The `builder_handle` must be a valid, non-null pointer from 
 /// `archive_builder_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_compression_level(
-    builder_handle: BuilderHandle, level: i32
-) {
+    builder_handle: BuilderHandle, 
+    level: i32
+) -> FFIStatus {
     unsafe {
-        if let Some(
-            builder
-        ) = (builder_handle).as_mut() {
-            builder.compression_level(level);
+        if let Some(builder) = 
+            builder_handle.as_mut() {
+                builder.compression_level(level);
+                FFIStatus::Ok
+        } else {
+            FFIStatus::NullArgument
         }
-    };
-    
+    }
 }
 
 /// Sets the dictionary size on the ArchiveBuilder.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid pointer returned from .
+/// The `builder_handle` must be a valid, non-null pointer from 
 /// `archive_builder_new`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_dictionary_size(
-    builder_handle: BuilderHandle, size: u64) 
-{
+    builder_handle: BuilderHandle, 
+    size: u64
+) -> FFIStatus {
     unsafe {
-        if !builder_handle.is_null() {
-            if let Some(
-                builder
-            ) = (builder_handle).as_mut() {
+        if let Some(builder) = 
+            builder_handle.as_mut() {
                 builder.dictionary_size(size);
-            }
+                FFIStatus::Ok
+        } else {
+            FFIStatus::NullArgument
         }
     }
 }
@@ -165,32 +176,36 @@ pub unsafe extern "C" fn archive_builder_set_c_progress(
     builder_handle: BuilderHandle,
     callback: extern "C" fn(FFIProgress, *mut c_void),
     user_data: *mut c_void,
-) {
+) -> FFIStatus {
     unsafe {    
-        if !builder_handle.is_null() {
-            if let Some(
-                builder
-            ) = (builder_handle).as_mut() {
-                builder.with_c_progress(callback, user_data);
-            }
+        if let Some(builder) = 
+        builder_handle.as_mut() {
+            builder.with_c_progress(callback, user_data);
+            FFIStatus::Ok
+        } else {
+            FFIStatus::NullArgument
         }
     }
 }
 
-/// Consumes the builder, builds the archive, and returns the data.
-///
-/// On failure, this function returns a null pointer.
+/// Consumes the builder, builds the archive, and returns the data via an 
+/// out-parameter.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid pointer from `archive_builder_new`.
-/// This function consumes the builder, so `builder_handle` is invalid after 
-/// this call. The returned pointer must be freed with `archive_data_free`.
+/// - `builder_handle` must be a valid pointer from `archive_builder_new`.
+/// - `out_data` must be a valid pointer to an `*mut FFIArchiveData`.
+/// - This function consumes the builder; `builder_handle` is invalid after 
+/// this call.
+/// - The pointer returned via `out_data` must be freed with 
+/// `archive_data_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_build(
-    builder_handle: BuilderHandle
-) -> *mut FFIArchiveData {
-    if builder_handle.is_null() {
-        return std::ptr::null_mut();
+    builder_handle: BuilderHandle,
+    out_ptr: *mut *mut FFIArchiveData,
+) -> FFIStatus {
+    if builder_handle.is_null() 
+        || out_ptr.is_null() {
+        return FFIStatus::NullArgument;
     }
     
     // Retake ownership of the builder from the raw pointer
@@ -208,9 +223,17 @@ pub unsafe extern "C" fn archive_builder_build(
                 data: data_ptr,
                 data_len,
             });
-            Box::into_raw(output)
+            unsafe {
+                *out_ptr = Box::into_raw(output);
+            }
+            FFIStatus::Ok
         }
-        Err(_) => std::ptr::null_mut(),
+        Err(e) => match e {
+            LibError::DictionaryError(_) => FFIStatus::DictionaryError,
+            LibError::CompressionError(_) => FFIStatus::CompressionError,
+            LibError::ThreadPoolError(_) => FFIStatus::ThreadPoolError,
+            _ => FFIStatus::InternalError,
+        },
     }
 }
 
