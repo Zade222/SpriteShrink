@@ -95,8 +95,8 @@ pub unsafe extern "C" fn free_parsed_chunk_index_ffi(
         let array_struct = Box::from_raw(ptr);
 
         /*Reconstruct the Vec from its raw parts. This allows Rust's memory
-       manager to take ownership and correctly deallocate the underlying
-       array of entries when this new Vec goes out of scope.*/
+        manager to take ownership and correctly deallocate the underlying
+        array of entries when this new Vec goes out of scope.*/
         let _ = Vec::from_raw_parts(
             array_struct.entries,
             array_struct.entries_len,
