@@ -1,15 +1,16 @@
 mod archive;
-pub use archive::ArchiveBuilder;
+pub use archive::{
+    ArchiveBuilder, decompress_chunk
+};
 
 pub mod ffi;
 
 mod lib_error_handling;
 pub use lib_error_handling::LibError;
 
-
 mod processing;
 pub use processing::{
-    create_file_manifest_and_chunks, decompress_chunk, process_file_in_memory,
+    create_file_manifest_and_chunks, process_file_in_memory,
     rebuild_and_verify_single_file, test_compression};
 
 mod parsing;

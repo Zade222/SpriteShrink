@@ -7,6 +7,7 @@
 //! archive into a single byte vector ready for storage.
 
 use std::{collections::HashMap, io::Write};
+use std::io::Read;
 use std::mem;
 use std::os::raw::c_void;
 
@@ -394,4 +395,21 @@ where
 
         Ok(final_data)
     }
+}
+
+pub fn decompress_chunk(
+    comp_chunk_data: &[u8],
+    dictionary: &[u8]
+) -> Result<Vec<u8>, LibError> {
+    /*Create a zstd decoder with the prepared dictionary from the file
+    archive.*/
+    let mut decoder = zstd::stream::Decoder::with_dictionary(
+        comp_chunk_data, 
+        &dictionary)?;
+
+    //Decompress the data into a new vector.
+    let mut decompressed_chunk_data = Vec::new();
+    decoder.read_to_end(&mut decompressed_chunk_data)?;
+
+    Ok(decompressed_chunk_data)
 }
