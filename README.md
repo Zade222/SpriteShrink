@@ -121,13 +121,13 @@ Here's a quick reference for the main arguments:
 | `-o`       | `--output`            | Path for the output archive (compression) or directory (extraction).                     | Mode Dependent|
 | `-m`       | `--metadata`          | Activates metadata retrieval mode. Used with `-i` (input archive).                       | N/A           |
 | `-e`       | `--extract`           | Specifies file indices to extract (e.g., `1,3,5-7`). Requires `-o` and `-i`.             | N/A           |
-| `-c`       | `--compression`       | Sets the compression algorithm.                                                          | `zstd`        |
+| `-c`       | `--compression`       | Sets the compression algorithm. (Currently only uses zstd no matter what is specified)   | `zstd`        |
 |            | `--compression-level` | Sets the numerical compression level for the chosen algorithm.                           | `19`          |
 | `-w`       | `--window`            | Hashing algorithm window size (e.g., "2KB", "4KB"). Recommended: 2KB.                    | `2KB`         |
 | `-d`       | `--dictionary`        | Compression algorithm dictionary size (e.g., "16KB", "32KB"). Recommended: 16KB.         | `16KB`        |
 | `-a`       | `--auto-tune`         | Autotune window and dictionary sizes for optimal size. Overrides manual settings.        | `false`       |
 |            | `--autotune-timeout`  | Sets the maximum time in seconds for each autotune iteration.                            | N/A           |
-|            | `--optimize-dictionary`| When finalizing the archive, optimize the dictionary for better compression. **Very slow**. | `false`       |
+|            | `--optimize-dictionary`| When finalizing the archive, optimize the dictionary for better compression. Can be **Very slow** depending on dictionary size. | `false`       |
 | `-t`       | `--threads`           | Sets max worker threads. Defaults to all available logical cores.                        | All cores     |
 |            | `--low-memory`        | Forces low-memory mode (sequential I/O, 4 threads for compression).                      | `false`       |
 | `-f`       | `--force`             | Overwrites the output file if it exists.                                                 | `false`       |
