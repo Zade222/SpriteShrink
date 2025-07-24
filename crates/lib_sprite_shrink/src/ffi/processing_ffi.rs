@@ -1,3 +1,9 @@
+//! FFI-safe processing functions for sprite-shrink archives.
+//!
+//! This module exposes the core data processing logic (chunking, hashing,
+//! verification) to C callers with robust error handling and memory 
+//! management.
+
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::slice;
@@ -6,6 +12,7 @@ use dashmap::DashMap;
 use fastcdc::v2020::Chunk;
 use libc::c_char;
 
+use crate::ffi::FFIStatus;
 use crate::ffi::ffi_structs::{
     FFIChunk, FFIChunkIndexEntry, FFIFileManifestChunks, FFIDataStoreEntry, 
     FFIFileData, FFIFileManifestParent, FFIHashedChunkData, FFIProcessedFileData, 
@@ -26,9 +33,10 @@ use crate::{FileData, FileManifestParent};
 /// The caller MUST ensure that all pointer arguments are valid for their 
 /// specified lengths
 /// and that `file_name_ptr` is a valid, null-terminated C string.
-/// The pointer returned by this function is owned by the caller and MUST be 
-/// freed by passing it to `free_file_manifest_and_chunks_ffi` to prevent 
-/// memory leaks.
+/// - `out_ptr` must be a valid, non-null pointer to a 
+/// `*mut FFIFileManifestChunks`.
+/// - On success, the pointer written to `out_ptr` is owned by the caller and
+///   MUST be freed by passing it to `free_file_manifest_and_chunks_ffi`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi(
     file_name_ptr: *const c_char,
@@ -36,7 +44,14 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi(
     file_data_len: usize,
     chunks_array_ptr: *const FFIChunk,
     chunks_len: usize,
-) -> *mut FFIFileManifestChunks{
+    out_ptr: *mut *mut FFIFileManifestChunks
+) -> FFIStatus {
+    if file_name_ptr.is_null() 
+        || chunks_array_ptr.is_null() 
+        || out_ptr.is_null() {
+        return FFIStatus::NullArgument;
+    }
+
     let (file_name, file_data, chunks) = unsafe {
         /*Prepare file_name, which is the first parameter of the original 
         create_file_manifest_and_chunks function, from C input.*/
@@ -117,7 +132,10 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi(
         hashed_chunks_len,
     });
 
-    Box::into_raw(output)
+    unsafe {
+        *out_ptr = Box::into_raw(output);
+    };
+    FFIStatus::Ok
 }
 
 /// Frees the memory allocated by `create_file_manifest_and_chunks_ffi`.
@@ -166,21 +184,26 @@ pub unsafe extern "C" fn free_file_manifest_and_chunks_ffi(ptr: *mut FFIFileMani
 
 /// Processes a single file from memory via an FFI-safe interface.
 ///
-/// Takes file data from C, processes it, and returns a pointer to a struct
-/// containing the processed data. Returns a null pointer if the input file is
-/// empty or an error occurs during processing.
+/// On success, returns `FFIStatus::Ok` and populates `out_ptr`.
 ///
 /// # Safety
-/// The caller MUST ensure that the `file_data` argument contains valid 
-/// pointers for the specified lengths and that the filename is a valid, 
-/// null-terminated C string. The pointer returned by this function is owned
-/// by the caller and MUST be freed by passing it to 
-/// `free_processed_file_data_ffi` to prevent memory leaks.
+/// - `file_data` must be valid for reads. Its pointers must not be null.
+/// - `out_ptr` must be a valid, non-null pointer to a 
+/// `*mut FFIProcessedFileData`.
+/// - On success, the pointer written to `out_ptr` is owned by the caller and
+///   MUST be freed by passing it to `free_processed_file_data_ffi`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn process_file_in_memory_ffi(
     file_data: FFIFileData,
-    window_size: u64
-) -> *mut FFIProcessedFileData {
+    window_size: u64,
+    out_ptr: *mut *mut FFIProcessedFileData,
+) -> FFIStatus {
+    if file_data.filename.is_null() 
+        || file_data.file_data.is_null() 
+        || out_ptr.is_null() {
+        return FFIStatus::NullArgument;
+    }
+    
     let native_file_data = unsafe{
         FileData {
             file_name: std::ffi::CStr::from_ptr(file_data.filename)
@@ -198,7 +221,8 @@ pub unsafe extern "C" fn process_file_in_memory_ffi(
         native_file_data, 
         window_size){
         Ok(Some(data)) => data,
-        _ => return std::ptr::null_mut()
+        Ok(None) => return FFIStatus::Ok, //No error, but no data to return
+        Err(_) => return FFIStatus::InternalError,
     };
 
     /*Convert filename String to *mut c_char to be compatible with return 
@@ -243,7 +267,11 @@ pub unsafe extern "C" fn process_file_in_memory_ffi(
         file_data_len,
     });
 
-    Box::into_raw(output)
+    unsafe {
+        *out_ptr = Box::into_raw(output);
+    };
+
+    FFIStatus::Ok
 }
 
 /// Frees the memory allocated by `process_file_in_memory_ffi`.
@@ -275,32 +303,7 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
 /// FFI-safe interface.
 ///
 /// # Safety
-///
-/// This function is unsafe because it dereferences raw pointers passed from C.
-/// The caller MUST ensure that:
-/// - All pointer arguments (`ffi_fmp`, `ser_data_store_array_ptr`, etc.) are 
-/// non-null and valid.
-/// - The `filename` and `chunk_metadata` pointers within `ffi_fmp` are valid.
-/// - `ffi_fmp.chunk_metadata` points to an array of `FFISSAChunkMeta` with at 
-/// least `ffi_fmp.chunk_count` elements.
-/// - `ser_data_store_array_ptr` points to a valid memory block of 
-/// `ser_data_store_len` bytes.
-/// - `chunk_index_array_ptr` points to a valid array of `FFIChunkIndexEntry` 
-/// with `chunk_index_len` elements.
-/// - `veri_hashes_array_ptr` points to a valid array of `FFIVeriHashesEntry` 
-/// with `veri_hashes_len` elements.
-/// - All C-style strings are properly null-terminated.
-///
-/// # Returns
-///
-/// Returns an `i8` status code:
-/// - `0`: Success. The file was rebuilt and the verification hash matched.
-/// - `-1`: Hash Mismatch. The file was rebuilt, but its hash did not match 
-/// the expected hash.
-/// - `-2`: Verification Error. A chunk was missing from the index or another 
-/// internal error occurred.
-/// - `-3`: Internal Logic Error. Could not find the original verification 
-/// hash for the file.
+/// All pointer arguments must be non-null and valid for their specified lengths.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rebuild_and_verify_single_file_ffi(
     file_manifest_parent: *const FFIFileManifestParent,
@@ -310,14 +313,14 @@ pub unsafe extern "C" fn rebuild_and_verify_single_file_ffi(
     chunk_index_len: usize,
     veri_hashes_array_ptr: *const FFIVeriHashesEntry,
     veri_hashes_len: usize
-) -> i8 {
+) -> FFIStatus {
     //Immediately check for null pointers to fail early.
     if file_manifest_parent.is_null()
         || ser_data_store_array_ptr.is_null()
         || chunk_index_array_ptr.is_null()
         || veri_hashes_array_ptr.is_null()
     {
-        return -2; //Verification Error
+        return FFIStatus::NullArgument;
     }
 
     let(fmp, ser_data_store, chunk_index, veri_hashes) = unsafe {
@@ -403,24 +406,20 @@ pub unsafe extern "C" fn rebuild_and_verify_single_file_ffi(
     match rebuild_and_verify_single_file(
         &fmp, ser_data_store, &chunk_index, &veri_hashes
     ){
-        Ok(()) => 0,
-        Err(e) => match e {
-            LibError::HashMismatchError(_) => -1,
-            LibError::VerificationError(_) => -2,
-            _ => -3, //Catch the rest of other errors.
-        }
+        Ok(()) => FFIStatus::Ok,
+        Err(LibError::HashMismatchError(_)) => FFIStatus::VerificationHashMismatch,
+        Err(LibError::VerificationError(_)) => FFIStatus::VerificationMissingChunk,
+        _ => FFIStatus::InternalError,
     }
 }
 
+/// Estimates the compressed size of a data store.
+///
+/// On success, returns `FFIStatus::Ok` and populates `out_size`.
+///
 /// # Safety
-///
-/// The caller MUST ensure that `data_store_array_ptr` and 
-/// `sorted_hashes_array_ptr` are valid for the given lengths.
-///
-/// # Returns
-///
-/// Returns the estimated compressed size in bytes. On an internal error (e.g.,
-/// dictionary creation failure), this function returns `u64::MAX`.
+/// - All input pointers must be non-null and valid for their specified lengths.
+/// - `out_size` must be a valid, non-null pointer to a `u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn test_compression_ffi(
     data_store_array_ptr: *const FFIDataStoreEntry,
@@ -428,8 +427,9 @@ pub unsafe extern "C" fn test_compression_ffi(
     sorted_hashes_array_ptr: *const u64,
     sorted_hashes_len: usize,
     worker_count: usize,
-    dictionary_size: usize
-) -> u64 {
+    dictionary_size: usize,
+    out_size: *mut u64,
+) -> FFIStatus {
     let (data_store, sorted_hashes) = unsafe {
         //Convert C inputs to Rust types
 
@@ -461,10 +461,16 @@ pub unsafe extern "C" fn test_compression_ffi(
         &data_store, 
         &sorted_hashes, 
         worker_count, 
-        dictionary_size) {
-            Ok(compressed_size) => compressed_size as u64,
-            Err(_) => {
-                u64::MAX
+        dictionary_size
+    ) {
+        Ok(compressed_size) => {
+            unsafe {
+                *out_size = compressed_size as u64;
             }
+            
+            FFIStatus::Ok
         }
+        Err(LibError::DictionaryError(_)) => FFIStatus::DictionaryError,
+        _ => FFIStatus::InternalError,
+    }
 }

@@ -24,5 +24,7 @@ pub enum FFIStatus {
     InternalError = -5,
     DictionaryError = -6,
     CompressionError = -7,
-    ThreadPoolError = -8
+    ThreadPoolError = -8,
+    VerificationHashMismatch = -9,
+    VerificationMissingChunk = -10,
 }
