@@ -12,3 +12,14 @@ pub use processing_ffi::*;
 
 pub mod serialization_ffi;
 pub use serialization_ffi::*;
+
+/// Represents the status of an FFI operation.
+#[repr(C)]
+pub enum FFIStatus {
+    Ok = 0,
+    NullArgument = -1,
+    InvalidHeader = -2,
+    UnsupportedVersion = -3,
+    ManifestDecodeError = -4,
+    InternalError = -5,
+}

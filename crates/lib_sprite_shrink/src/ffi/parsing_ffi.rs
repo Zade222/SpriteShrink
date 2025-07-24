@@ -4,12 +4,13 @@
 //! conversion of data types and memory management across the FFI boundary.
 
 use std::ffi::CString;
-use std::ptr;
 use std::slice;
 
+use crate::ffi::FFIStatus;
 use crate::ffi::ffi_structs::{
     FFIChunkIndexEntry, FFIChunkLocation, FFIFileManifestParent, 
     FFIParsedChunkIndexArray, FFIParsedManifestArray, FFISSAChunkMeta
+
 };
 use crate::lib_structs::{FileHeader, FileManifestParent};
 use crate::parsing::{
@@ -18,20 +19,22 @@ use crate::parsing::{
 
 /// Parses the file chunk index from a raw byte slice.
 ///
-/// On success, returns a pointer to an array of chunk index entries.
-/// On failure, returns a null pointer.
+/// On success, returns `FFIStatus::Ok` and populates `out_ptr`.
+/// On failure, returns an appropriate error code.
 ///
 /// # Safety
-/// The `chunk_index_array_ptr` must be a valid pointer for the given length.
-/// The returned pointer is owned by the caller and MUST be freed by passing
-/// it to `free_parsed_chunk_index_ffi`.
+/// - `chunk_index_array_ptr` must point to a valid memory block of `chunk_index_len` bytes.
+/// - `out_ptr` must be a valid pointer to a `*mut FFIParsedChunkIndexArray`.
+/// - On success, the pointer written to `out_ptr` is owned by the caller and MUST be freed
+///   by passing it to `free_parsed_chunk_index_ffi`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn parse_file_chunk_index_ffi(
     chunk_index_array_ptr: *const u8,
-    chunk_index_len: usize
-) -> *mut FFIParsedChunkIndexArray {
-    if chunk_index_array_ptr.is_null() {
-        return ptr::null_mut();
+    chunk_index_len: usize,
+    out_ptr: *mut *mut FFIParsedChunkIndexArray,
+) -> FFIStatus {
+    if chunk_index_array_ptr.is_null() || out_ptr.is_null() {
+        return FFIStatus::NullArgument;
     }
     
     let chunk_index_data = unsafe {slice::from_raw_parts(
@@ -63,12 +66,14 @@ pub unsafe extern "C" fn parse_file_chunk_index_ffi(
                 entries: entries_ptr,
                 entries_len,
             };
+            
+            unsafe {
+                *out_ptr = Box::into_raw(Box::new(result));
+            };
 
-            Box::into_raw(Box::new(result))
+            FFIStatus::Ok
         }
-        Err(_) => {
-            ptr::null_mut()
-        }
+        Err(_) => FFIStatus::ManifestDecodeError,
     }
 }
 
@@ -101,22 +106,23 @@ pub unsafe extern "C" fn free_parsed_chunk_index_ffi(
 
 /// Parses a file header from a byte slice.
 ///
-/// On success, returns a pointer to a valid FileHeader.
-/// On failure (e.g., invalid magic number, unsupported version), returns a 
-/// null pointer.
+/// On success, returns `FFIStatus::Ok` and populates `out_ptr`.
+/// On failure, returns an appropriate error code.
 ///
 /// # Safety
-/// The `header_data_array_ptr` must be a valid pointer to readable memory of
-/// at least `header_data_len` bytes. The pointer returned by this function is
-/// owned by the caller and MUST be freed by passing it to 
-/// `free_file_header_ffi` to prevent memory leaks.
+/// - `header_data_array_ptr` must point to valid memory of at least 
+/// `header_data_len` bytes.
+/// - `out_ptr` must be a valid pointer to a `*mut FileHeader`.
+/// - The pointer returned via `out_ptr` is owned by the caller and MUST be 
+/// freed by passing it to `free_file_header_ffi`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn parse_file_header_ffi(
     header_data_array_ptr: *const u8,
-    header_data_len: usize
-) -> *mut FileHeader {
-    if header_data_array_ptr.is_null() {
-        return ptr::null_mut();
+    header_data_len: usize,
+    out_ptr: *mut *mut FileHeader,
+) -> FFIStatus {
+    if header_data_array_ptr.is_null() || out_ptr.is_null() {
+        return FFIStatus::NullArgument;
     }
     
     /*Prepare header_data, which is the only parameter of the original 
@@ -129,11 +135,16 @@ pub unsafe extern "C" fn parse_file_header_ffi(
     /*Parse the file header data and return it. On error return null pointer.*/
     match parse_file_header(header_data){
         Ok(data) => {
-            Box::into_raw(Box::new(data))
+            unsafe{
+                *out_ptr = Box::into_raw(Box::new(data));
+            };
+            FFIStatus::Ok
         }
-        Err(_) => {
-            ptr::null_mut()
-        }
+        Err(e) => match e {
+            crate::LibError::InvalidHeaderError(_) => FFIStatus::InvalidHeader,
+            crate::LibError::FileVersionError() => FFIStatus::UnsupportedVersion,
+            _ => FFIStatus::InternalError,
+        },
     }
 }
 
@@ -157,21 +168,23 @@ pub unsafe extern "C" fn free_file_header_ffi(ptr: *mut FileHeader) {
 
 /// Parses the file manifest from a raw byte slice.
 ///
-/// On success, returns a pointer to an FFIParsedManifestArray.
-/// On failure (e.g., decoding error), returns a null pointer.
+/// On success, returns `FFIStatus::Ok` and populates `out_ptr`.
+/// On failure, returns an appropriate error code.
 ///
 /// # Safety
-/// The `manifest_data_array_ptr` must be a valid pointer for the given 
-/// length. The returned pointer is owned by the caller and MUST be 
-/// freed by passing it to `free_parsed_manifest_ffi` to prevent memory 
-/// leaks.
+/// - `manifest_data_array_ptr` must point to valid memory of at least 
+/// `manifest_data_len` bytes.
+/// - `out_ptr` must be a valid pointer to a `*mut FFIParsedManifestArray`.
+/// - The pointer returned via `out_ptr` is owned by the caller and MUST be 
+/// freed by passing it to `free_parsed_manifest_ffi`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn parse_file_metadata_ffi(
     manifest_data_array_ptr: *const u8,
     manifest_data_len: usize
-) -> *mut FFIParsedManifestArray {
-    if manifest_data_array_ptr.is_null() {
-        return ptr::null_mut();
+    , out_ptr: *mut *mut FFIParsedManifestArray
+) -> FFIStatus {
+    if manifest_data_array_ptr.is_null() || out_ptr.is_null() {
+        return FFIStatus::NullArgument;
     }
     
     let manifest_data = unsafe {
@@ -184,7 +197,7 @@ pub unsafe extern "C" fn parse_file_metadata_ffi(
     let file_manifest: Vec<FileManifestParent> = 
         match parse_file_metadata(manifest_data) {
             Ok(data) => data,
-            Err(_) => return ptr::null_mut(), //Return null on error
+            Err(_) => return FFIStatus::ManifestDecodeError, //Return null on error
         };
 
     //Convert the Vec<FileManifestParent> to a Vec<FFIFileManifestParent>
@@ -227,7 +240,11 @@ pub unsafe extern "C" fn parse_file_metadata_ffi(
     };
 
     //Allocate the result struct on the heap and return a raw pointer
-    Box::into_raw(Box::new(result))
+    unsafe {
+        *out_ptr = Box::into_raw(Box::new(result));
+    };
+    FFIStatus::Ok
+
 }
 
 /// Frees the memory allocated by `parse_file_metadata_ffi`.
