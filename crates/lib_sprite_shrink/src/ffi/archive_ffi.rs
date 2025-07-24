@@ -66,7 +66,7 @@ pub unsafe extern "C" fn archive_builder_new(
 
             let chunk_metadata = slice::from_raw_parts(
                 fmp.chunk_metadata, 
-                fmp.chunk_count as usize
+                fmp.chunk_metadata_len
             )
                 .iter()
                 .map(|meta|{
@@ -79,7 +79,7 @@ pub unsafe extern "C" fn archive_builder_new(
             
             FileManifestParent {
                 filename: file_name,
-                chunk_count: fmp.chunk_count,
+                chunk_count: fmp.chunk_metadata_len as u64,
                 chunk_metadata,
             }
         }).collect::<Vec<_>>();

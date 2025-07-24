@@ -104,8 +104,8 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi(
 
     let ffi_fmp = FFIFileManifestParent {
         filename: CString::new(fmp.filename).unwrap().into_raw(),
-        chunk_count: fmp.chunk_count,
         chunk_metadata: fmp_meta_ptr,
+        chunk_metadata_len: fmp.chunk_count as usize,
     };
 
     //Convert vector of hashed chunks
@@ -160,8 +160,8 @@ pub unsafe extern "C" fn free_file_manifest_and_chunks_ffi(ptr: *mut FFIFileMani
         //Reclaim and drop the Vec for the chunk metadata.
         let _ = Vec::from_raw_parts(
             output_box.fmp.chunk_metadata as *mut FFISSAChunkMeta,
-            output_box.fmp.chunk_count as usize,
-            output_box.fmp.chunk_count as usize,
+            output_box.fmp.chunk_metadata_len as usize,
+            output_box.fmp.chunk_metadata_len as usize,
         );
 
         //Deallocate the array of FFIHashedChunk and their inner data
@@ -331,7 +331,7 @@ pub unsafe extern "C" fn rebuild_and_verify_single_file_ffi(
         rebuild_and_verify_single_file function, from C input.*/
         let ffi_meta = std::slice::from_raw_parts(
             ffi_fmp_ref.chunk_metadata,
-            ffi_fmp_ref.chunk_count as usize
+            ffi_fmp_ref.chunk_metadata_len
         );
 
         let vec_chunk_metadata: Vec<SSAChunkMeta> = ffi_meta
@@ -347,7 +347,7 @@ pub unsafe extern "C" fn rebuild_and_verify_single_file_ffi(
             filename: std::ffi::CStr::from_ptr(ffi_fmp_ref.filename)
                 .to_string_lossy()
                 .into_owned(),
-            chunk_count: ffi_fmp_ref.chunk_count,
+            chunk_count: ffi_fmp_ref.chunk_metadata_len as u64,
             chunk_metadata: vec_chunk_metadata
         };
         

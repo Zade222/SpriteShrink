@@ -226,9 +226,9 @@ pub unsafe extern "C" fn parse_file_metadata_ffi(
             };
 
             Ok(FFIFileManifestParent {
-                filename: c_filename,
-                chunk_count: fmp.chunk_count,
+                filename: c_filename, 
                 chunk_metadata: chunk_meta_ptr,
+                chunk_metadata_len: fmp.chunk_count as usize,
             })
         })
         .collect() {
@@ -286,8 +286,8 @@ pub unsafe extern "C" fn free_parsed_manifest_ffi(
             //Deallocate the Vec for the chunk metadata
             let _ = Vec::from_raw_parts(
                 fmp.chunk_metadata as *mut FFISSAChunkMeta,
-                fmp.chunk_count as usize,
-                fmp.chunk_count as usize,
+                fmp.chunk_metadata_len as usize,
+                fmp.chunk_metadata_len as usize,
             );
         }
     }

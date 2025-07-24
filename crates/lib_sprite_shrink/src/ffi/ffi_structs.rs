@@ -85,8 +85,8 @@ pub struct FFIFileManifestChunks {
 #[repr(C)]
 pub struct FFIFileManifestParent {
     pub filename: *mut c_char,
-    pub chunk_count: u64,
     pub chunk_metadata: *const FFISSAChunkMeta,
+    pub chunk_metadata_len: usize,
 }
 
 /// FFI-safe representation of a chunk's hash and its associated data.

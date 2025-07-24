@@ -71,7 +71,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi(
 
             let ffi_chunks = std::slice::from_raw_parts(
                 ffi_fmp.chunk_metadata, 
-                ffi_fmp.chunk_count as usize
+                ffi_fmp.chunk_metadata_len
             );
 
             let chunk_metadata = ffi_chunks.iter().map(|c| SSAChunkMeta {
@@ -82,7 +82,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi(
 
             file_manifest.insert(filename.clone(), FileManifestParent {
                 filename,
-                chunk_count: ffi_fmp.chunk_count,
+                chunk_count: ffi_fmp.chunk_metadata_len as u64,
                 chunk_metadata,
             });
         }
@@ -127,8 +127,8 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi(
 
             Ok(FFIFileManifestParent {
                 filename: c_filename,
-                chunk_count: fmp.chunk_count,
                 chunk_metadata: chunk_meta_ptr,
+                chunk_metadata_len: fmp.chunk_count as usize,
             })
         })
         .collect() {
@@ -208,8 +208,8 @@ pub unsafe extern "C" fn free_serialized_output(ptr: *mut FFISerializedOutput) {
             //Reconstruct and deallocate the Vec for the chunk metadata.
             let _ = Vec::from_raw_parts(
                 fmp.chunk_metadata as *mut FFISSAChunkMeta,
-                fmp.chunk_count as usize,
-                fmp.chunk_count as usize,
+                fmp.chunk_metadata_len,
+                fmp.chunk_metadata_len,
             );
         }
 
