@@ -39,8 +39,8 @@ The header provides a quick summary of the archive's contents and the location o
 | 0 | 8 | `[u8; 8]` | **Magic Number:** A constant value to identify the file type. Recommended: `b"SSMC_V1_"` |
 | 8 | 4 | `u32` | **Format Version:** The version of the file format (e.g., `0x00010000` for v1.0). |
 | 12 | 4 | `u32` | **File Count:** The total number of files stored in the archive. |
-| 16 | 1 | `u8` | **Compression Algorithm:** An enum representing the algorithm used. E.g., `0=None`, `1=Zstd`. |
-| 17 | 7 | `[u8; 7]` | **Padding:** Reserved for alignment or future information. Must be all zeros. |
+| 16 | 1 | `u16` | **Compression Algorithm:** An enum representing the algorithm used. E.g., `98=Zstd`. |
+| 17 | 7 | `[u8; 6]` | **Padding:** Reserved for alignment or future information. Must be all zeros. |
 | 24 | 8 | `u64` | **Manifest Offset:** The absolute byte offset where the File Manifest section begins. |
 | 32 | 8 | `u64` | **Manifest Length:** The total length of the File Manifest section in bytes. |
 | 40 | 8 | `u64` | **Dictionary Offset:** The absolute byte offset where the Compression Dictionary begins. |
