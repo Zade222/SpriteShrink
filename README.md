@@ -137,6 +137,14 @@ Here's a quick reference for the main arguments:
 
 ---
 
+## Helper Scripts
+
+Bash and PowerShell scripts have been made for processing a whole library are also included in this repository. Their use is encouraged.
+
+The guide and the scripts can be found [here](./helper_scripts/):
+
+---
+
 ## Error Handling & Reliability
 
 SpriteShrink is designed to be robust. It gracefully handles malformed inputs, ensures data integrity (byte-for-byte identical extraction), and provides clear, actionable error messages. Operations are atomic, meaning partially written output files are automatically cleaned up in case of cancellation or failure.
