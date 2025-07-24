@@ -17,7 +17,7 @@ use zerocopy::IntoBytes;
 use dashmap::DashMap;
 
 use crate::ffi::ffi_structs::{
-    CUserData, FFIProgress, FFIProgressType
+    FFIUserData, FFIProgress, FFIProgressType
 };
 
 use crate::lib_error_handling::LibError;
@@ -32,8 +32,8 @@ use crate::processing::gen_zstd_opt_dict;
 
 use crate::serialization::{serialize_compressed_store};
 
-unsafe impl Send for CUserData {}
-unsafe impl Sync for CUserData {}
+unsafe impl Send for FFIUserData {}
+unsafe impl Sync for FFIUserData {}
 
 //C style progress callback function pointer
 type CProgressCallback = extern "C" fn(FFIProgress, *mut c_void);
@@ -51,7 +51,7 @@ pub struct ArchiveBuilder<'cb, F> {
     worker_threads: usize,
     opt_dict: bool,
     progress_callback: Option<&'cb F>,
-    c_progress_callback: Option<(CProgressCallback, CUserData)>,
+    c_progress_callback: Option<(CProgressCallback, FFIUserData)>,
 }
 
 /// Constructs the file header for a new archive.
@@ -199,7 +199,7 @@ where
             callback: CProgressCallback, 
             user_data: *mut c_void
         ) -> &mut Self {
-            self.c_progress_callback = Some((callback, CUserData(user_data)));
+            self.c_progress_callback = Some((callback, FFIUserData(user_data)));
             self
     }
 
