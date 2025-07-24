@@ -133,11 +133,11 @@ pub struct FFIProgress {
 //Holds all the output data from the serialize_uncompressed_data_ffi function.
 #[repr(C)]
 pub struct FFISerializedOutput {
-    pub ser_manifest_ptr: *const u8,
+    pub ser_manifest_ptr: *mut FFIFileManifestParent,
     pub ser_manifest_len: usize,
     pub ser_data_store_ptr: *const u8,
     pub ser_data_store_len: usize,
-    pub ser_chunk_index_ptr: *const u8,
+    pub ser_chunk_index_ptr: *mut FFIChunkIndexEntry,
     pub ser_chunk_index_len: usize,
     pub sorted_hashes_ptr: *const u64,
     pub sorted_hashes_len: usize,

@@ -1,9 +1,14 @@
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::slice;
 
 use dashmap::DashMap;
 
-use crate::ffi::ffi_structs::{FFIDataStoreEntry, FFIFileManifestParent, FFISerializedOutput};
+use crate::ffi::ffi_structs::{
+    FFIChunkLocation, FFIDataStoreEntry, FFIFileManifestParent, 
+    FFISerializedOutput, FFISSAChunkMeta
+};
+use crate::ffi::FFIChunkIndexEntry;
 use crate::lib_structs::{FileManifestParent, SSAChunkMeta};
 use crate::serialization::{serialize_uncompressed_data};
 
@@ -85,52 +90,115 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi(
         sorted_hashes) = 
         serialize_uncompressed_data(&file_manifest, &data_store);
 
-    let config = bincode::config::standard();
-    let ser_manifest_bytes = bincode::serde::encode_to_vec(
-        &ser_file_manifest, config).unwrap();
-    let ser_chunk_index_bytes = bincode::serde::encode_to_vec(
-        &chunk_index, config).unwrap();
+    let mut ffi_manifests: Vec<FFIFileManifestParent> = ser_file_manifest
+        .into_iter()
+        .map(|fmp| {
+            let mut chunk_meta_vec: Vec<FFISSAChunkMeta> = fmp.chunk_metadata
+                .into_iter()
+                .map(|meta| FFISSAChunkMeta {
+                    hash: meta.hash,
+                    offset: meta.offset,
+                    length: meta.length,
+                })
+                .collect();
+
+            let chunk_meta_ptr = chunk_meta_vec
+                .as_mut_ptr();
+            //Give up ownership so Rust doesn't deallocate it
+            std::mem::forget(chunk_meta_vec);
+
+            FFIFileManifestParent {
+                filename: CString::new(fmp.filename).unwrap_or_default()
+                    .into_raw(),
+                chunk_count: fmp.chunk_count,
+                chunk_metadata: chunk_meta_ptr
+            }
+        })
+        .collect::<Vec<_>>();
+    
+    let manifests_ptr = ffi_manifests.as_mut_ptr();
+    let manifests_len = ffi_manifests.len();
+    std::mem::forget(ffi_manifests);//Give up ownership of the outer Vec
+
+    let mut entries: Vec<FFIChunkIndexEntry> = chunk_index
+        .into_iter()
+        .map(|(hash, location)| FFIChunkIndexEntry {
+            hash,
+            data: FFIChunkLocation {
+                offset: location.offset,
+                length: location.length,
+            },
+        })
+        .collect();
+
+    let entries_ptr = entries.as_mut_ptr();
+    let entries_len = entries.len();
+
+    //Give up ownership of the Vec so it doesn't get deallocated.
+    std::mem::forget(entries);
 
     let output = Box::new(FFISerializedOutput {
-        ser_manifest_ptr: ser_manifest_bytes.as_ptr(),
-        ser_manifest_len: ser_manifest_bytes.len(),
+        ser_manifest_ptr: manifests_ptr,
+        ser_manifest_len: manifests_len,
         ser_data_store_ptr: ser_data_store.as_ptr(),
         ser_data_store_len: ser_data_store.len(),
-        ser_chunk_index_ptr: ser_chunk_index_bytes.as_ptr(),
-        ser_chunk_index_len: ser_chunk_index_bytes.len(),
+        ser_chunk_index_ptr: entries_ptr,
+        ser_chunk_index_len: entries_len,
         sorted_hashes_ptr: sorted_hashes.as_ptr(),
         sorted_hashes_len: sorted_hashes.len(),
     });
 
-    std::mem::forget(ser_manifest_bytes);
     std::mem::forget(ser_data_store);
-    std::mem::forget(ser_chunk_index_bytes);
     std::mem::forget(sorted_hashes);
 
     Box::into_raw(output)
 }
 
+/// Frees the memory allocated by `serialize_uncompressed_data_ffi`.
+///
+/// This function is responsible for deallocating the `FFISerializedOutput`
+/// struct and all the memory blocks it points to. This includes the
+/// serialized manifest, data store, chunk index, and sorted hashes.
+///
+/// # Safety
+///
+/// The caller MUST ensure that `ptr` is a valid pointer returned from a
+/// successful call to `serialize_uncompressed_data_ffi`. Passing a null
+/// pointer or a pointer that has already been freed will lead to
+/// undefined behavior. This function must only be called once per pointer.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_serialized_output(ptr: *mut FFISerializedOutput) {
     if ptr.is_null() {
         return;
     }
-    // Re-take ownership of the Box to deallocate it and its contents.
+    //Re-take ownership of the Box to deallocate it and its contents.
     unsafe {
         let output = Box::from_raw(ptr);
-        // Deallocate all the vectors whose memory was passed to C
-        let _ = Vec::from_raw_parts(
-            output.ser_manifest_ptr as *mut u8, 
-            output.ser_manifest_len, 
-            output.ser_manifest_len
+        //Deallocate all the vectors whose memory was passed to C
+        let ffi_manifests = Vec::from_raw_parts(
+            output.ser_manifest_ptr,
+            output.ser_manifest_len,
+            output.ser_manifest_len,
         );
+
+        for fmp in ffi_manifests {
+            //Deallocate the CString for the filename.
+            let _ = CString::from_raw(fmp.filename);
+            //Reconstruct and deallocate the Vec for the chunk metadata.
+            let _ = Vec::from_raw_parts(
+                fmp.chunk_metadata as *mut FFISSAChunkMeta,
+                fmp.chunk_count as usize,
+                fmp.chunk_count as usize,
+            );
+        }
+
         let _ = Vec::from_raw_parts(
             output.ser_data_store_ptr as *mut u8, 
             output.ser_data_store_len, 
             output.ser_data_store_len
         );
         let _ = Vec::from_raw_parts(
-            output.ser_chunk_index_ptr as *mut u8, 
+            output.ser_chunk_index_ptr as *mut FFIChunkIndexEntry, 
             output.ser_chunk_index_len, 
             output.ser_chunk_index_len);
         let _ = Vec::from_raw_parts(
