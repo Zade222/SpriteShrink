@@ -3,9 +3,98 @@ use std::ptr;
 use std::slice;
 
 use crate::ffi::ffi_structs::{
-    FFIFileManifestParent, FFIParsedManifestArray, FFISSAChunkMeta};
+    FFIChunkIndexEntry, FFIChunkLocation, FFIFileManifestParent, 
+    FFIParsedChunkIndexArray, FFIParsedManifestArray, FFISSAChunkMeta
+};
 use crate::lib_structs::{FileHeader, FileManifestParent};
-use crate::parsing::{parse_file_header, parse_file_metadata};
+use crate::parsing::{
+    parse_file_chunk_index, parse_file_header, parse_file_metadata
+};
+
+/// Parses the file chunk index from a raw byte slice.
+///
+/// On success, returns a pointer to an array of chunk index entries.
+/// On failure, returns a null pointer.
+///
+/// # Safety
+/// The `chunk_index_array_ptr` must be a valid pointer for the given length.
+/// The returned pointer is owned by the caller and MUST be freed by passing
+/// it to `free_parsed_chunk_index_ffi`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn parse_file_chunk_index_ffi(
+    chunk_index_array_ptr: *const u8,
+    chunk_index_len: usize
+) -> *mut FFIParsedChunkIndexArray {
+    if chunk_index_array_ptr.is_null() {
+        return ptr::null_mut();
+    }
+    
+    let chunk_index_data = unsafe {slice::from_raw_parts(
+        chunk_index_array_ptr, 
+        chunk_index_len)
+    };
+
+    match parse_file_chunk_index(chunk_index_data){
+        Ok(index_map) => {
+            
+
+            let mut entries: Vec<FFIChunkIndexEntry> = index_map
+                .into_iter()
+                .map(|(hash, location)| FFIChunkIndexEntry {
+                    hash,
+                    data: FFIChunkLocation {
+                        offset: location.offset,
+                        length: location.length,
+                    },
+                })
+                .collect();
+
+            let entries_ptr = entries.as_mut_ptr();
+            let entries_len = entries.len();
+
+            //Give up ownership of the Vec so it doesn't get deallocated.
+            std::mem::forget(entries);
+
+            //Prepare return struct
+            let result = FFIParsedChunkIndexArray {
+                entries: entries_ptr,
+                entries_len,
+            };
+
+            Box::into_raw(Box::new(result))
+        }
+        Err(_) => {
+            ptr::null_mut()
+        }
+    }
+}
+
+/// Frees the memory allocated by `parse_file_chunk_index_ffi`.
+///
+/// # Safety
+/// The `ptr` must be a non-null pointer from a successful call to
+/// `parse_file_chunk_index_ffi`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_parsed_chunk_index_ffi(
+    ptr: *mut FFIParsedChunkIndexArray) 
+{
+    if ptr.is_null() {
+        return;
+    }
+
+    unsafe {
+        //Retake ownership of the main struct Box.
+        let array_struct = Box::from_raw(ptr);
+
+        /*Reconstruct the Vec from the raw parts, which allows
+        memory manager to deallocate the array of entries.*/
+        let _ = Vec::from_raw_parts(
+            array_struct.entries,
+            array_struct.entries_len,
+            array_struct.entries_len,
+            );
+    };
+}
 
 /// Parses a file header from a byte slice.
 ///
@@ -164,3 +253,4 @@ pub unsafe extern "C" fn free_parsed_manifest_ffi(ptr: *mut FFIParsedManifestArr
         }
     }
 }
+

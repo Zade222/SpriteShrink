@@ -88,6 +88,13 @@ pub struct FFIDataStoreEntry {
     pub data_len: usize,
 }
 
+// The final struct returned by parse_file_chunk_index_ffi
+#[repr(C)]
+pub struct FFIParsedChunkIndexArray {
+    pub entries: *mut FFIChunkIndexEntry,
+    pub entries_len: usize,
+}
+
 //FFI-safe representation for the return data for parse_file_metadata_ffi
 #[repr(C)]
 pub struct FFIParsedManifestArray {
