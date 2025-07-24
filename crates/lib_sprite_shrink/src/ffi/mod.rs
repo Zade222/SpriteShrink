@@ -27,4 +27,5 @@ pub enum FFIStatus {
     ThreadPoolError = -8,
     VerificationHashMismatch = -9,
     VerificationMissingChunk = -10,
+    InvalidString = -11,
 }

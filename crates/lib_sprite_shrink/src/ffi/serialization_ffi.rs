@@ -1,3 +1,8 @@
+//! FFI-safe serialization functions for sprite-shrink archives.
+//!
+//! This module exposes Rust's serialization logic to C callers, handling the
+//! complex conversion of data structures and memory management.
+
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::slice;
@@ -8,28 +13,35 @@ use crate::ffi::ffi_structs::{
     FFIChunkLocation, FFIDataStoreEntry, FFIFileManifestParent, 
     FFISerializedOutput, FFISSAChunkMeta
 };
-use crate::ffi::FFIChunkIndexEntry;
+use crate::ffi::{FFIChunkIndexEntry, FFIStatus};
 use crate::lib_structs::{FileManifestParent, SSAChunkMeta};
 use crate::serialization::{serialize_uncompressed_data};
 
-/// # Safety
+/// Serializes archive data into an FFI-safe structure.
 ///
-/// This function is unsafe because it dereferences raw pointers passed from C.
-/// The caller MUST ensure that:
-/// - `manifest_array_ptr` points to a valid array of `FFIFileManifestParent`
-/// of `manifest_len`.
-/// - `data_store_array_ptr` points to a valid array of `FFIDataStoreEntry` 
-/// of `data_store_len`.
-/// - All pointers within these structs are valid for the specified lengths.
-/// - The returned pointer from this function must be passed to 
-/// `free_serialized_output` to avoid memory leaks.
+/// On success, returns `FFIStatus::Ok` and populates `out_ptr`.
+///
+/// # Safety
+/// - All pointer arguments must be non-null and valid for their specified 
+/// lengths.
+/// - `out_ptr` must be a valid, non-null pointer.
+/// - On success, the pointer written to `out_ptr` is owned by the C caller 
+/// and MUST be freed
+///   by passing it to `free_serialized_output`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn serialize_uncompressed_data_ffi(
     manifest_array_ptr: *const FFIFileManifestParent,
     manifest_len: usize,
     data_store_array_ptr: *const FFIDataStoreEntry,
     data_store_len: usize,
-) -> *mut FFISerializedOutput {
+    out_ptr: *mut *mut FFISerializedOutput
+) -> FFIStatus {
+    if manifest_array_ptr.is_null() 
+        || data_store_array_ptr.is_null() 
+        || out_ptr.is_null() {
+        return FFIStatus::NullArgument;
+    }
+    
     let (file_manifest, data_store) = unsafe {
         //Convert C inputs to Rust types
 
@@ -90,9 +102,10 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi(
         sorted_hashes) = 
         serialize_uncompressed_data(&file_manifest, &data_store);
 
-    let mut ffi_manifests: Vec<FFIFileManifestParent> = ser_file_manifest
+    let mut ffi_manifests: Vec<FFIFileManifestParent> = 
+        match ser_file_manifest
         .into_iter()
-        .map(|fmp| {
+        .map(|fmp|  {
             let mut chunk_meta_vec: Vec<FFISSAChunkMeta> = fmp.chunk_metadata
                 .into_iter()
                 .map(|meta| FFISSAChunkMeta {
@@ -104,17 +117,24 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi(
 
             let chunk_meta_ptr = chunk_meta_vec
                 .as_mut_ptr();
-            //Give up ownership so Rust doesn't deallocate it
+            //Give up ownership so it doesn't deallocate it
             std::mem::forget(chunk_meta_vec);
 
-            FFIFileManifestParent {
-                filename: CString::new(fmp.filename).unwrap_or_default()
-                    .into_raw(),
+            let c_filename = match CString::new(fmp.filename) {
+                Ok(s) => s.into_raw(),
+                Err(_) => return Err(FFIStatus::InvalidString),
+            };
+
+            Ok(FFIFileManifestParent {
+                filename: c_filename,
                 chunk_count: fmp.chunk_count,
-                chunk_metadata: chunk_meta_ptr
-            }
+                chunk_metadata: chunk_meta_ptr,
+            })
         })
-        .collect::<Vec<_>>();
+        .collect() {
+            Ok(v) => v,
+            Err(status) => return status, //Propagate the error status
+        };
     
     let manifests_ptr = ffi_manifests.as_mut_ptr();
     let manifests_len = ffi_manifests.len();
@@ -151,7 +171,10 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi(
     std::mem::forget(ser_data_store);
     std::mem::forget(sorted_hashes);
 
-    Box::into_raw(output)
+    unsafe {
+        *out_ptr = Box::into_raw(output);
+    };
+    FFIStatus::Ok
 }
 
 /// Frees the memory allocated by `serialize_uncompressed_data_ffi`.
@@ -162,10 +185,8 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi(
 ///
 /// # Safety
 ///
-/// The caller MUST ensure that `ptr` is a valid pointer returned from a
-/// successful call to `serialize_uncompressed_data_ffi`. Passing a null
-/// pointer or a pointer that has already been freed will lead to
-/// undefined behavior. This function must only be called once per pointer.
+/// The `ptr` must be a non-null pointer returned from a successful call
+/// to `serialize_uncompressed_data_ffi`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_serialized_output(ptr: *mut FFISerializedOutput) {
     if ptr.is_null() {
