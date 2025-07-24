@@ -6,17 +6,10 @@ edition = "2024"
 [dependencies]
 sprite_shrink = {path = "../lib_sprite_shrink"}
 
-bincode = { version = "2.0.1", features = ["serde"] }
 bytesize = "2.0.1"
 clap = { version = "4.5.40", features = ["derive"] }
 dashmap = "6.1.0"
-fastcdc = "3.2.1"
 indicatif = "0.18.0"
 range-parser = "0.1.2"
 rayon = "1.10.0"
-serde = { version = "1.0", features = ["derive"] }
-sha2 = "0.10.9"
 thiserror = "2.0.12"
-xxhash-rust = {version = "0.8.12", features = ["xxh3", "const_xxh3"] }
-zerocopy = { version = "0.8.26", features = ["derive"] }
-zstd = "0.13.3"
