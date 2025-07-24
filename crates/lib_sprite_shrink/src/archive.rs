@@ -47,6 +47,7 @@ pub struct ArchiveBuilder<'cb, F> {
     file_count: u32,
 
     //Optional parameters, will be set with default values.
+    compression_algorithm: u16,
     compression_level: i32,
     dictionary_size: u64,
     worker_threads: usize,
@@ -74,6 +75,7 @@ pub struct ArchiveBuilder<'cb, F> {
 ///
 /// Returns a `FileHeader` struct populated with the provided metadata.
 fn build_file_header(file_count: u32,
+    algorithm_code: u16,
     man_length: u64,
     dict_length: u64,
     chunk_index_length: u64,
@@ -86,6 +88,8 @@ fn build_file_header(file_count: u32,
         magic_num:      *MAGIC_NUMBER,
         file_version:   SUPPORTED_VERSION,
         file_count:     file_count,
+        algorithm:      algorithm_code,
+        pad:            [0, 0, 0, 0, 0, 0],
         man_offset:     header_size,
         man_length:     man_length,
         dict_offset:    header_size + man_length,
@@ -152,6 +156,7 @@ where
             sorted_hashes,
             file_count,
             //Set default values for optional parameters
+            compression_algorithm: 1, //Default to zstd numerical code.
             compression_level: 19, 
             dictionary_size: 16 * 1024,
             worker_threads: 0, //Let Rayon decide
@@ -161,11 +166,19 @@ where
         }
     }
 
-    //The following 4 functions set optional parameters.
+    //The following 5 functions set optional parameters.
 
-    /// Sets the Zstandard compression level.
+    /// Sets the numerical compression code.
     ///
-    /// The default value is `19`.
+    /// The default value is `98` for zstd.
+    pub fn compression_algorithm(&mut self, algorithm: u16) -> &mut Self {
+        self.compression_algorithm = algorithm;
+        self
+    }
+
+    /// Sets the compression level.
+    ///
+    /// The default value is `19` for zstd.
     pub fn compression_level(&mut self, level: i32) -> &mut Self {
         self.compression_level = level;
         self
@@ -377,6 +390,7 @@ where
         //Build the file header
         let file_header = build_file_header(
             self.file_count,
+            self.compression_algorithm,
             bin_file_manifest.len() as u64,
             _dictionary.len() as u64,
             bin_chunk_index.len() as u64,

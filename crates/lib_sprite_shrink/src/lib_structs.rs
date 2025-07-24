@@ -44,6 +44,9 @@ pub struct ChunkLocation {
 /// * `magic_num`: A 4-byte array to identify the file as a valid archive.
 /// * `file_version`: The version number of the archive format.
 /// * `file_count`: The total number of files stored in the archive.
+/// * `algorithm`: Numerical value representing the compression used on the 
+/// compressed data.
+/// * `pad`: Empty data padding to keep data aligned. Must be all zeros.
 /// * `man_offset`: The byte offset where the file manifest begins.
 /// * `man_length`: The total length of the file manifest in bytes.
 /// * `dict_offset`: The starting offset of the compression dictionary.
@@ -57,6 +60,8 @@ pub struct FileHeader {
     pub magic_num:      [u8; 8],
     pub file_version:   u32,
     pub file_count:     u32,
+    pub algorithm:      u16,
+    pub pad:            [u8; 6],
     pub man_offset:     u64,
     pub man_length:     u64,
     pub dict_offset:    u64,
