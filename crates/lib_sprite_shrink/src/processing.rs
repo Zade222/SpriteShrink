@@ -205,7 +205,7 @@ pub fn rebuild_and_verify_single_file(
             let end = start + location.length as usize;
             data_vec.extend_from_slice(&ser_data_store[start..end]);
         } else {
-            return Err(LibError::InternalLibError(format!(
+            return Err(LibError::VerificationError(format!(
                 "Verification failed: Missing chunk with hash {} for file '{}'",
                 scm.hash, fmp.filename
             )));
@@ -220,7 +220,7 @@ pub fn rebuild_and_verify_single_file(
         }
     } else {
         // This case would also indicate an internal inconsistency.
-        return Err(LibError::InternalLibError(format!(
+        return Err(LibError::VerificationError(format!(
             "Verification failed: Missing original hash for file '{}'",
             fmp.filename
         )));
@@ -259,9 +259,13 @@ pub fn rebuild_and_verify_single_file(
 ///
 /// # Safety
 ///
-/// This function contains `unsafe` code as it calls directly into the
-/// C `zstd-sys` library. It makes assumptions about pointer validity
-/// and buffer lengths that must be upheld to prevent memory errors.
+/// This function is safe because it upholds the contracts of the zstd-sys C 
+/// functions:
+/// 1. `dict_buffer` is allocated with sufficient capacity (`max_dict_size`).
+/// 2. The pointers and lengths for `samples_buffer` and `sample_sizes` are 
+/// valid as they are derived directly from Rust-managed Vecs and slices.
+/// 3. All potential errors from the C function are checked with 
+/// `ZDICT_isError`.
 pub fn gen_zstd_opt_dict(samples: Vec<&[u8]>,
     max_dict_size: usize,
     workers: usize,
@@ -372,7 +376,7 @@ pub fn test_compression(
     let task_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(worker_count)
         .build()
-        .map_err(|e| LibError::InternalLibError(format!("Failed to create thread pool: {}", e)))?; 
+        .map_err(|e| LibError::ThreadPoolError(format!("Failed to create thread pool: {}", e)))?; 
 
     let compressed_dash: DashMap<u64, Vec<u8>> = DashMap::new();
 

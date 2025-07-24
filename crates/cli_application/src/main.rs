@@ -18,8 +18,6 @@ use archive_parser::{get_max_rom_index};
 mod arg_handling;
 use arg_handling::{validate_args, Args};
 
-mod decompression;
-
 mod error_handling;
 use error_handling::CliError;
     

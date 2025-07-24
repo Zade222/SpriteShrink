@@ -50,4 +50,10 @@ pub enum LibError {
 
     #[error("Dictionary creation failed: {0}")]
     DictionaryError(String),
+
+    #[error("Thread pool creation failed: {0}")]
+    ThreadPoolError(String),
+
+    #[error("File Verification failed: {0}")]
+    VerificationError(String),
 }

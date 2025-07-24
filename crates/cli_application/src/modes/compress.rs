@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 use sprite_shrink::{
-    FileManifestParent, Progress,
-    create_file_manifest_and_chunks, finalize_archive, process_file_in_memory, 
+    ArchiveBuilder, FileManifestParent, Progress,
+    create_file_manifest_and_chunks, process_file_in_memory, 
     rebuild_and_verify_single_file, serialize_uncompressed_data, test_compression
 };
 use indicatif::{ProgressBar, ProgressStyle};
@@ -265,13 +265,6 @@ pub fn run_compression(
     /*If low memory is set limit reads to four workers else set to the user 
     specified argument or let Rayon decide (which is the amount of threads the
     host system supports) */
-    /*if args.low_memory {
-        compute_threads = 4;
-    } else {
-        /*0 lets Rayon decide the optimal number when thread parameter isn't 
-        used, otherwise set to thread parameter.*/
-        compute_threads = args.threads.unwrap_or(0) as usize;
-    };*/
 
     let _compute_threads = 
         if args.low_memory { 4 } 
@@ -377,17 +370,20 @@ pub fn run_compression(
 
     /*Assembles the final archive from its constituent parts, structures it 
     according to the ssmc spec and returns the byte data ready to be written.*/
-    let ssmc_data = finalize_archive(
-            &ser_file_manifest, 
-            &_data_store, 
-            &sorted_hashes, 
-            file_paths.len() as u32, 
-            level, 
-            best_dictionary_size,
-            _compute_threads,
-            args.optimize_dictionary,
-            &progress_callback
-        )?;
+    let mut builder = ArchiveBuilder::new(
+        ser_file_manifest, 
+        _data_store, 
+        sorted_hashes, 
+        file_paths.len() as u32
+    );
+
+    builder.compression_level(level)
+        .dictionary_size(best_dictionary_size)
+        .optimize_dictionary(args.optimize_dictionary);
+        
+        
+    let ssmc_data=builder.with_progress(&progress_callback)
+        .build()?;
 
     if !args.quiet {
         if let Some(bar) = progress_bar.lock().unwrap().take() {

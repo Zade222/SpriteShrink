@@ -7,13 +7,19 @@
 //! archive into a single byte vector ready for storage.
 
 use std::{collections::HashMap, io::Write};
+use std::io::Read;
 use std::mem;
+use std::os::raw::c_void;
 
 use bincode;
 
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use zerocopy::IntoBytes;
 use dashmap::DashMap;
+
+use crate::ffi::ffi_structs::{
+    FFIUserData, FFIProgress, FFIProgressType
+};
 
 use crate::lib_error_handling::LibError;
 
@@ -25,7 +31,29 @@ use crate::parsing::{MAGIC_NUMBER, SUPPORTED_VERSION};
 
 use crate::processing::gen_zstd_opt_dict;
 
-use crate::serialization::{serialize_compressed_store};
+use crate::serialization::{serialize_store};
+
+unsafe impl Send for FFIUserData {}
+unsafe impl Sync for FFIUserData {}
+
+//C style progress callback function pointer
+type CProgressCallback = extern "C" fn(FFIProgress, *mut c_void);
+
+pub struct ArchiveBuilder<'cb, F> {
+    //Required parameters
+    ser_file_manifest: Vec<FileManifestParent>,
+    data_store: HashMap<u64, Vec<u8>>,
+    sorted_hashes: Vec<u64>,
+    file_count: u32,
+
+    //Optional parameters, will be set with default values.
+    compression_level: i32,
+    dictionary_size: u64,
+    worker_threads: usize,
+    opt_dict: bool,
+    progress_callback: Option<&'cb F>,
+    c_progress_callback: Option<(CProgressCallback, FFIUserData)>,
+}
 
 /// Constructs the file header for a new archive.
 ///
@@ -108,156 +136,280 @@ pub fn compress_with_dict(data_payload: &[u8], dict: &[u8], level: &i32) ->
     Ok(compressed_data)
 }
 
-/// Assembles the final archive from its constituent parts.
-///
-/// This function orchestrates the final stage of the archiving process.
-/// It takes the processed file metadata, unique data chunks, and other
-/// parameters to construct the complete archive in memory. The process
-/// includes training a compression dictionary, compressing data chunks in
-/// parallel, serializing all metadata, and combining everything into a
-/// single, contiguous byte vector.
-///
-/// # Progress Reporting
-///
-/// This function accepts a callback closure to report its progress to the
-/// calling application. It will report on distinct stages of the process,
-/// such as dictionary creation and chunk compression, allowing for detailed
-/// user feedback (e.g., a progress bar).
-///
-/// # Arguments
-///
-/// * `ser_file_manifest`: A reference to the file manifest data.
-/// * `data_store`: A `HashMap` of all unique, uncompressed data chunks.
-/// * `sorted_hashes`: A sorted vector of all unique chunk hashes.
-/// * `file_count`: The total number of files being added.
-/// * `compression_level`: The Zstandard compression level to be used.
-/// * `dictionary_size`: The target size for the compression dictionary.
-/// * `worker_threads`: The number of threads for parallel compression.
-/// * `opt_dict`: A bool to enable dictionary optimization.
-/// * `progress_callback`: A thread-safe closure that receives `Progress`
-///   updates.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(Vec<u8>)` containing the complete binary data of the archive.
-/// - `Err(LibError)` if any step fails, such as dictionary training,
-///   compression, or serialization.
-pub fn finalize_archive<F>(
-    ser_file_manifest: &[FileManifestParent],
-    data_store: &HashMap<u64, Vec<u8>>,
-    sorted_hashes: &[u64],
-    file_count: u32,
-    compression_level: i32,
-    dictionary_size: u64,
-    worker_threads: usize,
-    opt_dict: bool,
-    progress_callback: &F
-) -> Result<Vec<u8>, LibError> 
+impl<'cb, F> ArchiveBuilder<'cb, F>
 where
     F: Fn(Progress) + Sync + Send,
 {
-    //Sort to prepare data to be analyzed to build dictionary.
-    let samples_for_dict: Vec<&[u8]> = sorted_hashes
-        .iter()
-        .filter_map(|hash| data_store.get(hash).map(|data| data.as_slice()))
-        .collect();
-
-    //Make dictionary from sorted data.
-    let mut _dictionary: Vec<u8> = Vec::new();
-
-    //Report progress before starting a dictionary generation
-    progress_callback(Progress::GeneratingDictionary);
-    
-    if opt_dict{
-        _dictionary = gen_zstd_opt_dict(
-        samples_for_dict, 
-        dictionary_size as usize, 
-        worker_threads, 
-        compression_level)?;
-    } else {
-        _dictionary = zstd::dict::from_samples(
-        &samples_for_dict,
-        dictionary_size as usize, // dictionary size in bytes
-        ).map_err(|e| LibError::CompressionError(e.to_string()))?;
+    pub fn new(
+        ser_file_manifest: Vec<FileManifestParent>,
+        data_store: HashMap<u64, Vec<u8>>,
+        sorted_hashes: Vec<u64>,
+        file_count: u32
+    ) -> Self {
+        Self {
+            ser_file_manifest,
+            data_store,
+            sorted_hashes,
+            file_count,
+            //Set default values for optional parameters
+            compression_level: 19, 
+            dictionary_size: 16 * 1024,
+            worker_threads: 0, //Let Rayon decide
+            opt_dict: false,
+            progress_callback: None,
+            c_progress_callback: None,
+        }
     }
 
-    //Report progress after dictionary generation is done.
-    progress_callback(Progress::DictionaryDone);
-    
-    let task_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(worker_threads)
-        .build()
-        .map_err(|e| LibError::InternalLibError(format!("Failed to create thread pool: {}", e)))?;
+    //The following 4 functions set optional parameters.
 
-    let compressed_dash: DashMap<u64, Vec<u8>> = DashMap::new();
+    /// Sets the Zstandard compression level.
+    ///
+    /// The default value is `19`.
+    pub fn compression_level(&mut self, level: i32) -> &mut Self {
+        self.compression_level = level;
+        self
+    }
 
-    let comp_result: Result<(), LibError> = task_pool.install(|| {
-        //Report that compression is starting
-        progress_callback(Progress::Compressing {
-            total_chunks: sorted_hashes.len() as u64 
-        });
+    /// Sets the target size for the compression dictionary in bytes.
+    ///
+    /// The default value is `16384` (16 KiB).
+    pub fn dictionary_size(&mut self, size: u64) -> &mut Self {
+        self.dictionary_size = size;
+        self
+    }
+
+    /// Enables dictionary optimization.
+    ///
+    /// This can improve compression but is significantly slower.
+    /// The default is `false`.
+    pub fn optimize_dictionary(&mut self, optimize: bool) -> &mut Self {
+        self.opt_dict = optimize;
+        self
+    }
+
+    /// Sets a callback function for progress reporting.
+    pub fn with_progress(mut self, callback: &'cb F) -> Self {
+        self.progress_callback = Some(callback);
+        self
+    }
+
+    /// Sets a callback function for progress reporting when called via C.
+    pub fn with_c_progress(
+            &mut self, 
+            callback: CProgressCallback, 
+            user_data: *mut c_void
+        ) -> &mut Self {
+            self.c_progress_callback = Some((callback, FFIUserData(user_data)));
+            self
+    }
+
+    /// Consumes the builder and returns the final archive as a byte vector.
+    ///
+    /// This function orchestrates the final stage of the archiving
+    /// process. It takes the processed file metadata, unique data chunks,
+    /// and other parameters to construct the complete archive in memory.
+    ///
+    /// The process includes training a compression dictionary,
+    /// compressing data chunks in parallel, serializing all metadata,
+    /// and combining everything into a single, contiguous byte vector.
+    ///
+    /// # Returns
+    ///
+    /// A `Result` which is:
+    /// - `Ok(Vec<u8>)` containing the complete binary data of the archive.
+    /// - `Err(LibError)` if any step fails, such as dictionary training,
+    ///   compression, or serialization.
+    pub fn build(self) -> Result<Vec<u8>, LibError> {
+        //Sort to prepare data to be analyzed to build dictionary.
+        let samples_for_dict: Vec<&[u8]> = self.sorted_hashes
+            .iter()
+            .filter_map(|hash| self.data_store.get(hash).map(|data| data.as_slice()))
+            .collect();
+
+        //Make dictionary from sorted data.
+        let mut _dictionary: Vec<u8> = Vec::new();
+
+        //Report progress before starting a dictionary generation
+        if let Some(callback) = self.progress_callback.as_ref() {
+            callback(Progress::GeneratingDictionary);
+        }
+
+        //Same for the C version.
+        if let Some((
+                callback, 
+                user_data_wrapper
+            )) = self.c_progress_callback {
+                let ffi_progress = FFIProgress {
+                    ty: FFIProgressType::GeneratingDictionary,
+                    total_chunks: 0,
+                };
+                callback(ffi_progress, user_data_wrapper.0);
+        }
         
-        sorted_hashes.par_iter().try_for_each(|hash| {
-            if let Some(data) = data_store.get(hash){
-                let compressed_chunk = compress_with_dict(
-                    data.as_slice(), 
-                    &_dictionary, 
-                    &compression_level)
-                    .map_err(|e| LibError::CompressionError(e.to_string()))?;
+        if self.opt_dict{
+            _dictionary = gen_zstd_opt_dict(
+            samples_for_dict, 
+            self.dictionary_size as usize, 
+            self.worker_threads, 
+            self.compression_level)?;
+        } else {
+            _dictionary = zstd::dict::from_samples(
+            &samples_for_dict,
+            self.dictionary_size as usize, // dictionary size in bytes
+            ).map_err(|e| LibError::CompressionError(e.to_string()))?;
+        }
 
-                compressed_dash.insert(*hash, compressed_chunk);
+        //Report progress after dictionary generation is done.
+        if let Some(callback) = self.progress_callback.as_ref() {
+            callback(Progress::DictionaryDone);
+        }
 
-                progress_callback(Progress::ChunkCompressed);
+        //Same for the C version.
+        if let Some((
+                callback, 
+                user_data_wrapper
+            )) = self.c_progress_callback {
+                let ffi_progress = FFIProgress{
+                    ty: FFIProgressType::DictionaryDone,
+                    total_chunks: 0,
+                };
+            callback(ffi_progress, user_data_wrapper.0);
+        }
+        
+        let task_pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(self.worker_threads)
+            .build()
+            .map_err(|e| LibError::ThreadPoolError(format!("Failed to create thread pool: {}", e)))?;
+
+        let compressed_dash: DashMap<u64, Vec<u8>> = DashMap::new();
+
+        let comp_result: Result<(), LibError> = task_pool.install(|| {
+            //Report that compression is starting
+            if let Some(callback) = self.progress_callback.as_ref() {    
+                callback(Progress::Compressing {
+                    total_chunks: self.sorted_hashes.len() as u64 
+                });
             }
-            Ok(())
-        })
-    });
 
-    //Check if any of the parallel operations failed.
-    comp_result?;
+            if let Some((
+                callback, 
+                user_data_wrapper
+            )) = self.c_progress_callback {
+                let ffi_progress = FFIProgress{
+                    ty: FFIProgressType::Compressing,
+                    total_chunks: self.sorted_hashes.len() as u64
+                };
+                callback(ffi_progress, user_data_wrapper.0);
+            }
+            
+            self.sorted_hashes.par_iter().try_for_each(|hash| {
+                if let Some(data) = self.data_store.get(hash){
+                    let compressed_chunk = compress_with_dict(
+                        data.as_slice(), 
+                        &_dictionary, 
+                        &self.compression_level)
+                        .map_err(|e| LibError::CompressionError(e.to_string()))?;
 
-    let (compressed_data_store, chunk_index) = 
-        serialize_compressed_store(&compressed_dash, sorted_hashes);
+                    compressed_dash.insert(*hash, compressed_chunk);
 
-    drop(compressed_dash);
+                    if let Some(callback) = self.progress_callback.as_ref() {
+                        callback(Progress::ChunkCompressed);
+                    }
 
-    /*The following are now prepared:
-    compressed_data store
-    chunk_index
-    dictionary*/
+                    if let Some((
+                        callback, 
+                        user_data_wrapper
+                    )) = self.c_progress_callback {
+                        let ffi_progress = FFIProgress{
+                            ty: FFIProgressType::ChunkCompressed,
+                            total_chunks: 0,
+                        };
+                        callback(
+                            ffi_progress, 
+                            user_data_wrapper.0);
+                    }
+                }
+                Ok(())
+            })
+        });
 
-    //Report that process is in the final stage
-    progress_callback(Progress::Finalizing);
+        //Check if any of the parallel operations failed.
+        comp_result?;
 
-    let config = bincode::config::standard();
+        let (compressed_data_store, chunk_index) = 
+            serialize_store(&compressed_dash, &self.sorted_hashes);
 
-    let bin_file_manifest = bincode::serde::encode_to_vec(
-    &ser_file_manifest, config
-    ).map_err(|e| LibError::ManifestEncodeError(e.to_string()))?;
+        drop(compressed_dash);
 
-    let bin_chunk_index = bincode::serde::encode_to_vec(
-    &chunk_index, config
-    ).map_err(|e| LibError::IndexEncodeError(e.to_string()))?;
+        /*The following are now prepared:
+        compressed_data store
+        chunk_index
+        dictionary*/
 
-    //Build the file header
-    let file_header = build_file_header(
-        file_count,
-        bin_file_manifest.len() as u64,
-        _dictionary.len() as u64,
-        bin_chunk_index.len() as u64,
-    );
+        //Report that process is in the final stage
+        if let Some(callback) = self.progress_callback.as_ref() {
+            callback(Progress::Finalizing);
+        }
 
-    let total_file_size = file_header.data_offset  as usize + 
-        compressed_data_store.len();
+        //Same for the C version.
+        if let Some((
+                callback, 
+                user_data_wrapper
+            )) = self.c_progress_callback {
+                let ffi_progress = FFIProgress{
+                    ty: FFIProgressType::Finalizing,
+                    total_chunks: 0,
+                };
+                callback(ffi_progress, user_data_wrapper.0);
+            }
 
-    let mut final_data = Vec::with_capacity(total_file_size);
+        let config = bincode::config::standard();
 
-    final_data.extend_from_slice(file_header.as_bytes());
-    final_data.extend_from_slice(&bin_file_manifest);
-    final_data.extend_from_slice(&_dictionary);
-    final_data.extend_from_slice(&bin_chunk_index);
-    final_data.extend_from_slice(&compressed_data_store);
+        let bin_file_manifest = bincode::serde::encode_to_vec(
+        &self.ser_file_manifest, config
+        ).map_err(|e| LibError::ManifestEncodeError(e.to_string()))?;
 
-    Ok(final_data)
+        let bin_chunk_index = bincode::serde::encode_to_vec(
+        &chunk_index, config
+        ).map_err(|e| LibError::IndexEncodeError(e.to_string()))?;
+
+        //Build the file header
+        let file_header = build_file_header(
+            self.file_count,
+            bin_file_manifest.len() as u64,
+            _dictionary.len() as u64,
+            bin_chunk_index.len() as u64,
+        );
+
+        let total_file_size = file_header.data_offset  as usize + 
+            compressed_data_store.len();
+
+        let mut final_data = Vec::with_capacity(total_file_size);
+
+        final_data.extend_from_slice(file_header.as_bytes());
+        final_data.extend_from_slice(&bin_file_manifest);
+        final_data.extend_from_slice(&_dictionary);
+        final_data.extend_from_slice(&bin_chunk_index);
+        final_data.extend_from_slice(&compressed_data_store);
+
+        Ok(final_data)
+    }
+}
+
+pub fn decompress_chunk(
+    comp_chunk_data: &[u8],
+    dictionary: &[u8]
+) -> Result<Vec<u8>, LibError> {
+    /*Create a zstd decoder with the prepared dictionary from the file
+    archive.*/
+    let mut decoder = zstd::stream::Decoder::with_dictionary(
+        comp_chunk_data, 
+        &dictionary)?;
+
+    //Decompress the data into a new vector.
+    let mut decompressed_chunk_data = Vec::new();
+    decoder.read_to_end(&mut decompressed_chunk_data)?;
+
+    Ok(decompressed_chunk_data)
 }
