@@ -12,6 +12,50 @@ use dashmap::DashMap;
 
 use crate::lib_structs::{ChunkLocation, FileManifestParent};
 
+/// A trait abstracting access to a key-value store of chunk data.
+///
+/// This trait provides a generic interface for retrieving chunk data from
+/// different underlying map implementations, such as `HashMap` or `DashMap`.
+/// It is used to allow serialization logic to operate on either a
+/// thread-safe or non-thread-safe data store without duplication.
+pub trait ChunkStore {
+    /// Retrieves a reference to a chunk's data by its hash.
+    ///
+    /// # Arguments
+    ///
+    /// * `hash`: The unique `u64` hash of the chunk to retrieve.
+    ///
+    /// # Returns
+    ///
+    /// An `Option` containing a reference to the chunk's byte `Vec`.
+    /// The reference is wrapped in a type that dereferences to `Vec<u8>`.
+    /// Returns `None` if no chunk with the specified hash is found.
+    fn get_chunk(&self, hash: &u64) -> 
+        Option<impl std::ops::Deref<Target = Vec<u8>>>;
+}
+
+/// Implements `ChunkStore` for a standard, single-threaded `HashMap`.
+///
+/// This implementation allows the generic serialization functions to
+/// operate on a `HashMap` that maps chunk hashes to their byte data.
+impl ChunkStore for HashMap<u64, Vec<u8>> {
+    fn get_chunk(&self, hash: &u64) -> Option<impl std::ops::Deref<Target = Vec<u8>>> {
+        self.get(hash)
+    }
+}
+
+/// Implements `ChunkStore` for a thread-safe `DashMap`.
+///
+/// This implementation allows the generic serialization functions to
+/// operate on a `DashMap`. It provides read access to the map in a
+/// concurrent context, returning a read guard that dereferences to the
+/// chunk's data.
+impl ChunkStore for DashMap<u64, Vec<u8>> {
+    fn get_chunk(&self, hash: &u64) -> Option<impl std::ops::Deref<Target = Vec<u8>>> {
+        self.get(hash)
+    }
+}
+
 /// Extracts all values from a DashMap into a vector.
 ///
 /// This utility function iterates over a `DashMap`, clones each value,
@@ -39,31 +83,33 @@ where
     input_dash.iter().map(|entry| entry.value().clone()).collect()
 }
 
-/// Serializes a data store into a byte vector and an index.
+/// Serializes a chunk store into a byte vector and generates an index.
 ///
 /// This function transforms a map of unique data chunks into a single,
 /// ordered byte vector. It also generates a `chunk_index` that maps each
 /// chunk's hash to its precise offset and length within this new data
-/// block. This is a crucial step in preparing data for final archival.
+/// block. It is generic over any type that implements `ChunkStore`.
 ///
 /// # Arguments
 ///
-/// * `data_store`: A map from chunk hashes to their raw byte data.
-/// * `sorted_hashes`: A slice of hashes, sorted to ensure deterministic
-///   ordering of the data in the final byte vector.
+/// * `store`: A reference to a type implementing `ChunkStore`, which
+///   contains the chunk data mapped by hash.
+/// * `sorted_hashes`: A slice of `u64` hashes, sorted to ensure a
+///   deterministic order for the serialized data.
 ///
 /// # Returns
 ///
 /// A tuple containing:
 /// - A `Vec<u8>` with all chunk data concatenated in order.
-/// - A `HashMap` that serves as the chunk index.
-pub fn serialize_data_store(
-    data_store: &HashMap<u64, Vec<u8>>,
+/// - A `HashMap<u64, ChunkLocation>` that serves as the chunk index,
+///   mapping each hash to its location in the returned byte vector.
+pub fn serialize_store<S: ChunkStore>(
+    store: &S,
     sorted_hashes: &[u64],
 ) -> (Vec<u8>, HashMap<u64, ChunkLocation>){
     let total_size = sorted_hashes
         .iter()
-        .map(|hash| data_store.get(hash).map_or(0, |data| data.len()))
+        .map(|hash| store.get_chunk(hash).map_or(0, |data| data.len()))
         .sum();
     
     let (data_store, chunk_index, _offset) = sorted_hashes.iter().fold(
@@ -73,65 +119,8 @@ pub fn serialize_data_store(
             0u64, //Current_offset
         ),
         |(mut data_vec, mut index_map, mut offset), hash| {
-            if let Some(data_entry) = data_store.get(hash) {
-                let data = data_entry;
-                let data_len = data.len() as u64;
-
-                index_map.insert(
-                    *hash,
-                    ChunkLocation {
-                        offset,
-                        length: data_len as u32,
-                    },
-                );
-
-                data_vec.extend_from_slice(&data);
-                offset += data_len;
-            }
-            (data_vec, index_map, offset)
-        },
-    );
-
-    (data_store, chunk_index)
-}
-
-/// Serializes a compressed data store into a contiguous byte vector.
-///
-/// This function is analogous to `serialize_data_store` but operates on
-/// data that has already been compressed. It takes a map of chunk hashes
-/// to their compressed byte data and serializes them into a single,
-/// ordered `Vec<u8>`. It also creates an index mapping each hash to its
-/// `ChunkLocation`.
-///
-/// # Arguments
-///
-/// * `compressed_store`: A map from chunk hashes to compressed byte data.
-/// * `sorted_hashes`: A slice of hashes, sorted to ensure deterministic
-///   ordering of the data in the final byte vector.
-///
-/// # Returns
-///
-/// A tuple containing:
-/// - A `Vec<u8>` with all compressed chunk data concatenated.
-/// - A `HashMap` that serves as the chunk index for the compressed data.
-pub fn serialize_compressed_store(
-    compressed_store: &DashMap<u64, Vec<u8>>,
-    sorted_hashes: &[u64],
-) -> (Vec<u8>, HashMap<u64, ChunkLocation>){
-    let total_size = sorted_hashes
-        .iter()
-        .map(|hash| compressed_store.get(hash).map_or(0, |data| data.len()))
-        .sum();
-    
-    let (data_store, chunk_index, _offset) = sorted_hashes.iter().fold(
-        (
-            Vec::with_capacity(total_size),
-            HashMap::with_capacity(sorted_hashes.len()),
-            0u64, //Current_offset
-        ),
-        |(mut data_vec, mut index_map, mut offset), hash| {
-            if let Some(data_entry) = compressed_store.get(hash) {
-                let data = data_entry;
+            if let Some(data_entry) = store.get_chunk(hash) {
+                let data = &*data_entry;
                 let data_len = data.len() as u64;
 
                 index_map.insert(
@@ -193,7 +182,7 @@ pub fn serialize_uncompressed_data(file_manifest: &DashMap<String, FileManifestP
     
     sorted_hashes.sort_unstable();
 
-    let (ser_data_store, chunk_index) = serialize_data_store(data_store, &sorted_hashes);
+    let (ser_data_store, chunk_index) = serialize_store(data_store, &sorted_hashes);
     
     (
         ser_file_manifest, 

@@ -31,7 +31,7 @@ use crate::parsing::{MAGIC_NUMBER, SUPPORTED_VERSION};
 
 use crate::processing::gen_zstd_opt_dict;
 
-use crate::serialization::{serialize_compressed_store};
+use crate::serialization::{serialize_store};
 
 unsafe impl Send for FFIUserData {}
 unsafe impl Sync for FFIUserData {}
@@ -338,7 +338,7 @@ where
         comp_result?;
 
         let (compressed_data_store, chunk_index) = 
-            serialize_compressed_store(&compressed_dash, &self.sorted_hashes);
+            serialize_store(&compressed_dash, &self.sorted_hashes);
 
         drop(compressed_dash);
 
