@@ -259,9 +259,13 @@ pub fn rebuild_and_verify_single_file(
 ///
 /// # Safety
 ///
-/// This function contains `unsafe` code as it calls directly into the
-/// C `zstd-sys` library. It makes assumptions about pointer validity
-/// and buffer lengths that must be upheld to prevent memory errors.
+/// This function is safe because it upholds the contracts of the zstd-sys C 
+/// functions:
+/// 1. `dict_buffer` is allocated with sufficient capacity (`max_dict_size`).
+/// 2. The pointers and lengths for `samples_buffer` and `sample_sizes` are 
+/// valid as they are derived directly from Rust-managed Vecs and slices.
+/// 3. All potential errors from the C function are checked with 
+/// `ZDICT_isError`.
 pub fn gen_zstd_opt_dict(samples: Vec<&[u8]>,
     max_dict_size: usize,
     workers: usize,
