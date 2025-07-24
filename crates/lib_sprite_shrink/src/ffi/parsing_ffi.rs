@@ -201,7 +201,8 @@ pub unsafe extern "C" fn parse_file_metadata_ffi(
         };
 
     //Convert the Vec<FileManifestParent> to a Vec<FFIFileManifestParent>
-    let mut ffi_manifests: Vec<FFIFileManifestParent> = file_manifest
+    let mut ffi_manifests: Vec<FFIFileManifestParent> = 
+        match file_manifest
         .into_iter()
         .map(|fmp| {
             //Convert the nested Vec<SSAChunkMeta>
@@ -218,16 +219,21 @@ pub unsafe extern "C" fn parse_file_metadata_ffi(
             //Give up ownership so Rust doesn't deallocate it
             std::mem::forget(chunk_meta_vec);
 
-            FFIFileManifestParent {
-                //Convert filename String to a C string
-                filename: CString::new(fmp.filename)
-                .unwrap_or_default()
-                .into_raw(),
-                    chunk_count: fmp.chunk_count,
-                    chunk_metadata: chunk_meta_ptr,
-            }
+            let c_filename = match CString::new(fmp.filename) {
+                Ok(s) => s.into_raw(),
+                Err(_) => return Err(FFIStatus::InvalidString),
+            };
+
+            Ok(FFIFileManifestParent {
+                filename: c_filename,
+                chunk_count: fmp.chunk_count,
+                chunk_metadata: chunk_meta_ptr,
+            })
         })
-        .collect();
+        .collect() {
+            Ok(v) => v,
+            Err(status) => return status, //Propagate the error status
+        };
 
     let manifests_ptr = ffi_manifests.as_mut_ptr();
     let manifests_len = ffi_manifests.len();
