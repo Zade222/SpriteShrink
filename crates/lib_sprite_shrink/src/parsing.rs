@@ -16,7 +16,8 @@ use crate::lib_structs::{FileHeader, FileManifestParent, ChunkLocation};
 /// This 8-byte signature is at the beginning of the file and is used to
 /// quickly verify that the file is a valid archive before parsing. The
 /// value is "SSARCHV1".
-pub const MAGIC_NUMBER: &[u8; 8] = b"SSARCHV1";
+#[unsafe(no_mangle)]
+pub static MAGIC_NUMBER: [u8; 8] = *b"SSARCHV1";
 
 /// The latest archive format version that this library supports.
 ///
@@ -58,7 +59,7 @@ pub fn parse_file_header(header_data: &[u8]) -> Result<FileHeader, LibError>{
         .map_err(|e| LibError::InvalidHeaderError(e.to_string()))?;
 
     //Verify the magic number to ensure it's the correct file type.
-    if file_header.magic_num != *MAGIC_NUMBER {
+    if file_header.magic_num != MAGIC_NUMBER {
         return Err(LibError::InvalidHeaderError(
             "File Magic Number is invalid.".to_string(),
         ));

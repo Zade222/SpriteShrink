@@ -85,7 +85,7 @@ fn build_file_header(file_count: u32,
 
     //Build, file and return a FileHeader struct with data.
     FileHeader {
-        magic_num:      *MAGIC_NUMBER,
+        magic_num:      MAGIC_NUMBER,
         file_version:   SUPPORTED_VERSION,
         file_count:     file_count,
         algorithm:      algorithm_code,
