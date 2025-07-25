@@ -11,6 +11,10 @@ use std::ffi::c_void;
 
 use dashmap::DashMap;
 use fastcdc::v2020::{Chunk, FastCDC, Normalization};
+#[cfg(target_os = "macos")]
+use libc::{
+    pthread_self, pthread_set_qos_class_self_np
+};
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use sha2::{Digest,Sha512};
 use xxhash_rust::xxh3::xxh3_64_with_seed;
@@ -373,10 +377,34 @@ pub fn test_compression(
         dictionary_size, // dictionary size in bytes
         ).map_err(|e| LibError::DictionaryError(e.to_string()))?;
     
-    let task_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(worker_count)
-        .build()
-        .map_err(|e| LibError::ThreadPoolError(format!("Failed to create thread pool: {}", e)))?; 
+        let task_pool = {
+        let builder = rayon::ThreadPoolBuilder::new()
+            .num_threads(worker_count);
+        
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.spawn_handler(|thread| {
+                let mut b = thread;
+                //Create a place for the new thread's stack
+                let mut stack = Vec::new(); 
+                mem::swap(b.stack_size_mut(), &mut stack);
+
+                b.spawn(move || {
+                    //Inside the new Rayon thread, set its QoS.
+                    unsafe {
+                        pthread_set_qos_class_self_np(
+                            libc::QOS_CLASS_UTILITY, 0
+                        );
+                    }
+                });
+            });
+        }
+        
+        builder.build()
+            .map_err(|e| LibError::ThreadPoolError(
+                format!("Failed to create thread pool: {}", e))
+            )?
+    };
 
     let compressed_dash: DashMap<u64, Vec<u8>> = DashMap::new();
 

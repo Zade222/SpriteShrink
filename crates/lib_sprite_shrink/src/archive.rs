@@ -21,6 +21,11 @@ use crate::ffi::ffi_structs::{
     FFIUserData, FFIProgress, FFIProgressType
 };
 
+#[cfg(target_os = "macos")]
+use libc::{
+    pthread_self, pthread_set_qos_class_self_np
+};
+
 use crate::lib_error_handling::LibError;
 
 use crate::lib_structs::{
@@ -290,10 +295,34 @@ where
             callback(ffi_progress, user_data_wrapper.0);
         }
         
-        let task_pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(self.worker_threads)
-            .build()
-            .map_err(|e| LibError::ThreadPoolError(format!("Failed to create thread pool: {}", e)))?;
+        let task_pool = {
+            let builder = rayon::ThreadPoolBuilder::new()
+                .num_threads(self.worker_threads);
+            
+            #[cfg(target_os = "macos")]
+            {
+            builder = builder.spawn_handler(|thread| {
+                let mut b = thread;
+                //Create a place for the new thread's stack
+                let mut stack = Vec::new(); 
+                mem::swap(b.stack_size_mut(), &mut stack);
+
+                b.spawn(move || {
+                    //Inside the new Rayon thread, set its QoS.
+                    unsafe {
+                        pthread_set_qos_class_self_np(
+                            libc::QOS_CLASS_UTILITY, 0
+                        );
+                    }
+                });
+            });
+            }
+            
+            builder.build()
+                .map_err(|e| LibError::ThreadPoolError(
+                    format!("Failed to create thread pool: {}", e))
+                )?
+        };
 
         let compressed_dash: DashMap<u64, Vec<u8>> = DashMap::new();
 

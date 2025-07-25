@@ -708,6 +708,7 @@ dependencies = [
  "bincode",
  "bytemuck",
  "dashmap",
+ "dispatch2",
  "fastcdc",
  "libc",
  "rayon",
