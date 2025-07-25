@@ -81,7 +81,7 @@ To build SpriteShrink from source, you will need the [Rust toolchain](https://ww
 1.  **Clone the repository:**
 
     ```bash
-    git clone [https://github.com/Zade222/SpriteShrink.git](https://github.com/Zade222/SpriteShrink.git)
+    git clone https://github.com/Zade222/SpriteShrink.git
     cd sprite_shrink
     ```
 
