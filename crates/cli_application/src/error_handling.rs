@@ -62,4 +62,7 @@ pub enum CliError {
 
     #[error("Range parse error {0}")]
     RangeParseError(#[from] RangeError),
+
+    #[error("Range parse error {0}")]
+    OSPriorityError(#[from] thread_priority::Error),
 }

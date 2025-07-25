@@ -12,13 +12,18 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use indicatif::{ProgressBar, ProgressStyle};
+#[cfg(target_os = "macos")]
+use libc::{
+    pthread_self, pthread_set_qos_class_self_np
+};
 use sprite_shrink::{
     ArchiveBuilder, FileManifestParent, Progress,
     create_file_manifest_and_chunks, process_file_in_memory, 
     rebuild_and_verify_single_file, serialize_uncompressed_data, test_compression
 };
-use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
+use thread_priority::*;
 
 use crate::arg_handling::Args;
 use crate::error_handling::CliError;
@@ -72,6 +77,30 @@ pub fn run_compression(
         return Err(CliError::NoFilesError());
     }
 
+    #[cfg(target_os = "linux")]
+    {
+        let priority = ThreadPriority::Crossplatform(30.try_into().unwrap());
+
+        set_current_thread_priority(priority)?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        unsafe {
+            pthread_set_qos_class_self_np(libc::QOS_CLASS_UTILITY, 0);
+        }
+    }
+
+
+    #[cfg(target_os = "windows")]
+    {
+        let priority = ThreadPriority::Os(WinAPIThreadPriority::BelowNormal.into());
+
+        set_current_thread_priority(priority)?;
+    }
+
+
+
     /*Stores the chunk metadata for each file. 
     The key is the file name and the value is a FileManifestParent struct.*/
     let mut _file_manifest: DashMap<String, FileManifestParent> = DashMap::new();
@@ -108,17 +137,39 @@ pub fn run_compression(
 
     /*Create read_pool to specify the amount of threads to be used by the 
     parallel process that follows it.*/
-    let _process_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(_process_threads)
-        .build()
-        .map_err(|e| CliError::InternalError(format!
-            ("Failed to create thread pool: {}", e)))?;
+    let _process_pool = {
+        let builder = rayon::ThreadPoolBuilder::new()
+            .num_threads(_process_threads);
+
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.spawn_handler(|thread| {
+                let mut b = thread;
+                //Create a place for the new thread's stack
+                let mut stack = Vec::new(); 
+                mem::swap(b.stack_size_mut(), &mut stack);
+
+                b.spawn(move || {
+                    //Inside the new Rayon thread, set its QoS.
+                    unsafe {
+                        pthread_set_qos_class_self_np(
+                            libc::QOS_CLASS_UTILITY, 0
+                        );
+                    }
+                });
+            });
+        }
+        
+        builder.build()
+            .map_err(|e| CliError::InternalError(
+                format!("Failed to create thread pool: {}", e)))?
+    };
 
     let mut best_window_size = args.window.map_or(
-        2 * 1024, |b| b.as_u64());
+        2 * 1024, |byte| byte.as_u64());
 
     let mut best_dictionary_size = args.dictionary.map_or(
-        16 * 1024, |b| b.as_u64());
+        16 * 1024, |byte| byte.as_u64());
 
     if args.auto_tune {
         let timeout_dur = args.autotune_timeout.
@@ -272,11 +323,33 @@ pub fn run_compression(
 
     /*Create task_pool to specify the amount of threads to be used by the 
     rebuild_and_verify_single_file parallel process. */
-    let _compute_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(_compute_threads)
-        .build()
-        .map_err(|e| CliError::InternalError(
-            format!("Failed to create thread pool: {}", e)))?;
+    let _compute_pool = {
+        let builder = rayon::ThreadPoolBuilder::new()
+            .num_threads(_compute_threads);
+
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.spawn_handler(|thread| {
+                let mut b = thread;
+                //Create a place for the new thread's stack
+                let mut stack = Vec::new(); 
+                mem::swap(b.stack_size_mut(), &mut stack);
+
+                b.spawn(move || {
+                    //Inside the new Rayon thread, set its QoS.
+                    unsafe {
+                        pthread_set_qos_class_self_np(
+                            libc::QOS_CLASS_UTILITY, 0
+                        );
+                    }
+                });
+            });
+        }
+
+        builder.build()
+            .map_err(|e| CliError::InternalError(
+                format!("Failed to create thread pool: {}", e)))?
+    };
 
     /*Serialize and organize data. */
 
