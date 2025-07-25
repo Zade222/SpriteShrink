@@ -35,7 +35,7 @@ The tool's content-defined chunking and deduplication algorithms provide the mos
 
 **However**, given the aforemention limitations there are circumstances where it can work well. Systems that have games that span multiple discs can work well. I have tested it specifically on my copy of Final Fantasy 7 which is three discs. Despite being one continugous game across the three discs, there is a fair amount of assets used across all three discs that are duplicated should you return to earlier parts of the game. This lead to an approximate compressed:original size ratio of 1:2 when I compressed my disc images using SpriteShrink.
 
-I would only use SpriteShrink for disc based media **IF** you configure your emulation software of choice to load the image into memory post extraction. That way the disc is extracted and then run from RAM. If the software needs to repeatedly extract the whole disc to get a small piece of data that will likely cause performance problems or instability.
+Should emulation software integrate the associated library and extraction capabilities I would only use SpriteShrink for larger ROMs or disc based media **IF** you configure your emulation software of choice to load the image into memory post extraction. That way the disc is extracted and then run from RAM. If the software needs to repeatedly extract the whole disc to get a small piece of data that will likely cause performance problems or instability.
 
 I hope to work on another application that uses what I learned from this project to make a successor of sorts to CHD that uses much of what SpriteShrink does but specifically for larger modern games or optical media based games.
 
