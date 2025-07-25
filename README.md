@@ -177,4 +177,6 @@ The documentation for the `.ssmc` file format specification is licensed separate
 
 ## Support and Contact
 
-If you have any questions, encounter issues, or would like to provide feedback, please open an issue on the [GitHub Issues page](https://github.com/Zade222/SpriteShrink/issues).
+If you encounter issues or would like to provide feedback, please open an issue on the [GitHub Issues page](https://github.com/Zade222/SpriteShrink/issues). Please understand that the issue tracker isn't a forum. It is for tracking feature requests, problems, issues, etc.
+
+If you want to discuss the software and it's capabilities with others please use the [GitHub Discussions page](https://github.com/Zade222/SpriteShrink/discussions).
