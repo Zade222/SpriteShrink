@@ -146,7 +146,7 @@ pub fn run_extraction(file_path: &PathBuf,
                         let comp_chunk_data = read_file_data(
                         &file_path, 
                         &absolute_offset, 
-                        &chunk_length
+                        &(chunk_location.length as usize)
                         )?;
 
                         let decompressed_chunk_data = decompress_chunk(
