@@ -23,6 +23,24 @@ It also includes `lib_sprite_shrink`, a Rust library for seamless integration in
 
 ---
 
+## Intended Use Cases and Limitations
+
+SpriteShrink is specifically designed for collections of files that are relatively small and share portions of data. The ideal use case is managing entire libraries of retro game ROMs from cartridge-based systems.
+
+While it is technically capable of processing any file type, it is **not recommended** for:
+* **Large Modern Game Files**: Compressing games from systems that use optical media (like CDs, DVDs, or Blu-rays) or high-capacity cartridges (2GB or more).
+* **Files with Little Redundancy**: Collections of files that do not share common data (e.g., a directory of unrelated documents or videos).
+
+The tool's content-defined chunking and deduplication algorithms provide the most benefit when byte-level similarities exist across multiple files, which is common in ROM sets with different regional versions and revisions.
+
+**However**, given the aforemention limitations there are circumstances where it can work well. Systems that have games that span multiple discs can work well. I have tested it specifically on my copy of Final Fantasy 7 which is three discs. Despite being one continugous game across the three discs, there is a fair amount of assets used across all three discs that are duplicated should you return to earlier parts of the game. This lead to an approximate compressed:original size ratio of 1:2 when I compressed my disc images using SpriteShrink.
+
+I would only use SpriteShrink for disc based media **IF** you configure your emulation software of choice to load the image into memory post extraction. That way the disc is extracted and then run from RAM. If the software needs to repeatedly extract the whole disc to get a small piece of data that will likely cause performance problems or instability.
+
+I hope to work on another application that uses what I learned from this project to make a successor of sorts to CHD that uses much of what SpriteShrink does but specifically for larger modern games or optical media based games.
+
+---
+
 ## The .ssmc File Format
 
 SpriteShrink uses a custom archive format called **SpriteShrink Multi-Cart (`.ssmc`)**. This format is specifically designed for the efficient storage of file collections with a high degree of redundant data, such as ROM sets with multiple regional versions or revisions.
