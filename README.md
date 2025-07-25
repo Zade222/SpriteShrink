@@ -70,7 +70,7 @@ The compression process follows a multi-stage pipeline to ensure maximum efficie
 
 ### Installation
 
-Pre-compiled binaries for supported platforms will be made available on the [releases page](https://github.com/Zadeis/sprite_shrink/releases). I currently do not have access to a Mac based machine so I am currently only providing 64-bit x86-64 binaries for Linux and Windows. If you want to help with Mac efforts feel free to contribute!
+Pre-compiled binaries for supported platforms will be made available on the [releases page](https://github.com/Zade222/SpriteShrink/releases). I currently do not have access to a Mac based machine so I am currently only providing 64-bit x86-64 binaries for Linux and Windows. If you want to help with Mac efforts feel free to contribute!
 
 Alternatively, you can build SpriteShrink from source.
 
@@ -81,7 +81,7 @@ To build SpriteShrink from source, you will need the [Rust toolchain](https://ww
 1.  **Clone the repository:**
 
     ```bash
-    git clone [https://github.com/Zadeis/sprite_shrink.git](https://github.com/Zadeis/sprite_shrink.git)
+    git clone [https://github.com/Zade222/SpriteShrink.git](https://github.com/Zade222/SpriteShrink.git)
     cd sprite_shrink
     ```
 
