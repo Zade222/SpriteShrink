@@ -6,7 +6,7 @@
 //! then proceeds to decompress and write the files requested by the user
 //! to the designated output directory.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use rayon::prelude::*;
 
 use sprite_shrink::{decompress_chunk};
@@ -55,7 +55,7 @@ use crate::storage_io::{
 ///   in the archive.
 /// - Any error propagated from the decompression or file writing stages.
 pub fn run_extraction(file_path: &PathBuf, 
-    out_dir: &PathBuf, 
+    out_dir: &Path, 
     rom_indices: &Vec<u8>,
     args: &Args,
 ) -> Result<(), CliError> {
@@ -107,7 +107,9 @@ pub fn run_extraction(file_path: &PathBuf,
     let worker_pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
         .build()
-        .map_err(|e| CliError::InternalError(format!("Failed to create thread pool: {}", e)))?;
+        .map_err(|e| CliError::InternalError(format!(
+            "Failed to create thread pool: {e}"
+        )))?;
 
     /*In parallel, for each ROM file index provided, the below code
     accomplishes the following:
@@ -123,7 +125,7 @@ pub fn run_extraction(file_path: &PathBuf,
             let fmp = file_manifest
                 .get((*rom - 1)  as usize)
                 .ok_or_else(|| CliError::InvalidRomIndex(
-                    format!("ROM index {} is out of bounds.", rom)
+                    format!("ROM index {rom} is out of bounds.")
                 ))?;
 
             let file_data: Vec<Vec<u8>> = fmp
@@ -144,7 +146,7 @@ pub fn run_extraction(file_path: &PathBuf,
                             header.data_offset;
                         
                         let comp_chunk_data = read_file_data(
-                        &file_path, 
+                        file_path, 
                         &absolute_offset, 
                         &(chunk_location.length as usize)
                         )?;
