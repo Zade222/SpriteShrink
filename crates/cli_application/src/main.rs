@@ -61,12 +61,13 @@ fn run(args: &Args) -> Result<(), CliError> {
             let indices: Vec<u8> = range_parser::parse::<u8>(extract_str)?;
             
             if let Some(max_arg_index) = indices.iter().max().cloned() {
-                let file_max_index: u8 = get_max_rom_index(&file_path)?;
+                let file_max_index: u8 = get_max_rom_index(file_path)?;
 
                 if file_max_index < max_arg_index {
                     return Err(CliError::InvalidRomIndex(format!(
-                    "One or more ROM indexes are invalid. The requested index {} is out of the valid range (1-{}).",
-                    max_arg_index, file_max_index
+                    "One or more ROM indexes are invalid. The requested index \
+                        {max_arg_index} is out of the valid range \
+                        (1-{file_max_index})." 
                     )));
                 }
             }
