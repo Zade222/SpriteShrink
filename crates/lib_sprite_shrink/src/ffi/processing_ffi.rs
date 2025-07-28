@@ -34,7 +34,7 @@ use crate::{FileData, FileManifestParent};
 /// specified lengths
 /// and that `file_name_ptr` is a valid, null-terminated C string.
 /// - `out_ptr` must be a valid, non-null pointer to a 
-/// `*mut FFIFileManifestChunks`.
+///   `*mut FFIFileManifestChunks`.
 /// - On success, the pointer written to `out_ptr` is owned by the caller and
 ///   MUST be freed by passing it to `free_file_manifest_and_chunks_ffi`.
 #[unsafe(no_mangle)]
@@ -165,8 +165,8 @@ pub unsafe extern "C" fn free_file_manifest_and_chunks_ffi(ptr: *mut FFIFileMani
         //Reclaim and drop the Vec for the chunk metadata.
         let _ = Vec::from_raw_parts(
             output_box.fmp.chunk_metadata as *mut FFISSAChunkMeta,
-            output_box.fmp.chunk_metadata_len as usize,
-            output_box.fmp.chunk_metadata_len as usize,
+            output_box.fmp.chunk_metadata_len,
+            output_box.fmp.chunk_metadata_len,
         );
 
         //Deallocate the array of FFIHashedChunk and their inner data
@@ -194,7 +194,7 @@ pub unsafe extern "C" fn free_file_manifest_and_chunks_ffi(ptr: *mut FFIFileMani
 /// # Safety
 /// - `file_data` must be valid for reads. Its pointers must not be null.
 /// - `out_ptr` must be a valid, non-null pointer to a 
-/// `*mut FFIProcessedFileData`.
+///   `*mut FFIProcessedFileData`.
 /// - On success, the pointer written to `out_ptr` is owned by the caller and
 ///   MUST be freed by passing it to `free_processed_file_data_ffi`.
 #[unsafe(no_mangle)]
@@ -464,7 +464,7 @@ pub unsafe extern "C" fn test_compression_ffi(
     //Run test compression with received and converted data.
     match test_compression(
         &data_store, 
-        &sorted_hashes, 
+        sorted_hashes, 
         worker_count, 
         dictionary_size
     ) {
