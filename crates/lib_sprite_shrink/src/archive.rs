@@ -11,8 +11,6 @@ use std::io::Read;
 use std::mem;
 use std::os::raw::c_void;
 
-use bincode;
-
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use zerocopy::IntoBytes;
 use dashmap::DashMap;
@@ -92,15 +90,15 @@ fn build_file_header(file_count: u32,
     FileHeader {
         magic_num:      MAGIC_NUMBER,
         file_version:   SUPPORTED_VERSION,
-        file_count:     file_count,
+        file_count,
         algorithm:      algorithm_code,
         pad:            [0, 0, 0, 0, 0, 0],
         man_offset:     header_size,
-        man_length:     man_length,
+        man_length,
         dict_offset:    header_size + man_length,
-        dict_length:    dict_length,
+        dict_length,
         chunk_index_offset: header_size + man_length + dict_length,
-        chunk_index_length: chunk_index_length,
+        chunk_index_length,
         data_offset: header_size + man_length + dict_length + chunk_index_length
     }
 }
@@ -320,7 +318,7 @@ where
             
             builder.build()
                 .map_err(|e| LibError::ThreadPoolError(
-                    format!("Failed to create thread pool: {}", e))
+                    format!("Failed to create thread pool: {e}"))
                 )?
         };
 
@@ -448,7 +446,7 @@ pub fn decompress_chunk(
     archive.*/
     let mut decoder = zstd::stream::Decoder::with_dictionary(
         comp_chunk_data, 
-        &dictionary)?;
+        dictionary)?;
 
     //Decompress the data into a new vector.
     let mut decompressed_chunk_data = Vec::new();
