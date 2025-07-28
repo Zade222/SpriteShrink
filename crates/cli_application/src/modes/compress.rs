@@ -132,7 +132,7 @@ pub fn run_compression(
     } else {
         /*0 lets Rayon decide the optimal number when thread parameter isn't 
         used, otherwise set to thread parameter.*/
-        _process_threads = args.threads.unwrap_or(0) as usize;
+        _process_threads = args.threads.unwrap_or(0);
     };
 
     /*Create read_pool to specify the amount of threads to be used by the 
@@ -162,7 +162,7 @@ pub fn run_compression(
         
         builder.build()
             .map_err(|e| CliError::InternalError(
-                format!("Failed to create thread pool: {}", e)))?
+                format!("Failed to create thread pool: {e}")))?
     };
 
     let mut best_window_size = args.window.map_or(
@@ -183,7 +183,7 @@ pub fn run_compression(
 
             loop {
                 if args.verbose{
-                    println!("Testing window size: {}", current_window_size);
+                    println!("Testing window size: {current_window_size}");
                 }
 
                 /*Set starting time for determining the compressed size 
@@ -220,8 +220,8 @@ pub fn run_compression(
                 if compressed_size > last_compressed_size {
                     //Process passed the optimal point, stop.
                     if args.verbose{
-                        println!("Optimal window size found to be {} bytes.", 
-                            best_window_size);
+                        println!("Optimal window size found to be \
+                            {best_window_size} bytes.");
                     }
                     break;
                 }
@@ -230,9 +230,10 @@ pub fn run_compression(
                     if elapsed > timeout {
                         if args.verbose{
                             println!(
-                                "Autotune for window size {} took too long (>{:?}). \
-                                Using best result so far: {}.",
-                                current_window_size, timeout, best_window_size
+                                "Autotune for window size {current_window_size}\
+                                took too long (>{:?}).Using best result so far:\
+                                {best_window_size}.",
+                                timeout 
                             );
                         }
                         break; // Exit the loop
@@ -281,8 +282,8 @@ pub fn run_compression(
                 if compressed_size > last_compressed_size {
                     //Process passed the optimal point, stop.
                     if args.verbose{
-                        println!("Optimal dictionary size found to be {} bytes.", 
-                            best_dictionary_size);
+                        println!("Optimal dictionary size found to be \
+                            {best_dictionary_size} bytes.");
                     }
                     break;
                 }
@@ -348,7 +349,7 @@ pub fn run_compression(
 
         builder.build()
             .map_err(|e| CliError::InternalError(
-                format!("Failed to create thread pool: {}", e)))?
+                format!("Failed to create thread pool: {e}")))?
     };
 
     /*Serialize and organize data. */
@@ -380,7 +381,7 @@ pub fn run_compression(
             .par_iter()
             .try_for_each(|fmp| {
                 rebuild_and_verify_single_file(
-                    &fmp, &ser_data_store, &chunk_index, &_veri_hashes)
+                    fmp, &ser_data_store, &chunk_index, &_veri_hashes)
             })
     })?;
     
