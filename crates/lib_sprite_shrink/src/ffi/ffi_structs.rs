@@ -7,7 +7,7 @@
 //!
 //! When interacting with these structs from C, the caller is responsible for:
 //! - Ensuring that all pointers are valid and not null unless otherwise 
-//! specified.
+//!   specified.
 //! - Managing the memory for any data pointed to by these structs, including
 //!   allocating it before calling Rust and freeing it after Rust returns it.
 //! - Ensuring that all C-strings (`c_char*`) are null-terminated.
