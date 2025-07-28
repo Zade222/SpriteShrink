@@ -112,10 +112,10 @@ pub unsafe extern "C" fn free_parsed_chunk_index_ffi(
 ///
 /// # Safety
 /// - `header_data_array_ptr` must point to valid memory of at least 
-/// `header_data_len` bytes.
+///   `header_data_len` bytes.
 /// - `out_ptr` must be a valid pointer to a `*mut FileHeader`.
 /// - The pointer returned via `out_ptr` is owned by the caller and MUST be 
-/// freed by passing it to `free_file_header_ffi`.
+///   freed by passing it to `free_file_header_ffi`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn parse_file_header_ffi(
     header_data_array_ptr: *const u8,
@@ -174,10 +174,10 @@ pub unsafe extern "C" fn free_file_header_ffi(ptr: *mut FileHeader) {
 ///
 /// # Safety
 /// - `manifest_data_array_ptr` must point to valid memory of at least 
-/// `manifest_data_len` bytes.
+///   `manifest_data_len` bytes.
 /// - `out_ptr` must be a valid pointer to a `*mut FFIParsedManifestArray`.
 /// - The pointer returned via `out_ptr` is owned by the caller and MUST be 
-/// freed by passing it to `free_parsed_manifest_ffi`.
+///   freed by passing it to `free_parsed_manifest_ffi`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn parse_file_metadata_ffi(
     manifest_data_array_ptr: *const u8,
@@ -286,8 +286,8 @@ pub unsafe extern "C" fn free_parsed_manifest_ffi(
             //Deallocate the Vec for the chunk metadata
             let _ = Vec::from_raw_parts(
                 fmp.chunk_metadata as *mut FFISSAChunkMeta,
-                fmp.chunk_metadata_len as usize,
-                fmp.chunk_metadata_len as usize,
+                fmp.chunk_metadata_len,
+                fmp.chunk_metadata_len,
             );
         }
     }
