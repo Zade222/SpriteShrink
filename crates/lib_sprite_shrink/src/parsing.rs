@@ -55,7 +55,7 @@ pub const SS_SEED: u64 = 0x4202803010192019;
 pub fn parse_file_header(header_data: &[u8]) -> Result<FileHeader, LibError>{
     //Attempt to cast the byte slice to a FileHeader.
     let file_header = 
-        bytemuck::try_from_bytes::<FileHeader>(&header_data)
+        bytemuck::try_from_bytes::<FileHeader>(header_data)
         .map_err(|e| LibError::InvalidHeaderError(e.to_string()))?;
 
     //Verify the magic number to ensure it's the correct file type.
@@ -96,7 +96,7 @@ pub fn parse_file_metadata(
     let config = bincode::config::standard();
 
     let (file_manifest, _len) =
-        bincode::serde::decode_from_slice(&manifest_data, config)
+        bincode::serde::decode_from_slice(manifest_data, config)
             .map_err(|e| {LibError::ManifestDecodeError(e.to_string())})?;
 
     Ok(file_manifest)
@@ -124,7 +124,7 @@ pub fn parse_file_chunk_index(chunk_index_data: &[u8])
     let config = bincode::config::standard();
 
     let (chunk_index, _len) =
-        bincode::serde::decode_from_slice(&chunk_index_data, config)
+        bincode::serde::decode_from_slice(chunk_index_data, config)
             .map_err(|e| {LibError::ManifestDecodeError(e.to_string())})?;
 
     Ok(chunk_index)
