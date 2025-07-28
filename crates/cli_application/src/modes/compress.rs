@@ -125,7 +125,7 @@ pub fn run_compression(
     specified argument or let Rayon decide (which is the amount of threads the
     host system supports) */
     if args.low_memory {
-        _process_threads = 1 as usize;
+        _process_threads = 1;
         if args.verbose{
             println!("Low memory mode engaged.")
         }
@@ -231,9 +231,9 @@ pub fn run_compression(
                         if args.verbose{
                             println!(
                                 "Autotune for window size {current_window_size}\
-                                took too long (>{:?}).Using best result so far:\
+                                took too long (>{timeout:?}).Using best result so far:\
                                 {best_window_size}.",
-                                timeout 
+                                
                             );
                         }
                         break; // Exit the loop
@@ -270,7 +270,7 @@ pub fn run_compression(
         loop {
             if args.dictionary.is_none() {
                 if args.verbose{
-                    println!("Testing dictionary size: {}", current_dict_size);
+                    println!("Testing dictionary size: {current_dict_size}");
                 }
 
                 let compressed_size = test_compression(
@@ -482,7 +482,7 @@ pub fn run_compression(
 
     if !args.quiet {
         println!("Successfully created sprite-shrink multicart archive at: \
-            {:?}", final_output_path);
+            {final_output_path:?}");
     }
 
     Ok(())
