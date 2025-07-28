@@ -23,10 +23,10 @@ use crate::serialization::{serialize_uncompressed_data};
 ///
 /// # Safety
 /// - All pointer arguments must be non-null and valid for their specified 
-/// lengths.
+///   lengths.
 /// - `out_ptr` must be a valid, non-null pointer.
 /// - On success, the pointer written to `out_ptr` is owned by the C caller 
-/// and MUST be freed
+///   and MUST be freed
 ///   by passing it to `free_serialized_output`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn serialize_uncompressed_data_ffi(
@@ -219,7 +219,7 @@ pub unsafe extern "C" fn free_serialized_output(ptr: *mut FFISerializedOutput) {
             output.ser_data_store_len
         );
         let _ = Vec::from_raw_parts(
-            output.ser_chunk_index_ptr as *mut FFIChunkIndexEntry, 
+            output.ser_chunk_index_ptr, 
             output.ser_chunk_index_len, 
             output.ser_chunk_index_len);
         let _ = Vec::from_raw_parts(
