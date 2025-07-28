@@ -27,7 +27,7 @@ type BuilderHandle = *mut ArchiveBuilder<'static, fn(Progress)>;
 /// - `out_builder` must be a valid pointer to a `BuilderHandle`.
 /// - On success, the pointer written to `out_builder` is owned by the caller
 ///   and MUST be freed with `archive_builder_free` or consumed by 
-/// `archive_builder_build`.
+///   `archive_builder_build`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_new(
     manifest_array_ptr: *const FFIFileManifestParent,
@@ -216,9 +216,9 @@ pub unsafe extern "C" fn archive_builder_set_c_progress(
 /// - `builder_handle` must be a valid pointer from `archive_builder_new`.
 /// - `out_data` must be a valid pointer to an `*mut FFIArchiveData`.
 /// - This function consumes the builder; `builder_handle` is invalid after 
-/// this call.
+///   this call.
 /// - The pointer returned via `out_data` must be freed with 
-/// `archive_data_free`.
+///   `archive_data_free`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_build(
     builder_handle: BuilderHandle,
