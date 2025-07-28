@@ -267,9 +267,9 @@ pub fn rebuild_and_verify_single_file(
 /// functions:
 /// 1. `dict_buffer` is allocated with sufficient capacity (`max_dict_size`).
 /// 2. The pointers and lengths for `samples_buffer` and `sample_sizes` are 
-/// valid as they are derived directly from Rust-managed Vecs and slices.
+///    valid as they are derived directly from Rust-managed Vecs and slices.
 /// 3. All potential errors from the C function are checked with 
-/// `ZDICT_isError`.
+///    `ZDICT_isError`.
 pub fn gen_zstd_opt_dict(samples: Vec<&[u8]>,
     max_dict_size: usize,
     workers: usize,
@@ -402,7 +402,7 @@ pub fn test_compression(
         
         builder.build()
             .map_err(|e| LibError::ThreadPoolError(
-                format!("Failed to create thread pool: {}", e))
+                format!("Failed to create thread pool: {e}"))
             )?
     };
 
