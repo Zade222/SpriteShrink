@@ -131,7 +131,7 @@ pub fn serialize_store<S: ChunkStore>(
                     },
                 );
 
-                data_vec.extend_from_slice(&data);
+                data_vec.extend_from_slice(data);
                 offset += data_len;
             }
             (data_vec, index_map, offset)
