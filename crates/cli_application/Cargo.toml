@@ -3,6 +3,10 @@ name = "sprite_shrink_application"
 version = "0.9.0"
 edition = "2024"
 
+[[bin]]
+name = "sprite-shrink"
+path = "src/main.rs"
+
 [dependencies]
 sprite_shrink = {path = "../lib_sprite_shrink"}
 
