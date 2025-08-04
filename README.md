@@ -45,11 +45,9 @@ I hope to work on another application that uses what I learned from this project
 
 Currently, the SpriteShrink application has reached a point of what I would consider a minimum viable application/product of what I set out to do from the start. Things I hope or are considering adding are as follows:
 
-[ ] - Add more compression algorithms. However, these algorithms must support generating a dictionary prior to compression. Currently not sure about this since zstd has performed so well thus far.
-
-[ ] - Add config support so that the user can set default flags to be used each time the application is run to make repeated runs easier and faster.
-
-[ ] - Rework the error enum for both the application and potentially the library to not be a mega/single big enum.
+- [ ] - Add more compression algorithms. However, these algorithms must support generating a dictionary prior to compression. Currently not sure about this since zstd has performed so well thus far.
+- [ ] - Add config support so that the user can set default flags to be used each time the application is run to make repeated runs easier and faster.
+- [ ] - Rework the error enum for both the application and potentially the library to not be a mega/single big enum.
 
 ---
 
