@@ -2,9 +2,9 @@
 
 ![Rust](https://github.com/rust-lang/rust/actions/workflows/rust.yml/badge.svg)
 
-SpriteShrink is a powerful command-line tool that revolutionizes how enthusiasts manage their collections of retro game ROMs and other versioned files. By employing advanced byte-level data deduplication across various file versions (e.g., regional variants, revisions), it achieves significantly higher compression ratios than conventional methods, drastically reducing storage space for your entire library.
+SpriteShrink is a powerful command-line tool that helps enthusiasts manage their collections of retro game ROMs and other versioned files. By employing data deduplication across various file versions (e.g., regional variants, revisions), it achieves higher compression ratios than conventional methods, reducing storage space for your entire library.
 
-It also includes `lib_sprite_shrink`, a Rust library for seamless integration into applications like emulators or frontends, enabling direct ROM extraction from archives.
+It also includes `lib_sprite_shrink`, a Rust library for integration into applications like emulators or frontends, enabling direct ROM extraction from archives.
 
 ---
 
