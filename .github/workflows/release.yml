@@ -42,9 +42,9 @@ jobs:
 
       - name: Generate C header file
         run: |
-          cd crates/lib_sprite_shrink
-          cbindgen --config ../../cbindgen.toml --crate . --output ../../target/${{ matrix.target }}/release/lib_sprite_shrink.h
-          cd ../..
+          cbindgen --config cbindgen.toml \
+            --manifest-path crates/lib_sprite_shrink/Cargo.toml \
+            --output target/${{ matrix.target }}/release/lib_sprite_shrink.
 
       - name: Prepare Release Assets (Binary and Library)
         shell: bash
