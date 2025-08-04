@@ -33,11 +33,23 @@ While it is technically capable of processing any file type, it is **not recomme
 
 The tool's content-defined chunking and deduplication algorithms provide the most benefit when byte-level similarities exist across multiple files, which is common in ROM sets with different regional versions and revisions.
 
-**However**, given the aforemention limitations there are circumstances where it can work well. Systems that have games that span multiple discs can work well. I have tested it specifically on my copy of Final Fantasy 7 which is three discs. Despite being one continugous game across the three discs, there is a fair amount of assets used across all three discs that are duplicated should you return to earlier parts of the game. This lead to an approximate compressed:original size ratio of 1:2 when I compressed my disc images using SpriteShrink.
+**However**, given the aforementioned limitations there are circumstances where it can work well. Systems that have games that span multiple discs being one of them. I have tested it specifically on my copy of Final Fantasy 7 which is three discs. Despite being one contiguous game across the three discs, there is a fair amount of assets used across all the discs that are duplicated should the player return to earlier parts of the game. Despite each disk technically overall different this still lead to an approximate compressed:original size ratio of 1:2 when I compressed my disc images using SpriteShrink. So in the end the SpriteShrink size is smaller than what CHD with cdzs or a tar file using zstd at compression level 19 could manage.
 
-Should emulation software integrate the associated library and extraction capabilities I would only use SpriteShrink for larger ROMs or disc based media **IF** you configure your emulation software of choice to load the image into memory post extraction. That way the disc is extracted and then run from RAM. If the software needs to repeatedly extract the whole disc to get a small piece of data that will likely cause performance problems or instability.
+Should emulation software integrate the associated library for it's extraction capabilities I would only use SpriteShrink for larger ROMs or disc based media **IF** you configure your emulation software of choice to load the image into memory post extraction. That way the disc is extracted and then run from RAM. If the software needs to repeatedly extract the whole disc to get a small piece of data from storage that will likely cause performance problems or even instability.
 
-I hope to work on another application that uses what I learned from this project to make a successor of sorts to CHD that uses much of what SpriteShrink does but specifically for larger modern games or optical media based games.
+I hope to work on another application that uses what I learned from this project and uses much of what SpriteShrink does but specifically for larger modern or optical media based games so that it can seek specific chunks and extract the data instead of the whole file. I recently came across zstd-seekable which may be the answer but I need to look into it more.
+
+---
+
+## Notes from the Developer
+
+Currently, the SpriteShrink application has reached a point of what I would consider a minimum viable application/product of what I set out to do from the start. Things I hope or are considering adding are as follows:
+
+[ ] - Add more compression algorithms. However, these algorithms must support generating a dictionary prior to compression. Currently not sure about this since zstd has performed so well thus far.
+
+[ ] - Add config support so that the user can set default flags to be used each time the application is run to make repeated runs easier and faster.
+
+[ ] - Rework the error enum for both the application and potentially the library to not be a mega/single big enum.
 
 ---
 
