@@ -1,0 +1,25 @@
+name: Publish Library to GitHub Packages
+
+on:
+  workflow_dispatch:
+
+jobs:
+  publish:
+    name: Publish Crate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Log in to GitHub Packages
+        run: cargo login --registry gpr --token ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish lib_sprite_shrink
+        run: cargo publish --package sprite_shrink --registry gpr

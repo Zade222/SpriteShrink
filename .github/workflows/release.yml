@@ -1,4 +1,4 @@
-name: Release Binaries
+name: Release Binaries and Library
 
 on:
   push:
@@ -7,26 +7,34 @@ on:
 
 jobs:
   build-release:
-    name: Build Release Binaries
+    name: Build Release Assets
     strategy:
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: linux-latest
             target: x86_64-unknown-linux-gnu
             binary_name: "sprite_shrink"
             archive_name: "sprite_shrink-linux-x86_64.tar.gz"
+            library_archive_name: "lib_sprite_shrink-linux-x86_64.tar.gz"
+            static_lib_name: "libsprite_shrink.a"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: "sprite_shrink.exe"
             archive_name: "sprite_shrink-windows-x86_64.zip"
+            library_archive_name: "lib_sprite_shrink-windows-x86_64.zip"
+            static_lib_name: "sprite_shrink.lib"
           - os: macos-latest
             target: x86_64-apple-darwin
             binary_name: "sprite_shrink"
             archive_name: "sprite_shrink-macos-x86_64.tar.gz"
+            library_archive_name: "lib_sprite_shrink-macos-x86_64.tar.gz"
+            static_lib_name: "libsprite_shrink.a"
           - os: macos-latest
             target: aarch64-apple-darwin
             binary_name: "sprite_shrink"
             archive_name: "sprite_shrink-macos-aarch64.tar.gz"
+            library_archive_name: "lib_sprite_shrink-macos-aarch64.tar.gz"
+            static_lib_name: "libsprite_shrink.a"
 
     runs-on: ${{ matrix.os }}
 
@@ -39,33 +47,57 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Build binary
-        run: cargo build --package sprite_shrink_application --bin sprite_shrink --release --target ${{ matrix.target }}
+      - name: Install cbindgen for header generation
+        run: cargo install cbindgen
 
-      - name: Prepare binary for release
+      - name: Build binary and library
+        run: cargo build --workspace --release --target ${{ matrix.target }}
+
+      - name: Generate C header file
+        run: |
+          cd crates/lib_sprite_shrink
+          cbindgen --config ../../cbindgen.toml --crate . --output ../../target/${{ matrix.target }}/release/lib_sprite_shrink.h
+          cd ../..
+
+      - name: Prepare Release Assets (Binary and Library)
         shell: bash
         run: |
-          # The binary is located in the target directory, under the specific target sub-folder
           BINARY_PATH="./target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
-          
-          # Move binary to a more accessible location
-          mkdir -p ./release
-          mv "$BINARY_PATH" "./release/"
-          
-          # Create archive
-          cd ./release
+          mkdir -p ./release/app
+          mv "$BINARY_PATH" "./release/app/"
+          cd ./release/app
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            7z a "${{ matrix.archive_name }}" "${{ matrix.binary_name }}"
+            7z a "../${{ matrix.archive_name }}" "${{ matrix.binary_name }}"
           else
-            tar -czvf "${{ matrix.archive_name }}" "${{ matrix.binary_name }}"
+            tar -czvf "../${{ matrix.archive_name }}" "${{ matrix.binary_name }}"
           fi
-          cd ..
+          cd ../..
 
-      - name: Upload artifact
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            LIB_PATH="./target/${{ matrix.target }}/release/sprite_shrink.lib"
+          else
+            LIB_PATH="./target/${{ matrix.target }}/release/libsprite_shrink.a"
+          fi
+          
+          HEADER_PATH="./target/${{ matrix.target }}/release/lib_sprite_shrink.h"
+          
+          mkdir -p ./release/lib
+          mv "$LIB_PATH" "./release/lib/"
+          mv "$HEADER_PATH" "./release/lib/"
+          
+          cd ./release/lib
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a "../${{ matrix.library_archive_name }}" "${{ matrix.static_lib_name }}" "lib_sprite_shrink.h"
+          else
+            tar -czvf "../${{ matrix.library_archive_name }}" "${{ matrix.static_lib_name }}" "lib_sprite_shrink.h"
+          fi
+          cd ../..
+
+      - name: Upload All Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.archive_name }}
-          path: ./release/${{ matrix.archive_name }}
+          name: release-assets-${{ matrix.target }}
+          path: ./release/
 
   release:
     name: Create GitHub Release
@@ -81,4 +113,4 @@ jobs:
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*
+          files: artifacts/**/*.zip, artifacts/**/*.tar.gz
