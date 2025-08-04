@@ -48,6 +48,7 @@ Currently, the SpriteShrink application has reached a point of what I would cons
 - [ ] - Add more compression algorithms. However, these algorithms must support generating a dictionary prior to compression. Currently not sure about this since zstd has performed so well thus far.
 - [ ] - Add config support so that the user can set default flags to be used each time the application is run to make repeated runs easier and faster.
 - [ ] - Rework the error enum for both the application and potentially the library to not be a mega/single big enum.
+- [ ] - Add flag for formatting the output of the metadata flag to be in json format.
 
 ---
 
