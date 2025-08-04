@@ -85,6 +85,8 @@ jobs:
     name: Create GitHub Release
     needs: build-release
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Download all build artifacts
@@ -92,7 +94,9 @@ jobs:
         with:
           path: artifacts/
 
-      - name: Create Release and Upload Assets
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/**/*.zip, artifacts/**/*.tar.gz
+          files: |
+            artifacts/**/*.zip
+            artifacts/**/*.tar.gz
