@@ -4,3 +4,10 @@ members = [
     "crates/cli_application",
     "crates/lib_sprite_shrink",
 ]
+
+[profile.release]
+opt-level = "z"
+lto = true         
+codegen-units = 1  
+panic = "abort"    
+strip = true
