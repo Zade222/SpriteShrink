@@ -22,18 +22,6 @@ jobs:
             archive_name: "sprite_shrink-windows-x86_64.zip"
             library_archive_name: "lib_sprite_shrink-windows-x86_64.zip"
             static_lib_name: "sprite_shrink.lib"
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            binary_name: "sprite_shrink"
-            archive_name: "sprite_shrink-macos-x86_64.tar.gz"
-            library_archive_name: "lib_sprite_shrink-macos-x86_64.tar.gz"
-            static_lib_name: "libsprite_shrink.a"
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            binary_name: "sprite_shrink"
-            archive_name: "sprite_shrink-macos-aarch64.tar.gz"
-            library_archive_name: "lib_sprite_shrink-macos-aarch64.tar.gz"
-            static_lib_name: "libsprite_shrink.a"
 
     runs-on: ${{ matrix.os }}
 
