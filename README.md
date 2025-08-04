@@ -41,7 +41,7 @@ I hope to work on another application that uses what I learned from this project
 
 ---
 
-## Notes from the Developer
+## Notes from the Developer and Future Goals
 
 Currently, the SpriteShrink application has reached a point of what I would consider a minimum viable application/product of what I set out to do from the start. Things I hope or are considering adding are as follows:
 
@@ -109,6 +109,47 @@ To build SpriteShrink from source, you will need the [Rust toolchain](https://ww
     ```
 
     The executable will be located in `target/release/sprite_shrink` (or `sprite_shrink.exe` on Windows).
+
+---
+
+### Cross Compiling for Specific Hardware
+
+1.  **Clone the repository:**
+
+    ```bash
+    git clone https://github.com/Zade222/SpriteShrink.git
+    cd sprite_shrink
+    ```
+
+2.  **Install OS-specific build tools:**
+
+    * **Linux/Unix-like systems (including WSL)**: `build-essential` (Debian/Ubuntu), "Development Tools" group (RHEL-based), or `base-devel` (Arch Linux).
+    * **macOS**: Xcode Command Line Tools (`xcode-select --install`).
+    * **Windows**: Microsoft Visual C++ Build Tools (available as part of Visual Studio or standalone).
+
+3. **Download and prepare platform specific toolchain**
+    This changes from platform to platform. Please consult the toolchain documentation you intend to use to have everything prepared.
+
+4. **Add Rustup Target**
+    Depending on the hardware of your target this will differ.
+    For armv7 linux it's as follows:
+
+    ```bash
+    rustup target add armv7-unknown-linux-gnueabihf
+    ```
+
+    For a 64-bit ARM target for Linux:
+
+    ```rustup target add aarch64-unknown-linux-gnu```
+
+5.  **Build the project:**
+    The linker rust flag will depend on where you have the linker stored. Specify the path to the gcc binary. For example for the RG35XX Plus/H/2024 Toolchain that will be as follows:
+
+    # Generic Template
+    ```RUSTFLAGS="-C linker=/path/to/your/toolchain/bin/target-gcc" cargo build --target <your-target-triple> --release```
+
+    # Example for RG35XX Plus/H
+    ```RUSTFLAGS="-C linker=aarch64-buildroot-linux-gnu_sdk-buildroot/bin/aarch64-buildroot-linux-gnu-gcc" cargo build --target aarch64-unknown-linux-gnu --release```
 
 ---
 
