@@ -2,6 +2,7 @@
 name = "sprite_shrink"
 version = "0.9.0"
 edition = "2024"
+publish = true
 
 [lib]
 name = "sprite_shrink"
@@ -24,3 +25,6 @@ zstd-sys = { version = "2.0.15", features = ["zdict_builder", "experimental", "z
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "0.3.0"
+
+[build-dependencies]
+cbindgen = "0.29"
