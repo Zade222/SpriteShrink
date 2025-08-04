@@ -12,13 +12,13 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            binary_name: "sprite_shrink"
+            binary_name: "sprite-shrink"
             archive_name: "sprite_shrink-linux-x86_64.tar.gz"
             library_archive_name: "lib_sprite_shrink-linux-x86_64.tar.gz"
             static_lib_name: "libsprite_shrink.a"
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-            binary_name: "sprite_shrink.exe"
+            binary_name: "sprite-shrink.exe"
             archive_name: "sprite_shrink-windows-x86_64.zip"
             library_archive_name: "lib_sprite_shrink-windows-x86_64.zip"
             static_lib_name: "sprite_shrink.lib"
