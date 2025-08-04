@@ -1,9 +1,8 @@
 name: Release Binaries and Library
 
 on:
-  push:
-    tags:
-      - 'v[0-9]+.[0-9]+.[0-9]+*'
+  release:
+    types: [published]
 
 jobs:
   build-release:
@@ -11,7 +10,7 @@ jobs:
     strategy:
       matrix:
         include:
-          - os: linux-latest
+          - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             binary_name: "sprite_shrink"
             archive_name: "sprite_shrink-linux-x86_64.tar.gz"
