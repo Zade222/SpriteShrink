@@ -15,9 +15,9 @@
 
 # --- Configuration ---
 
-# Path to the sprite_shrink executable.
+# Path to the sprite-shrink executable.
 # Change this if the executable is not in your system's PATH.
-SPRITE_SHRINK_EXEC="sprite_shrink"
+SPRITE_SHRINK_EXEC="sprite-shrink"
 
 # --- Script Start ---
 

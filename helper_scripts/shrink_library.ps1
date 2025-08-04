@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
     A PowerShell script to recursively find game directories and create compressed
-    archives using the sprite_shrink executable.
+    archives using the sprite-shrink executable.
 
 .DESCRIPTION
     This script searches an input directory for game folders located three levels
@@ -21,7 +21,7 @@
     The root directory where the compressed .ssmc archives will be saved.
 
 .PARAMETER ExtraFlags
-    An optional string of additional flags to pass to the sprite_shrink executable.
+    An optional string of additional flags to pass to the sprite-shrink executable.
 
 .EXAMPLE
     .\shrink_library.ps1 -InputRoot "D:\ROMs" -OutputRoot "D:\Archives"
@@ -41,10 +41,10 @@ param(
 
 # --- Configuration ---
 
-# Path to the sprite_shrink executable.
-# Assumes 'sprite_shrink.exe' is in the system's PATH.
-# If not, provide the full path: e.g., "C:\Tools\sprite_shrink.exe"
-$spriteShrinkExec = "sprite_shrink.exe"
+# Path to the sprite-shrink executable.
+# Assumes 'sprite-shrink.exe' is in the system's PATH.
+# If not, provide the full path: e.g., "C:\Tools\sprite-shrink.exe"
+$spriteShrinkExec = "sprite-shrink.exe"
 
 # --- Script Start ---
 
