@@ -23,13 +23,19 @@ fn main() {
 }
 
 fn target_dir() -> PathBuf {
-    let mut path = if let Ok(target) = env::var("CARGO_TARGET_DIR") {
-        PathBuf::from(target)
+    let mut path = if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
+        PathBuf::from(target_dir)
     } else {
         PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../target")
     };
+
+    if let Ok(target_triple) = env::var("TARGET") {
+        path = path.join(target_triple);
+    }
+
     if let Ok(profile) = env::var("PROFILE") {
         path = path.join(profile);
     }
+
     path
 }
