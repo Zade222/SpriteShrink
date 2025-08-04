@@ -387,11 +387,6 @@ where
         chunk_index
         dictionary*/
 
-        //Report that process is in the final stage
-        if let Some(callback) = self.progress_callback.as_ref() {
-            callback(Progress::Finalizing);
-        }
-
         //Same for the C version.
         if let Some((
                 callback, 
