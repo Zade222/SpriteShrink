@@ -60,7 +60,7 @@ jobs:
             LIB_PATH="./target/${{ matrix.target }}/release/libsprite_shrink.a"
           fi
           
-          HEADER_PATH="./target/${{ matrix.target }}/release/lib_sprite_shrink.h"
+          HEADER_PATH="./target/${{ matrix.target }}/release/sprite_shrink.h"
           
           mkdir -p ./release/lib
           mv "$LIB_PATH" "./release/lib/"
@@ -68,9 +68,9 @@ jobs:
           
           cd ./release/lib
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            7z a "../${{ matrix.library_archive_name }}" "${{ matrix.static_lib_name }}" "lib_sprite_shrink.h"
+            7z a "../${{ matrix.library_archive_name }}" "${{ matrix.static_lib_name }}" "sprite_shrink.h"
           else
-            tar -czvf "../${{ matrix.library_archive_name }}" "${{ matrix.static_lib_name }}" "lib_sprite_shrink.h"
+            tar -czvf "../${{ matrix.library_archive_name }}" "${{ matrix.static_lib_name }}" "sprite_shrink.h"
           fi
           cd ../..
 
