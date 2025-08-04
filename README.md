@@ -154,8 +154,8 @@ Here's a quick reference for the main arguments:
 |            | `--compression-level` | Sets the numerical compression level for the chosen algorithm.                           | `19`          |
 | `-w`       | `--window`            | Hashing algorithm window size (e.g., "2KB", "4KB"). Recommended: 2KB.                    | `2KB`         |
 | `-d`       | `--dictionary`        | Compression algorithm dictionary size (e.g., "16KB", "32KB"). Recommended: 16KB.         | `16KB`        |
-| `-a`       | `--auto-tune`         | Autotune window and dictionary sizes for optimal size. Overrides manual settings.        | `false`       |
-|            | `--autotune-timeout`  | Sets the maximum time in seconds for each autotune iteration.                            | N/A           |
+|            | `--auto-tune`         | Autotune window and dictionary sizes for optimal size. Overrides manual settings.        | `false`       |
+|            | `--autotune-timeout`  | Sets the maximum time in seconds for each autotune iteration.                            | `None`        |
 |            | `--optimize-dictionary`| When finalizing the archive, optimize the dictionary for better compression. Can be **Very slow** depending on dictionary size. | `false`       |
 | `-t`       | `--threads`           | Sets max worker threads. Defaults to all available logical cores.                        | All cores     |
 |            | `--low-memory`        | Forces low-memory mode (sequential I/O, 4 threads for compression).                      | `false`       |
