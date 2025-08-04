@@ -1,0 +1,84 @@
+name: Release Binaries
+
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+*'
+
+jobs:
+  build-release:
+    name: Build Release Binaries
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary_name: "sprite_shrink"
+            archive_name: "sprite_shrink-linux-x86_64.tar.gz"
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary_name: "sprite_shrink.exe"
+            archive_name: "sprite_shrink-windows-x86_64.zip"
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            binary_name: "sprite_shrink"
+            archive_name: "sprite_shrink-macos-x86_64.tar.gz"
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary_name: "sprite_shrink"
+            archive_name: "sprite_shrink-macos-aarch64.tar.gz"
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build binary
+        run: cargo build --package sprite_shrink_application --bin sprite_shrink --release --target ${{ matrix.target }}
+
+      - name: Prepare binary for release
+        shell: bash
+        run: |
+          # The binary is located in the target directory, under the specific target sub-folder
+          BINARY_PATH="./target/${{ matrix.target }}/release/${{ matrix.binary_name }}"
+          
+          # Move binary to a more accessible location
+          mkdir -p ./release
+          mv "$BINARY_PATH" "./release/"
+          
+          # Create archive
+          cd ./release
+          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
+            7z a "${{ matrix.archive_name }}" "${{ matrix.binary_name }}"
+          else
+            tar -czvf "${{ matrix.archive_name }}" "${{ matrix.binary_name }}"
+          fi
+          cd ..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive_name }}
+          path: ./release/${{ matrix.archive_name }}
+
+  release:
+    name: Create GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
