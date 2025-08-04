@@ -42,9 +42,7 @@ jobs:
 
       - name: Generate C header
         run: |
-          cbindgen --config cbindgen.toml `
-            --manifest-path crates/lib_sprite_shrink/Cargo.toml `
-            --output target/x86_64-pc-windows-msvc/release/lib_sprite_shrink.h
+          run: cbindgen --config cbindgen.toml --manifest-path crates/lib_sprite_shrink/Cargo.toml --output target/x86_64-pc-windows-msvc/release/lib_sprite_shrink.h
         shell: pwsh
 
       - name: Prepare Release Assets (Binary and Library)
