@@ -41,11 +41,9 @@ To build and contribute to SpriteShrink, you will need:
 First, clone the SpriteShrink repository to your local machine:
 
 ```bash
-git clone [https://github.com/your-username/SpriteShrink.git](https://github.com/your-username/SpriteShrink.git)
+git clone https://github.com/Zade222/SpriteShrink.git
 cd SpriteShrink
 ```
-
-Replace `your-username` with your actual GitHub username.
 
 ### Building the Project
 

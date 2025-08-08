@@ -7,7 +7,7 @@ fn main() {
     let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let package_name = env::var("CARGO_PKG_NAME").unwrap();
     let output_file = target_dir()
-        .join(format!("{}.h", package_name))
+        .join(format!("{package_name}.h"))
         .to_str()
         .unwrap()
         .to_string();
