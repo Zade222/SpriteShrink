@@ -10,6 +10,7 @@ pub use lib_error_handling::LibError;
 
 mod processing;
 pub use processing::{
+    Hashable,
     create_file_manifest_and_chunks, process_file_in_memory,
     rebuild_and_verify_single_file, test_compression};
 

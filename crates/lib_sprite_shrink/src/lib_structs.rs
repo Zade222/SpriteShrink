@@ -44,9 +44,9 @@ pub struct ChunkLocation {
 /// * `file_version`: The version number of the archive format.
 /// * `file_count`: The total number of files stored in the archive.
 /// * `algorithm`: Numerical value representing the compression used on the 
-///   compressed data. 1 = xxhash3_64, 2 = xxhash3_128
+///   compressed data.
 /// * `hash_type`: Numerical value representing the hash type used when 
-///   the data was hashed.
+///   the data was hashed. 1 = xxhash3_64, 2 = xxhash3_128
 /// * `pad`: Empty data padding to keep data aligned. Must be all zeros.
 /// * `man_offset`: The byte offset where the file manifest begins.
 /// * `man_length`: The total length of the file manifest in bytes.
