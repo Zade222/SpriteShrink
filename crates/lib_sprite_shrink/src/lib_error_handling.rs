@@ -33,6 +33,9 @@ pub enum LibError {
     #[error("Failed to decode file manifest: {0}")]
     ManifestDecodeError(String),
 
+    #[error("Failed to decode chunk index: {0}")]
+    IndexDecodeError(String),
+
     #[error("Failed to encode file manifest: {0}")]
     ManifestEncodeError(String),
 
@@ -56,4 +59,7 @@ pub enum LibError {
 
     #[error("File Verification failed: {0}")]
     VerificationError(String),
+
+    #[error("Chunk missing: {0}")]
+    SerializationMissingChunkError(String),
 }

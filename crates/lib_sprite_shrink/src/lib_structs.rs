@@ -8,7 +8,6 @@
 
 use bytemuck::{Pod, Zeroable};
 use fastcdc::v2020::{Chunk};
-use rayon::str;
 use serde::{Deserialize, Serialize};
 use zerocopy::Immutable;
 use zerocopy::{IntoBytes, FromBytes};
@@ -45,7 +44,9 @@ pub struct ChunkLocation {
 /// * `file_version`: The version number of the archive format.
 /// * `file_count`: The total number of files stored in the archive.
 /// * `algorithm`: Numerical value representing the compression used on the 
-///   compressed data.
+///   compressed data. 1 = xxhash3_64, 2 = xxhash3_128
+/// * `hash_type`: Numerical value representing the hash type used when 
+///   the data was hashed.
 /// * `pad`: Empty data padding to keep data aligned. Must be all zeros.
 /// * `man_offset`: The byte offset where the file manifest begins.
 /// * `man_length`: The total length of the file manifest in bytes.
@@ -61,7 +62,8 @@ pub struct FileHeader {
     pub file_version:   u32,
     pub file_count:     u32,
     pub algorithm:      u16,
-    pub pad:            [u8; 6],
+    pub hash_type:      u8, 
+    pub pad:            [u8; 5],
     pub man_offset:     u64,
     pub man_length:     u64,
     pub dict_offset:    u64,
@@ -103,10 +105,10 @@ pub struct FileData{
 /// * `chunk_metadata`: A vector of metadata for each chunk, sorted in
 ///   the order needed for reconstruction.
 #[derive(Clone, Deserialize, Serialize)]
-pub struct FileManifestParent {
+pub struct FileManifestParent<H> {
     pub filename:       String,
     pub chunk_count:    u64,
-    pub chunk_metadata: Vec<SSAChunkMeta>,
+    pub chunk_metadata: Vec<SSAChunkMeta<H>>,
 }
 
 /// Holds the results of the initial file processing stage.
@@ -179,8 +181,8 @@ pub enum Progress {
 ///   original, uncompressed file.
 /// * `length`: The size of the chunk in bytes.
 #[derive(Clone, Deserialize, Serialize)]
-pub struct SSAChunkMeta{
-    pub hash:   u64,
+pub struct SSAChunkMeta<H>{
+    pub hash:   H,
     pub offset: u32,
     pub length: u32,
 }

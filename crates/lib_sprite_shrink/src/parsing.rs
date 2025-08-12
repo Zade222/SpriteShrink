@@ -8,6 +8,8 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize};
+
 use crate::lib_error_handling::{LibError};
 use crate::lib_structs::{FileHeader, FileManifestParent, ChunkLocation};
 
@@ -90,9 +92,12 @@ pub fn parse_file_header(header_data: &[u8]) -> Result<FileHeader, LibError>{
 /// - `Ok(Vec<FileManifestParent>)` containing the parsed file manifests.
 /// - `Err(LibError)` if the byte slice cannot be decoded due to data
 ///   corruption or a format mismatch.
-pub fn parse_file_metadata(
+pub fn parse_file_metadata<H>(
     manifest_data: &[u8]
-) -> Result<Vec<FileManifestParent>, LibError> {
+) -> Result<Vec<FileManifestParent<H>>, LibError>
+where 
+    for<'de> H: serde::Deserialize<'de>
+{
     let config = bincode::config::standard();
 
     let (file_manifest, _len) =
@@ -118,14 +123,16 @@ pub fn parse_file_metadata(
 /// A `Result` which is:
 /// - `Ok(HashMap<u64, ChunkLocation>)` containing the parsed index.
 /// - `Err(LibError)` if the byte slice cannot be decoded.
-pub fn parse_file_chunk_index(chunk_index_data: &[u8]) 
-    -> Result<HashMap<u64, ChunkLocation>, LibError>
+pub fn parse_file_chunk_index<H>(chunk_index_data: &[u8]) 
+    -> Result<HashMap<H, ChunkLocation>, LibError>
+where
+    for<'de> H: Eq + std::hash::Hash + Deserialize<'de>,
 {
     let config = bincode::config::standard();
 
     let (chunk_index, _len) =
         bincode::serde::decode_from_slice(chunk_index_data, config)
-            .map_err(|e| {LibError::ManifestDecodeError(e.to_string())})?;
+            .map_err(|e| {LibError::IndexDecodeError(e.to_string())})?;
 
     Ok(chunk_index)
 }

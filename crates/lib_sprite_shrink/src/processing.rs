@@ -17,7 +17,7 @@ use libc::{
 };
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use sha2::{Digest,Sha512};
-use xxhash_rust::xxh3::xxh3_64_with_seed;
+use xxhash_rust::xxh3::{xxh3_64_with_seed, xxh3_128_with_seed};
 use zstd_sys::{self, ZDICT_params_t};
 
 use crate::archive::compress_with_dict;
@@ -27,6 +27,28 @@ use crate::lib_structs::{
     SSAChunkMeta
 };
 use crate::parsing::{SS_SEED};
+
+pub trait Hashable:
+    //Specifies what capabilities H must have.
+    Copy + Clone + Eq + std::hash::Hash + serde::Serialize + Send + Sync + 'static
+{
+    /// Create a new hash from a byte slice using the library's seed.
+    fn from_bytes_with_seed(bytes: &[u8]) -> Self;
+}
+
+/// Implements the Hashable trait for 64-bit unsigned integers.
+impl Hashable for u64 {
+    fn from_bytes_with_seed(bytes: &[u8]) -> Self {
+        xxh3_64_with_seed(bytes, SS_SEED)
+    }
+}
+
+/// Implements the Hashable trait for 128-bit unsigned integers.
+impl Hashable for u128 {
+    fn from_bytes_with_seed(bytes: &[u8]) -> Self {
+        xxh3_128_with_seed(bytes, SS_SEED)
+    }
+}
 
 
 /// Processes a single file that has been loaded into memory.
@@ -40,6 +62,7 @@ use crate::parsing::{SS_SEED};
 /// # Arguments
 ///
 /// * `file_data`: A `FileData` struct with the in-memory file data.
+/// * `window_size`: 
 ///
 /// # Returns
 ///
@@ -138,17 +161,18 @@ fn chunk_data(file_data: &FileData, seed: u64, window_size: u64) ->
 /// A tuple containing:
 /// - A `FileManifestParent` for the processed file.
 /// - A `Vec` where each element is a tuple of a chunk's hash and its data.
-pub fn create_file_manifest_and_chunks(
+pub fn create_file_manifest_and_chunks<H: Hashable>(
     file_name: &str,
     file_data: &[u8],
     chunks: &[Chunk],
-) -> (FileManifestParent, Vec<(u64, Vec<u8>)>) {
+) -> (FileManifestParent<H>, Vec<(H, Vec<u8>)>) {
     let mut chunk_metadata = Vec::with_capacity(chunks.len());
     let mut chunk_data_list = Vec::with_capacity(chunks.len());
 
     for chunk in chunks {
-        let chunk_data_slice = &file_data[chunk.offset..chunk.offset + chunk.length];
-        let data_hash = xxh3_64_with_seed(chunk_data_slice, SS_SEED);
+        let chunk_data_slice = &file_data[chunk.offset..chunk.offset + 
+            chunk.length];
+        let data_hash = H::from_bytes_with_seed(chunk_data_slice);
 
         //Add the chunk's data to our list for returning
         chunk_data_list.push((data_hash, chunk_data_slice.to_vec()));
@@ -191,12 +215,16 @@ pub fn create_file_manifest_and_chunks(
 /// A `Result` which is:
 /// - `Ok(())` if the file is rebuilt and its hash matches.
 /// - `Err(LibError)` if a chunk is missing or the hash mismatches.
-pub fn rebuild_and_verify_single_file(
-    fmp: &FileManifestParent,
+pub fn rebuild_and_verify_single_file<H>(
+    fmp: &FileManifestParent<H>,
     ser_data_store: &[u8],
-    chunk_index: &HashMap<u64, ChunkLocation>,
+    chunk_index: &HashMap<H, ChunkLocation>,
     veri_hashes: &DashMap<String, [u8; 64]>,
-) -> Result<(), LibError> {
+) -> Result<(), LibError> 
+where
+    //Required for H: being a hash key and displayable in errors.
+    H: Eq + std::hash::Hash + std::fmt::Display,
+{
     //Calculate the total size of the original file to pre-allocate memory.
     let file_size: usize = fmp.chunk_metadata.iter().map(|scm|{
         scm.length as usize}).sum();
@@ -361,12 +389,15 @@ pub fn gen_zstd_opt_dict(samples: Vec<&[u8]>,
 /// A `Result` which is:
 /// - `Ok(usize)` containing the total estimated compressed size in bytes.
 /// - `Err(LibError)` if dictionary creation or compression fails.
-pub fn test_compression(
-    data_store: &HashMap<u64, Vec<u8>>,
-    sorted_hashes: &[u64],
+pub fn test_compression<H>(
+    data_store: &HashMap<H, Vec<u8>>,
+    sorted_hashes: &[H],
     worker_count: usize,
     dictionary_size: usize,
-) -> Result<usize, LibError>{
+) -> Result<usize, LibError>
+where
+    H: Copy + Eq + std::hash::Hash + Send + Sync,
+{
     let samples_for_dict: Vec<&[u8]> = sorted_hashes
         .iter()
         .filter_map(|hash| data_store.get(hash).map(|data| data.as_slice()))
@@ -406,7 +437,7 @@ pub fn test_compression(
             )?
     };
 
-    let compressed_dash: DashMap<u64, Vec<u8>> = DashMap::new();
+    let compressed_dash: DashMap<H, Vec<u8>> = DashMap::new();
 
     let comp_result: Result<(), LibError> = task_pool.install(|| {
         sorted_hashes.par_iter().try_for_each(|hash| {
@@ -427,8 +458,10 @@ pub fn test_compression(
     comp_result?;
 
     let compressed_size:usize = compressed_dash.iter()
-        .map(|entry| entry.value().len()) //Get the length of each Vec
+        //Get the length of each Vec
+        .map(|entry| entry.value().len()) 
         .sum(); //Add everything up.
     
     Ok((dictionary.len() as usize) + compressed_size)
 }
+

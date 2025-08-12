@@ -36,10 +36,19 @@ pub struct FFIChunk{
     pub length: usize,
 }
 
-/// FFI-safe representation for a single entry in the ChunkIndex HashMap.
+/// FFI-safe representation for a single entry in the ChunkIndex HashMap with a
+/// u64 hash.*/
 #[repr(C)]
-pub struct FFIChunkIndexEntry {
+pub struct FFIChunkIndexEntryU64 {
     pub hash: u64,
+    pub data: FFIChunkLocation,
+}
+
+/// FFI-safe representation for a single entry in the ChunkIndex HashMap with a
+/// u128 hash.*/
+#[repr(C)]
+pub struct FFIChunkIndexEntryU128 {
+    pub hash: u128,
     pub data: FFIChunkLocation,
 }
 
@@ -52,10 +61,20 @@ pub struct FFIChunkLocation {
     pub length: u32,
 }
 
-//FFI-safe representation for a single entry in the data_store HashMap
+/*FFI-safe representation for a single entry in the data_store HashMap with a
+u64 hash.*/
 #[repr(C)]
-pub struct FFIDataStoreEntry {
+pub struct FFIDataStoreEntryU64 {
     pub hash: u64,
+    pub data: *const u8,
+    pub data_len: usize,
+}
+
+/*FFI-safe representation for a single entry in the data_store HashMap with a
+u128 hash.*/
+#[repr(C)]
+pub struct FFIDataStoreEntryU128 {
+    pub hash: u128,
     pub data: *const u8,
     pub data_len: usize,
 }
@@ -70,46 +89,95 @@ pub struct FFIFileData {
     pub file_data_len: usize
 }
 
-/// Holds the output data from `create_file_manifest_and_chunks_ffi`.
+/// Holds the output data from `create_file_manifest_and_chunks_ffi` for a
+/// u64 hash
 /// All pointers within this struct are owned by the C caller and must be 
 /// freed.
 #[repr(C)]
-pub struct FFIFileManifestChunks {
-    pub fmp: FFIFileManifestParent,
-    pub hashed_chunks: *mut FFIHashedChunkData,
+pub struct FFIFileManifestChunksU64 {
+    pub fmp: FFIFileManifestParentU64,
+    pub hashed_chunks: *mut FFIHashedChunkDataU64,
     pub hashed_chunks_len: usize,
 }
 
-/// FFI-safe equivalent of `FileManifestParent`.
+/// Holds the output data from `create_file_manifest_and_chunks_ffi` for a
+/// u128 hash
+/// All pointers within this struct are owned by the C caller and must be 
+/// freed.
+#[repr(C)]
+pub struct FFIFileManifestChunksU128 {
+    pub fmp: FFIFileManifestParentU128,
+    pub hashed_chunks: *mut FFIHashedChunkDataU128,
+    pub hashed_chunks_len: usize,
+}
+
+/// FFI-safe equivalent of `FileManifestParent` for u64 ChunkMeta hashes.
 /// The C caller must free the `filename` and `chunk_metadata` pointers.
 #[repr(C)]
-pub struct FFIFileManifestParent {
+pub struct FFIFileManifestParentU64 {
     pub filename: *mut c_char,
-    pub chunk_metadata: *const FFISSAChunkMeta,
+    pub chunk_metadata: *const FFISSAChunkMetaU64,
     pub chunk_metadata_len: usize,
 }
 
-/// FFI-safe representation of a chunk's hash and its associated data.
+/// FFI-safe equivalent of `FileManifestParent` for u128 ChunkMeta hashes.
+/// The C caller must free the `filename` and `chunk_metadata` pointers.
 #[repr(C)]
-pub struct FFIHashedChunkData {
+pub struct FFIFileManifestParentU128 {
+    pub filename: *mut c_char,
+    pub chunk_metadata: *const FFISSAChunkMetaU128,
+    pub chunk_metadata_len: usize,
+}
+
+/// FFI-safe representation of a chunk's hash and its associated data for u64
+/// hashes
+#[repr(C)]
+pub struct FFIHashedChunkDataU64 {
     pub hash: u64,
     pub chunk_data: *mut u8,
     pub chunk_data_len: usize,
 }
 
-/// The final struct returned by `parse_file_chunk_index_ffi`.
+/// FFI-safe representation of a chunk's hash and its associated data for u128
+/// hashes
+#[repr(C)]
+pub struct FFIHashedChunkDataU128 {
+    pub hash: u128,
+    pub chunk_data: *mut u8,
+    pub chunk_data_len: usize,
+}
+
+/// The final struct returned by `parse_file_chunk_index_ffi` for u64
+/// hashes
 /// The `entries` pointer is owned by the C caller and must be freed.
 #[repr(C)]
-pub struct FFIParsedChunkIndexArray {
-    pub entries: *mut FFIChunkIndexEntry,
+pub struct FFIParsedChunkIndexArrayU64 {
+    pub entries: *mut FFIChunkIndexEntryU64,
     pub entries_len: usize,
 }
 
-/// The final struct returned by `parse_file_metadata_ffi`.
+/// The final struct returned by `parse_file_chunk_index_ffi` for u128
+/// hashes
+/// The `entries` pointer is owned by the C caller and must be freed.
+#[repr(C)]
+pub struct FFIParsedChunkIndexArrayU128 {
+    pub entries: *mut FFIChunkIndexEntryU128,
+    pub entries_len: usize,
+}
+
+/// The final struct returned by `parse_file_metadata_ffi` for a u64 hash.
 /// The `manifests` pointer is owned by the C caller and must be freed.
 #[repr(C)]
-pub struct FFIParsedManifestArray {
-    pub manifests: *mut FFIFileManifestParent,
+pub struct FFIParsedManifestArrayU64 {
+    pub manifests: *mut FFIFileManifestParentU64,
+    pub manifests_len: usize
+}
+
+/// The final struct returned by `parse_file_metadata_ffi` for a u128 hash.
+/// The `manifests` pointer is owned by the C caller and must be freed.
+#[repr(C)]
+pub struct FFIParsedManifestArrayU128 {
+    pub manifests: *mut FFIFileManifestParentU128,
     pub manifests_len: usize
 }
 
@@ -144,26 +212,52 @@ pub enum FFIProgressType {
     Finalizing,
 }
 
-/// Holds all the output data from `serialize_uncompressed_data_ffi`.
+/// Holds all the output data from `serialize_uncompressed_data_ffi` for a u64
+/// hash.
 /// All pointers within this struct are owned by the C caller and must be 
 /// freed.
 #[repr(C)]
-pub struct FFISerializedOutput {
-    pub ser_manifest_ptr: *mut FFIFileManifestParent,
+pub struct FFISerializedOutputU64 {
+    pub ser_manifest_ptr: *mut FFIFileManifestParentU64,
     pub ser_manifest_len: usize,
     pub ser_data_store_ptr: *const u8,
     pub ser_data_store_len: usize,
-    pub ser_chunk_index_ptr: *mut FFIChunkIndexEntry,
+    pub ser_chunk_index_ptr: *mut FFIChunkIndexEntryU64,
     pub ser_chunk_index_len: usize,
     pub sorted_hashes_ptr: *const u64,
     pub sorted_hashes_len: usize,
 }
 
-//FFI-safe equivalent of SSAChunkMeta
+/// Holds all the output data from `serialize_uncompressed_data_ffi` for a u128
+/// hash.
+/// All pointers within this struct are owned by the C caller and must be 
+/// freed.
+#[repr(C)]
+pub struct FFISerializedOutputU128 {
+    pub ser_manifest_ptr: *mut FFIFileManifestParentU128,
+    pub ser_manifest_len: usize,
+    pub ser_data_store_ptr: *const u8,
+    pub ser_data_store_len: usize,
+    pub ser_chunk_index_ptr: *mut FFIChunkIndexEntryU128,
+    pub ser_chunk_index_len: usize,
+    pub sorted_hashes_ptr: *const u128,
+    pub sorted_hashes_len: usize,
+}
+
+//FFI-safe equivalent of SSAChunkMeta with a u64 hash
 #[repr(C)]
 #[derive(Clone)]
-pub struct FFISSAChunkMeta {
+pub struct FFISSAChunkMetaU64 {
     pub hash: u64,
+    pub offset: u32,
+    pub length: u32,
+}
+
+//FFI-safe equivalent of SSAChunkMeta with a u128 hash
+#[repr(C)]
+#[derive(Clone)]
+pub struct FFISSAChunkMetaU128 {
+    pub hash: u128,
     pub offset: u32,
     pub length: u32,
 }
@@ -174,7 +268,8 @@ pub struct FFISSAChunkMeta {
 pub struct FFIUserData(pub *mut c_void);
 
 /// FFI-safe representation for a single entry in the VeriHashes DashMap.
-/// The C caller retains ownership of the memory pointed to by `key` and `value`.
+/// The C caller retains ownership of the memory pointed to by `key` and 
+/// `value`.
 #[repr(C)]
 pub struct FFIVeriHashesEntry {
     pub key: *const c_char,

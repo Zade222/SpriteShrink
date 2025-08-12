@@ -6,14 +6,19 @@
 //! dictionary to compressing data chunks and serializing the complete
 //! archive into a single byte vector ready for storage.
 
-use std::{collections::HashMap, io::Write};
-use std::io::Read;
-use std::mem;
-use std::os::raw::c_void;
+use std::{
+    {collections::HashMap, io::Write},
+    fmt::Display,
+    hash::Hash,
+    io::Read,
+    mem,
+    os::raw::c_void
+};
 
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use zerocopy::IntoBytes;
 use dashmap::DashMap;
+use serde::Serialize;
 
 use crate::ffi::ffi_structs::{
     FFIUserData, FFIProgress, FFIProgressType
@@ -42,12 +47,13 @@ unsafe impl Sync for FFIUserData {}
 //C style progress callback function pointer
 type CProgressCallback = extern "C" fn(FFIProgress, *mut c_void);
 
-pub struct ArchiveBuilder<'cb, F> {
+pub struct ArchiveBuilder<'cb, F, H> {
     //Required parameters
-    ser_file_manifest: Vec<FileManifestParent>,
-    data_store: HashMap<u64, Vec<u8>>,
-    sorted_hashes: Vec<u64>,
+    ser_file_manifest: Vec<FileManifestParent<H>>,
+    data_store: HashMap<H, Vec<u8>>,
+    sorted_hashes: Vec<H>,
     file_count: u32,
+    hash_type: u8,
 
     //Optional parameters, will be set with default values.
     compression_algorithm: u16,
@@ -70,6 +76,10 @@ pub struct ArchiveBuilder<'cb, F> {
 /// # Arguments
 ///
 /// * `file_count`: The total number of files to be included.
+/// * `algorithm_code`: Numerical value representing the compression used on 
+///   the compressed data.
+/// * `hash_type`: Numerical value representing the hash type used when 
+///   the data was hashed.
 /// * `man_length`: The total length in bytes of the file manifest.
 /// * `dict_length`: The total length in bytes of the dictionary.
 /// * `chunk_index_length`: The total length of the chunk index.
@@ -77,8 +87,10 @@ pub struct ArchiveBuilder<'cb, F> {
 /// # Returns
 ///
 /// Returns a `FileHeader` struct populated with the provided metadata.
-fn build_file_header(file_count: u32,
+fn build_file_header(
+    file_count: u32,
     algorithm_code: u16,
+    hash_type: u8,
     man_length: u64,
     dict_length: u64,
     chunk_index_length: u64,
@@ -92,14 +104,16 @@ fn build_file_header(file_count: u32,
         file_version:   SUPPORTED_VERSION,
         file_count,
         algorithm:      algorithm_code,
-        pad:            [0, 0, 0, 0, 0, 0],
+        hash_type,
+        pad:            [0, 0, 0, 0, 0],
         man_offset:     header_size,
         man_length,
         dict_offset:    header_size + man_length,
         dict_length,
         chunk_index_offset: header_size + man_length + dict_length,
         chunk_index_length,
-        data_offset: header_size + man_length + dict_length + chunk_index_length
+        data_offset: header_size + man_length + dict_length + 
+            chunk_index_length
     }
 }
 
@@ -143,23 +157,26 @@ pub fn compress_with_dict(data_payload: &[u8], dict: &[u8], level: &i32) ->
     Ok(compressed_data)
 }
 
-impl<'cb, F> ArchiveBuilder<'cb, F>
+impl<'cb, F, H> ArchiveBuilder<'cb, F, H>
 where
     F: Fn(Progress) + Sync + Send,
+    H: Copy + Eq + Hash + Serialize + Send + Sync + 'static + Display,
 {
     pub fn new(
-        ser_file_manifest: Vec<FileManifestParent>,
-        data_store: HashMap<u64, Vec<u8>>,
-        sorted_hashes: Vec<u64>,
-        file_count: u32
+        ser_file_manifest: Vec<FileManifestParent<H>>,
+        data_store: HashMap<H, Vec<u8>>,
+        sorted_hashes: Vec<H>,
+        file_count: u32,
+        hash_type: u8,
     ) -> Self {
         Self {
             ser_file_manifest,
             data_store,
             sorted_hashes,
             file_count,
+            hash_type,
             //Set default values for optional parameters
-            compression_algorithm: 1, //Default to zstd numerical code.
+            compression_algorithm: 98, //Default to zstd numerical code.
             compression_level: 19, 
             dictionary_size: 16 * 1024,
             worker_threads: 0, //Let Rayon decide
@@ -216,9 +233,44 @@ where
             callback: CProgressCallback, 
             user_data: *mut c_void
         ) -> &mut Self {
-            self.c_progress_callback = Some((callback, FFIUserData(user_data)));
+            self.c_progress_callback = Some((
+                callback, 
+                FFIUserData(user_data)
+            ));
             self
     }
+
+    fn report_progress(&self, progress: Progress) {
+    if let Some(callback) = self.progress_callback {
+        callback(progress.clone());
+    }
+
+    if let Some((callback, user_data)) = self.c_progress_callback {
+        let ffi_progress = match progress {
+            Progress::GeneratingDictionary => FFIProgress {
+                ty: FFIProgressType::GeneratingDictionary, 
+                total_chunks: 0
+            },
+            Progress::DictionaryDone => FFIProgress {
+                ty: FFIProgressType::DictionaryDone, 
+                total_chunks: 0
+            },
+            Progress::Compressing { total_chunks } => FFIProgress { 
+                ty: FFIProgressType::Compressing, 
+                total_chunks
+            },
+            Progress::ChunkCompressed => FFIProgress {
+                ty: FFIProgressType::ChunkCompressed, 
+                total_chunks: 0
+            },
+            Progress::Finalizing => FFIProgress {
+                ty: FFIProgressType::Finalizing,
+                total_chunks: 0
+            },
+        };
+        callback(ffi_progress, user_data.0);
+    }
+}
 
     /// Consumes the builder and returns the final archive as a byte vector.
     ///
@@ -240,28 +292,16 @@ where
         //Sort to prepare data to be analyzed to build dictionary.
         let samples_for_dict: Vec<&[u8]> = self.sorted_hashes
             .iter()
-            .filter_map(|hash| self.data_store.get(hash).map(|data| data.as_slice()))
+            .filter_map(|hash| self.data_store
+                .get(hash)
+                .map(|data| data.as_slice()))
             .collect();
 
         //Make dictionary from sorted data.
         let mut _dictionary: Vec<u8> = Vec::new();
 
         //Report progress before starting a dictionary generation
-        if let Some(callback) = self.progress_callback.as_ref() {
-            callback(Progress::GeneratingDictionary);
-        }
-
-        //Same for the C version.
-        if let Some((
-                callback, 
-                user_data_wrapper
-            )) = self.c_progress_callback {
-                let ffi_progress = FFIProgress {
-                    ty: FFIProgressType::GeneratingDictionary,
-                    total_chunks: 0,
-                };
-                callback(ffi_progress, user_data_wrapper.0);
-        }
+        self.report_progress(Progress::GeneratingDictionary);
         
         if self.opt_dict{
             _dictionary = gen_zstd_opt_dict(
@@ -272,26 +312,12 @@ where
         } else {
             _dictionary = zstd::dict::from_samples(
             &samples_for_dict,
-            self.dictionary_size as usize, // dictionary size in bytes
+            self.dictionary_size as usize, //Dictionary size in bytes
             ).map_err(|e| LibError::CompressionError(e.to_string()))?;
         }
 
         //Report progress after dictionary generation is done.
-        if let Some(callback) = self.progress_callback.as_ref() {
-            callback(Progress::DictionaryDone);
-        }
-
-        //Same for the C version.
-        if let Some((
-                callback, 
-                user_data_wrapper
-            )) = self.c_progress_callback {
-                let ffi_progress = FFIProgress{
-                    ty: FFIProgressType::DictionaryDone,
-                    total_chunks: 0,
-                };
-            callback(ffi_progress, user_data_wrapper.0);
-        }
+        self.report_progress(Progress::DictionaryDone);
         
         let task_pool = {
             let builder = rayon::ThreadPoolBuilder::new()
@@ -322,26 +348,15 @@ where
                 )?
         };
 
-        let compressed_dash: DashMap<u64, Vec<u8>> = DashMap::new();
+        let compressed_dash: DashMap<H, Vec<u8>> = DashMap::new();
 
         let comp_result: Result<(), LibError> = task_pool.install(|| {
             //Report that compression is starting
-            if let Some(callback) = self.progress_callback.as_ref() {    
-                callback(Progress::Compressing {
-                    total_chunks: self.sorted_hashes.len() as u64 
-                });
-            }
-
-            if let Some((
-                callback, 
-                user_data_wrapper
-            )) = self.c_progress_callback {
-                let ffi_progress = FFIProgress{
-                    ty: FFIProgressType::Compressing,
-                    total_chunks: self.sorted_hashes.len() as u64
-                };
-                callback(ffi_progress, user_data_wrapper.0);
-            }
+            self.report_progress(Progress::Compressing { 
+                total_chunks: (
+                    self.sorted_hashes.len() as u64 
+                )
+            });
             
             self.sorted_hashes.par_iter().try_for_each(|hash| {
                 if let Some(data) = self.data_store.get(hash){
@@ -349,26 +364,13 @@ where
                         data.as_slice(), 
                         &_dictionary, 
                         &self.compression_level)
-                        .map_err(|e| LibError::CompressionError(e.to_string()))?;
+                        .map_err(|e| LibError::CompressionError(
+                            e.to_string()
+                        ))?;
 
                     compressed_dash.insert(*hash, compressed_chunk);
 
-                    if let Some(callback) = self.progress_callback.as_ref() {
-                        callback(Progress::ChunkCompressed);
-                    }
-
-                    if let Some((
-                        callback, 
-                        user_data_wrapper
-                    )) = self.c_progress_callback {
-                        let ffi_progress = FFIProgress{
-                            ty: FFIProgressType::ChunkCompressed,
-                            total_chunks: 0,
-                        };
-                        callback(
-                            ffi_progress, 
-                            user_data_wrapper.0);
-                    }
+                    self.report_progress(Progress::ChunkCompressed);
                 }
                 Ok(())
             })
@@ -378,7 +380,7 @@ where
         comp_result?;
 
         let (compressed_data_store, chunk_index) = 
-            serialize_store(&compressed_dash, &self.sorted_hashes);
+            serialize_store(&compressed_dash, &self.sorted_hashes)?;
 
         drop(compressed_dash);
 
@@ -386,18 +388,6 @@ where
         compressed_data store
         chunk_index
         dictionary*/
-
-        //Same for the C version.
-        if let Some((
-                callback, 
-                user_data_wrapper
-            )) = self.c_progress_callback {
-                let ffi_progress = FFIProgress{
-                    ty: FFIProgressType::Finalizing,
-                    total_chunks: 0,
-                };
-                callback(ffi_progress, user_data_wrapper.0);
-            }
 
         let config = bincode::config::standard();
 
@@ -413,6 +403,7 @@ where
         let file_header = build_file_header(
             self.file_count,
             self.compression_algorithm,
+            self.hash_type,
             bin_file_manifest.len() as u64,
             _dictionary.len() as u64,
             bin_chunk_index.len() as u64,

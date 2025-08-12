@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use dashmap::DashMap;
 
+use crate::lib_error_handling::LibError;
 use crate::lib_structs::{ChunkLocation, FileManifestParent};
 
 /// A trait abstracting access to a key-value store of chunk data.
@@ -18,7 +19,7 @@ use crate::lib_structs::{ChunkLocation, FileManifestParent};
 /// different underlying map implementations, such as `HashMap` or `DashMap`.
 /// It is used to allow serialization logic to operate on either a
 /// thread-safe or non-thread-safe data store without duplication.
-pub trait ChunkStore {
+pub trait ChunkStore<H: Eq + std::hash::Hash> {
     /// Retrieves a reference to a chunk's data by its hash.
     ///
     /// # Arguments
@@ -30,7 +31,7 @@ pub trait ChunkStore {
     /// An `Option` containing a reference to the chunk's byte `Vec`.
     /// The reference is wrapped in a type that dereferences to `Vec<u8>`.
     /// Returns `None` if no chunk with the specified hash is found.
-    fn get_chunk(&self, hash: &u64) -> 
+    fn get_chunk(&self, hash: &H) -> 
         Option<impl std::ops::Deref<Target = Vec<u8>>>;
 }
 
@@ -38,8 +39,8 @@ pub trait ChunkStore {
 ///
 /// This implementation allows the generic serialization functions to
 /// operate on a `HashMap` that maps chunk hashes to their byte data.
-impl ChunkStore for HashMap<u64, Vec<u8>> {
-    fn get_chunk(&self, hash: &u64) -> Option<impl std::ops::Deref<Target = Vec<u8>>> {
+impl <H: Eq + std::hash::Hash> ChunkStore<H> for HashMap<H, Vec<u8>> {
+    fn get_chunk(&self, hash: &H) -> Option<impl std::ops::Deref<Target = Vec<u8>>> {
         self.get(hash)
     }
 }
@@ -50,8 +51,8 @@ impl ChunkStore for HashMap<u64, Vec<u8>> {
 /// operate on a `DashMap`. It provides read access to the map in a
 /// concurrent context, returning a read guard that dereferences to the
 /// chunk's data.
-impl ChunkStore for DashMap<u64, Vec<u8>> {
-    fn get_chunk(&self, hash: &u64) -> Option<impl std::ops::Deref<Target = Vec<u8>>> {
+impl <H: Eq + std::hash::Hash + Clone> ChunkStore<H> for DashMap<H, Vec<u8>> {
+    fn get_chunk(&self, hash: &H) -> Option<impl std::ops::Deref<Target = Vec<u8>>> {
         self.get(hash)
     }
 }
@@ -103,16 +104,20 @@ where
 /// - A `Vec<u8>` with all chunk data concatenated in order.
 /// - A `HashMap<u64, ChunkLocation>` that serves as the chunk index,
 ///   mapping each hash to its location in the returned byte vector.
-pub fn serialize_store<S: ChunkStore>(
+pub fn serialize_store<H, S>(
     store: &S,
-    sorted_hashes: &[u64],
-) -> (Vec<u8>, HashMap<u64, ChunkLocation>){
+    sorted_hashes: &[H],
+) -> Result<(Vec<u8>, HashMap<H, ChunkLocation>), LibError>
+where
+    H: Copy + Eq + std::hash::Hash + std::fmt::Display,
+    S: ChunkStore<H>,
+{
     let total_size = sorted_hashes
         .iter()
         .map(|hash| store.get_chunk(hash).map_or(0, |data| data.len()))
         .sum();
     
-    let (data_store, chunk_index, _offset) = sorted_hashes.iter().fold(
+    let (data_store, chunk_index, _offset) = sorted_hashes.iter().try_fold(
         (
             Vec::with_capacity(total_size),
             HashMap::with_capacity(sorted_hashes.len()),
@@ -133,12 +138,16 @@ pub fn serialize_store<S: ChunkStore>(
 
                 data_vec.extend_from_slice(data);
                 offset += data_len;
+                
+                Ok((data_vec, index_map, offset))
+            } else {
+                //If a chunk is missing, return an error
+                Err(LibError::SerializationMissingChunkError(hash.to_string()))
             }
-            (data_vec, index_map, offset)
         },
-    );
+    )?;
 
-    (data_store, chunk_index)
+    Ok((data_store, chunk_index))
 }
 
 /// Prepares and serializes all data for the final archive.
@@ -161,12 +170,17 @@ pub fn serialize_store<S: ChunkStore>(
 /// - A `Vec<u8>` with all chunk data concatenated in order.
 /// - A `HashMap` that serves as the chunk index.
 /// - A sorted `Vec` of all unique chunk hashes.
-pub fn serialize_uncompressed_data(file_manifest: &DashMap<String, FileManifestParent>,
-    data_store: &HashMap<u64, Vec<u8>>) -> 
-    (Vec<FileManifestParent>/*ser_file_manifest */, 
-        Vec<u8> /*ser_data_store */, 
-        HashMap<u64, ChunkLocation> /*chunk_index */,
-        Vec<u64> /*sorted_hashes */)
+pub fn serialize_uncompressed_data<H>(
+    file_manifest: &DashMap<String, FileManifestParent<H>>,
+    data_store: &HashMap<H, Vec<u8>>
+) -> Result<(
+    Vec<FileManifestParent<H>>/*ser_file_manifest */, 
+    Vec<u8> /*ser_data_store */, 
+    HashMap<H, ChunkLocation> /*chunk_index */,
+    Vec<H> /*sorted_hashes */
+), LibError>
+where
+    H: Copy + Ord + Eq + std::hash::Hash + std::fmt::Display,
 {
     let mut ser_file_manifest = dashmap_values_to_vec(file_manifest);
 
@@ -178,16 +192,16 @@ pub fn serialize_uncompressed_data(file_manifest: &DashMap<String, FileManifestP
         fmp.chunk_metadata.sort_by_key(|metadata| metadata.offset);
     });
 
-    let mut sorted_hashes: Vec<u64> = data_store.keys().copied().collect();
+    let mut sorted_hashes: Vec<H> = data_store.keys().copied().collect();
     
     sorted_hashes.sort_unstable();
 
-    let (ser_data_store, chunk_index) = serialize_store(data_store, &sorted_hashes);
+    let (ser_data_store, chunk_index) = serialize_store(data_store, &sorted_hashes)?;
     
-    (
+    Ok((
         ser_file_manifest, 
         ser_data_store, 
         chunk_index, 
         sorted_hashes
-    )
+    ))
 }

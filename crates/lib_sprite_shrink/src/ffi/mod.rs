@@ -28,4 +28,6 @@ pub enum FFIStatus {
     VerificationHashMismatch = -9,
     VerificationMissingChunk = -10,
     InvalidString = -11,
+    SerializationMissingChunkError = -12,
+    InvalidMagicNumber = -13,
 }
