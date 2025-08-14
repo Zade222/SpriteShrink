@@ -62,4 +62,7 @@ pub enum LibError {
 
     #[error("Chunk missing: {0}")]
     SerializationMissingChunkError(String),
+
+    #[error("Seek request is outside the file bounds: {0}")]
+    SeekOutOfBounds(String),
 }

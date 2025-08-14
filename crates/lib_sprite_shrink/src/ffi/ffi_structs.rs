@@ -212,6 +212,32 @@ pub enum FFIProgressType {
     Finalizing,
 }
 
+#[repr(C)]
+pub struct FFISeekChunkInfoU64 {
+    pub hash: u64,
+    pub read_start: u64,
+    pub read_end: u64,
+}
+
+#[repr(C)]
+pub struct FFISeekChunkInfoU128 {
+    pub hash: u128,
+    pub read_start: u64,
+    pub read_end: u64,
+}
+
+#[repr(C)]
+pub struct FFISeekInfoArrayU64 {
+    pub chunks: *mut FFISeekChunkInfoU64,
+    pub chunks_len: usize,
+}
+
+#[repr(C)]
+pub struct FFISeekInfoArrayU128 {
+    pub chunks: *mut FFISeekChunkInfoU128,
+    pub chunks_len: usize,
+}
+
 /// Holds all the output data from `serialize_uncompressed_data_ffi` for a u64
 /// hash.
 /// All pointers within this struct are owned by the C caller and must be 

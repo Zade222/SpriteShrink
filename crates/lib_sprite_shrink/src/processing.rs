@@ -6,8 +6,11 @@
 //! functions for chunking and hashing, as well as for rebuilding and
 //! verifying files from their chunks.
 
-use std::collections::HashMap;
-use std::ffi::c_void;
+use std::{
+    collections::HashMap,
+    ffi::c_void,
+    hash::Hash
+};
 
 use dashmap::DashMap;
 use fastcdc::v2020::{Chunk, FastCDC, Normalization};
@@ -465,3 +468,79 @@ where
     Ok((dictionary.len() as usize) + compressed_size)
 }
 
+/// Calculates which chunks and what parts of them are needed to satisfy a 
+/// seek request.
+///
+/// # Arguments
+/// * `manifest`: The `FileManifestParent` for the specific file being read.
+/// * `seek_offset`: The starting byte offset within the original, 
+///   uncompressed file.
+/// * `seek_length`: The number of bytes to read from the `seek_offset`.
+///
+/// # Returns
+/// A `Result` containing a `Vec` where each entry is a tuple of:
+/// - The `hash` of a required chunk.
+/// - The `(start, end)` byte range to copy from that chunk *after* it has 
+///   been decompressed.
+pub fn get_seek_chunks<H: Copy + Eq + Hash>(
+    manifest: &FileManifestParent<H>,
+    seek_offset: u64,
+    seek_length: u64,
+) -> Result<Vec<(H, (u64, u64))>, LibError> {
+    //Caluclate original file size.
+    let original_file_size: u64 = manifest.chunk_metadata
+        .iter()
+        .map(|c| c.length as u64)
+        .sum();
+
+    /*Using the calculated file size, if the seek request is beyond the file
+    size fail early.*/
+    if seek_offset + seek_length > original_file_size {
+        return Err(LibError::SeekOutOfBounds(
+            "Seek request is outside the bounds of the original file.".to_string(),
+        ));
+    }
+    
+    //Prepare the return vector
+    let mut required_chunks: Vec<(H, (u64, u64))> = Vec::new();
+
+    //Calculate the seek end for checking if each chunk is within that range.
+    let seek_end = seek_offset + seek_length;
+
+    for chunk_meta in &manifest.chunk_metadata {
+        //Calculate start offset of the chunk within the virtual file.
+        let chunk_start_offset = chunk_meta.offset;
+        //Calculate end offset of the chunk within the virtual file.
+        let chunk_end_offset = chunk_meta.offset + chunk_meta.length as u64;
+
+        //Check if a chunk is found within the desired range.
+        if (chunk_start_offset < seek_end) && (chunk_end_offset > seek_offset){
+            /*Calculate and record the start offset within the chunk of the 
+            desired data.
+            If the seek offset is before the chunk offset it will be 0.*/
+            let read_start_in_chunk = seek_offset
+                .saturating_sub(chunk_start_offset);
+
+            /*Calculate and record the end offset within the chunk of the 
+            desired data.
+            If the seek offset is after the end of the chunk, it will be the 
+            data length of the chunk.*/
+            let read_end_in_chunk = (seek_end - chunk_start_offset)
+                .min(chunk_meta.length
+                    .into()
+                );
+
+            /*Add the gathered data to the return vector. */
+            required_chunks.push(
+                (chunk_meta.hash, (read_start_in_chunk, read_end_in_chunk))
+            )
+        }
+        /*If a chunk is found beyond the end of the seek request, end the 
+        loop.*/
+        else if chunk_start_offset >= seek_end {
+            break;
+        }
+    }
+
+    Ok(required_chunks)
+}

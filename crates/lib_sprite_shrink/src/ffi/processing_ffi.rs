@@ -14,17 +14,23 @@ use libc::c_char;
 
 use crate::ffi::FFIStatus;
 use crate::ffi::ffi_structs::{
-    FFIChunk, FFIChunkIndexEntryU64, FFIChunkIndexEntryU128, 
-    FFIFileManifestChunksU64, FFIFileManifestChunksU128, FFIDataStoreEntryU64,
-    FFIDataStoreEntryU128, FFIFileData, FFIFileManifestParentU64, 
-    FFIFileManifestParentU128, FFIHashedChunkDataU64, FFIHashedChunkDataU128,
-    FFIProcessedFileData, FFISSAChunkMetaU64, FFISSAChunkMetaU128, 
+    FFIChunk, 
+    FFIChunkIndexEntryU64, FFIChunkIndexEntryU128, 
+    FFIFileManifestChunksU64, FFIFileManifestChunksU128, 
+    FFIDataStoreEntryU64, FFIDataStoreEntryU128, 
+    FFIFileData, 
+    FFIFileManifestParentU64, FFIFileManifestParentU128, 
+    FFIHashedChunkDataU64, FFIHashedChunkDataU128,
+    FFIProcessedFileData, 
+    FFISeekChunkInfoU64, FFISeekChunkInfoU128,
+    FFISeekInfoArrayU64, FFISeekInfoArrayU128,
+    FFISSAChunkMetaU64, FFISSAChunkMetaU128, 
     FFIVeriHashesEntry
 };
 use crate::lib_error_handling::LibError;
 use crate::lib_structs::{ChunkLocation, SSAChunkMeta};
 use crate::processing::{
-    create_file_manifest_and_chunks, process_file_in_memory, 
+    create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory, 
     rebuild_and_verify_single_file, test_compression};
 use crate::{FileData, FileManifestParent};
 
@@ -618,4 +624,183 @@ test_compression_ffi_setter!(
     test_compression_ffi_u128,
     FFIDataStoreEntryU128,
     u128,
+);
+
+macro_rules! get_seek_chunks_ffi_setter {
+    (
+        $doc_l10:literal,
+        $fn_name:ident,
+        $ffi_file_man_par:ty,
+        $ffi_seek_info_array:path,
+        $hash_type:ty,
+        $ffi_seek_chunk_info:path,
+        $ffi_ssa_chunk_meta:ty
+    ) => {
+        /// Calculates which chunks are needed for a seek operation via an 
+        /// FFI-safe interface.
+        ///
+        /// # Safety
+        /// - `file_manifest_parent` must be a valid, non-null pointer.
+        /// - `out_ptr` must be a valid pointer to a 
+        ///   `*mut FFISeekInfoArray...`.
+        /// - On success, the pointer written to `out_ptr` is owned by the C 
+        ///   caller and MUST be freed by passing it to the 
+        #[doc = $doc_l10]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $fn_name(
+            file_manifest_parent: *const $ffi_file_man_par,
+            seek_offset: u64,
+            seek_length: u64,
+            out_ptr: *mut *mut $ffi_seek_info_array,
+        ) -> FFIStatus {
+            if file_manifest_parent.is_null() || out_ptr.is_null() {
+                return FFIStatus::NullArgument;
+            }
+
+            let fmp = unsafe{
+                //Dereference the main struct pointer once.
+                let ffi_fmp_ref = &*file_manifest_parent;
+                
+                /*Prepare data_store, which is the second parameter of the 
+                original rebuild_and_verify_single_file function, from C 
+                input.*/
+                let ffi_meta = std::slice::from_raw_parts(
+                    ffi_fmp_ref.chunk_metadata,
+                    ffi_fmp_ref.chunk_metadata_len
+                );
+
+                let vec_chunk_metadata: Vec<SSAChunkMeta<$hash_type>> = ffi_meta
+                .iter()
+                .map(|meta| SSAChunkMeta {
+                    hash: meta.hash,
+                    offset: meta.offset,
+                    length: meta.length
+                })
+                .collect();
+
+                FileManifestParent {
+                    filename: std::ffi::CStr::from_ptr(ffi_fmp_ref.filename)
+                        .to_string_lossy()
+                        .into_owned(),
+                    chunk_count: ffi_fmp_ref.chunk_metadata_len as u64,
+                    chunk_metadata: vec_chunk_metadata
+                }
+            };
+
+            match get_seek_chunks::<$hash_type>(
+                &fmp, 
+                seek_offset, 
+                seek_length
+            ){
+                Ok(seek_info_vec) => {
+                    let mut ffi_chunks: Vec<$ffi_seek_chunk_info> = 
+                        seek_info_vec
+                            .into_iter()
+                            .map(|(hash, (start, end))| 
+                                {$ffi_seek_chunk_info {
+                                    hash,
+                                    read_start: start,
+                                    read_end: end,
+                                }
+                            })
+                            .collect();
+
+                    let chunks_ptr = ffi_chunks.as_mut_ptr();
+                    let chunks_len = ffi_chunks.len();
+
+                    // Give up ownership so memory isn't freed here
+                    std::mem::forget(ffi_chunks); 
+
+                    /*Create the final struct that holds the array pointer 
+                    and length*/
+                    let output = Box::new({
+                            $ffi_seek_info_array {
+                                chunks: chunks_ptr,
+                                chunks_len,
+                            }
+                    });
+
+                    unsafe {
+                        *out_ptr = Box::into_raw(output);
+                    }
+
+                    FFIStatus::Ok
+                }
+                Err(LibError::SeekOutOfBounds(_))=>
+                    FFIStatus::SeekOutOfBounds,
+                _ => FFIStatus::InternalError,
+            }
+        }
+    };
+}
+
+get_seek_chunks_ffi_setter!(
+    "  `free_seek_chunks_ffi_u64` function.",
+    get_seek_chunks_ffi_64,
+    FFIFileManifestParentU64,
+    FFISeekInfoArrayU64,
+    u64,
+    FFISeekChunkInfoU64,
+    FFISSAChunkMetaU64
+);
+
+get_seek_chunks_ffi_setter!(
+    "  `free_seek_chunks_ffi_u128` function.",
+    get_seek_chunks_ffi_128,
+    FFIFileManifestParentU128,
+    FFISeekInfoArrayU128,
+    u128,
+    FFISeekChunkInfoU128,
+    FFISSAChunkMetaU128
+);
+
+macro_rules! free_seek_chunks_ffi_setter {
+    (
+        $doc_l5:literal,
+        $fn_name:ident,
+        $ffi_seek_info_array:ty,
+        $ffi_seek_chunk_info:ty
+    ) => {
+        /// Frees the memory allocated by a `get_seek_chunks_ffi` function.
+        ///
+        /// # Safety
+        /// The `ptr` must be a non-null pointer returned from a successful 
+        #[doc = $doc_l5]
+        /// Calling this with a null pointer or a pointer that has already 
+        /// been freed will lead to undefined behavior.
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn $fn_name(
+            ptr: *mut $ffi_seek_info_array
+        ) {
+            if ptr.is_null() {
+                return;
+            }
+
+            unsafe{
+                /*Retake ownership of the main struct to deallocate it at the
+                end.*/
+                let output_box = Box::from_raw(ptr);
+
+                let _ = Vec::from_raw_parts(
+                    output_box.chunks,
+                    output_box.chunks_len,
+                    output_box.chunks_len,
+                );
+            }
+        }
+    };
+}
+
+free_seek_chunks_ffi_setter!(
+    "call to the `get_seek_chunks_ffi_u64` function.",
+    free_seek_chunks_ffi_u64,
+    FFISeekInfoArrayU64,
+    FFISeekChunkInfoU64
+);
+
+free_seek_chunks_ffi_setter!(
+    "call to the `get_seek_chunks_ffi_u128` function.",
+    free_seek_chunks_ffi_u128,
+    FFISeekInfoArrayU128,
+    FFISeekChunkInfoU128
 );
