@@ -302,7 +302,8 @@ where
                 .map(|data| data.as_slice()))
             .collect();*/
 
-        const MAX_SAMPLES_SIZE: u64 = 3 * 1024 * 1024 * 1024;
+        //Max samples is approximately 3.9 gigabytes.
+        const MAX_SAMPLES_SIZE: u64 = 4 * 1024 * 1024 * 922;
 
         let mut samples_for_dict: Vec<&[u8]> = Vec::new();
         let mut current_samples_size: u64 = 0;
