@@ -63,6 +63,9 @@ pub enum CliError {
     #[error("Range parse error {0}")]
     RangeParseError(#[from] RangeError),
 
-    #[error("Range parse error {0}")]
+    #[error("OS priority error {0}")]
     OSPriorityError(#[from] thread_priority::Error),
+
+    #[error("Hash bit length error {0}")]
+    HashBitLengthError(String),
 }

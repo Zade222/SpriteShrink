@@ -96,7 +96,15 @@ fn run(args: &Args) -> Result<(), CliError> {
             }
         }
         (None, false) => {
-            run_compression(file_paths, args)?;
+            let hash_bit_length = args.hash_bit_length.unwrap_or(64);
+
+            match hash_bit_length{
+                64 => run_compression::<u64>(file_paths, args, &1)?,
+                128 => run_compression::<u128>(file_paths, args, &2)?,
+                _ => return Err(CliError::HashBitLengthError(
+                    "Invalid hash bit length. Must be 64 or 128.".to_string(),
+                )),
+            }
         }
 
         (Some(_), true) => {

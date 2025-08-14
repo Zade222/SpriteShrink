@@ -68,6 +68,12 @@ pub struct Args {
     #[arg(short, long, help_heading = "Tuning Parameters")]
     pub window: Option<ByteSize>,
 
+    ///Sets the hashing algorithm bit length.
+    /// Default value is 64.
+    /// If the hash verification stage fails set to 128.
+    #[arg(long, help_heading = "Tuning Parameters")]
+    pub hash_bit_length: Option<u32>,
+
     ///Determines the dictionary size for the compression algorithm.
     ///(e.g., "256K", "4KB", "64KiB")
     ///Recommended value is 16kb.
@@ -77,7 +83,7 @@ pub struct Args {
     ///Autotune both the window size and dictionary size. Will find the 
     /// reasonably optimal size for each. This uses a somewhat inefficient 
     /// algorithm and can take time but will lead to a smaller file size
-    /// more easily. If vlaues for either the window or dictionary are 
+    /// more easily. If values for either the window or dictionary are 
     /// provided they will be used instead of autotuning.
     #[arg(long, help_heading = "Tuning Parameters", 
     default_value_t = false)]

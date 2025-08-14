@@ -5,13 +5,18 @@
 //! header, manifest, and chunk index, which are the core components
 //! needed to locate and extract the contained files.
 
-use std::collections::HashMap;
-use std::mem;
-use std::path::{PathBuf};
+use std::{
+    collections::HashMap,
+    fmt::Display,
+    mem,
+    path::PathBuf,
+};
+
+use serde::Serialize;
 
 use sprite_shrink::{
-    ChunkLocation, FileHeader, FileManifestParent, parse_file_chunk_index, 
-    parse_file_header, parse_file_metadata,
+    ChunkLocation, FileHeader, FileManifestParent, Hashable,
+    parse_file_chunk_index, parse_file_header, parse_file_metadata,
 };
 
 use crate::error_handling::CliError;
@@ -62,9 +67,15 @@ pub fn get_file_header(file_path: &PathBuf) -> Result<FileHeader, CliError> {
 /// A `Result` which is:
 /// - `Ok(Vec<FileManifestParent>)` containing the parsed file manifest.
 /// - `Err(CliError)` if reading or parsing the manifest fails.
-pub fn get_file_manifest(file_path: &PathBuf, 
+pub fn get_file_manifest<H>(file_path: &PathBuf, 
     man_offset: &u64, 
-    man_length: &usize) -> Result<Vec<FileManifestParent>, CliError> 
+    man_length: &usize) -> Result<Vec<FileManifestParent<H>>, CliError> 
+where
+    H: Hashable
+        + Ord
+        + Display
+        + Serialize
+        + for<'de> serde::Deserialize<'de>,
 {
     //Read file manifest from file.
     let bin_vec_manifest = read_file_data(file_path, man_offset, man_length)?;
@@ -121,11 +132,17 @@ pub fn get_max_rom_index(file_path: &PathBuf)
 /// A `Result` which is:
 /// - `Ok(HashMap<u64, ChunkLocation>)` containing the parsed index.
 /// - `Err(CliError)` if reading the file or parsing the data fails.
-pub fn get_chunk_index (
+pub fn get_chunk_index<H>(
     file_path: &PathBuf, 
     chunk_index_offset: &u64,
     chunk_index_length: &usize
-) -> Result<HashMap<u64, ChunkLocation>, CliError>
+) -> Result<HashMap<H, ChunkLocation>, CliError>
+where
+    H: Hashable
+        + Ord
+        + Display
+        + Serialize
+        + for<'de> serde::Deserialize<'de>,
     {
     //Read the chunk_index from the file.
     let bin_vec_chunk_index = read_file_data(

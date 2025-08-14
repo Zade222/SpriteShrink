@@ -6,10 +6,13 @@
 //! them in parallel to find duplicate data chunks, and then serialize,
 //! verify, and compress the unique data into a final archive file.
 
-use std::collections::HashMap;
-use std::path::PathBuf;
-use std::sync::Mutex;
-use std::time::{Duration, Instant};
+use std::{
+    collections::HashMap,
+    fmt::Display,
+    path::PathBuf,
+    sync::Mutex,
+    time::{Duration, Instant}
+};
 
 use dashmap::DashMap;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -18,11 +21,12 @@ use libc::{
     pthread_self, pthread_set_qos_class_self_np
 };
 use sprite_shrink::{
-    ArchiveBuilder, FileManifestParent, Progress,
+    ArchiveBuilder, FileManifestParent, Hashable, Progress,
     create_file_manifest_and_chunks, process_file_in_memory, 
     rebuild_and_verify_single_file, serialize_uncompressed_data, test_compression
 };
 use rayon::prelude::*;
+use serde::Serialize;
 use thread_priority::*;
 
 use crate::arg_handling::Args;
@@ -67,10 +71,18 @@ use crate::storage_io::{
 /// - `CliError::InternalError` if a thread pool cannot be created.
 /// - Any error propagated from file I/O, data processing, verification,
 ///   or final archive writing stages.
-pub fn run_compression(
+pub fn run_compression<H>(
     file_paths: Vec<PathBuf>,
     args: &Args,
-) -> Result<(), CliError> {
+    hash_type_id: &u8,
+) -> Result<(), CliError> 
+where
+    H: Hashable
+        + Ord
+        + Display
+        + Serialize
+        + for<'de> serde::Deserialize<'de>,
+{
     
     /*Verify if the list of files paths is empty, throw error if true. */
     if file_paths.is_empty() {
@@ -103,11 +115,11 @@ pub fn run_compression(
 
     /*Stores the chunk metadata for each file. 
     The key is the file name and the value is a FileManifestParent struct.*/
-    let mut _file_manifest: DashMap<String, FileManifestParent> = DashMap::new();
+    let mut _file_manifest: DashMap<String, FileManifestParent<H>> = DashMap::new();
     
     /*Stores each chunk and it's hash. 
     The key is the hash and the value is the byte data of the chunk.*/
-    let mut _data_store: HashMap<u64, Vec<u8>> = HashMap::new();
+    let mut _data_store: HashMap<H, Vec<u8>> = HashMap::new();
 
     /*Stores the SHA-512 hash for each file. 
     The String is the file name and the array is the 512 bit hash as a 64 byte 
@@ -204,7 +216,10 @@ pub fn run_compression(
                 _ser_data_store, 
                 _chunk_index, 
                 sorted_hashes) = 
-                serialize_uncompressed_data(&_fm, &temp_data_store);
+                serialize_uncompressed_data::<H>(
+                    &_fm, 
+                    &temp_data_store
+                )?;
 
                 //Compress the data and measure the size
                 let compressed_size = test_compression(
@@ -258,8 +273,10 @@ pub fn run_compression(
             _sds, 
             _ci, 
             sorted_hashes) =
-            serialize_uncompressed_data(&_file_manifest, 
-                &_data_store);
+            serialize_uncompressed_data::<H>(
+                &_file_manifest, 
+                &_data_store
+            )?;
 
 
         last_compressed_size = usize::MAX;
@@ -372,8 +389,10 @@ pub fn run_compression(
     let (ser_file_manifest, 
         ser_data_store, 
         chunk_index, 
-        sorted_hashes) = 
-        serialize_uncompressed_data(&_file_manifest, &_data_store);
+        sorted_hashes) = serialize_uncompressed_data::<H>(
+            &_file_manifest, 
+            &_data_store
+        )?;
     
     /*Rebuilds each file and checks the SHA-512 hash for each.*/
     _compute_pool.install(||{
@@ -448,12 +467,14 @@ pub fn run_compression(
         ser_file_manifest, 
         _data_store, 
         sorted_hashes, 
-        file_paths.len() as u32
+        file_paths.len() as u32,
+        *hash_type_id
     );
 
     builder.compression_level(level)
         .dictionary_size(best_dictionary_size)
-        .optimize_dictionary(args.optimize_dictionary);
+        .optimize_dictionary(args.optimize_dictionary)
+        .worker_threads(_compute_threads);
         
         
     let ssmc_data=builder.with_progress(&progress_callback)
@@ -515,14 +536,20 @@ pub fn run_compression(
 /// - A `DashMap` for verification hashes, mapping filenames to SHA-512 hashes.
 ///
 /// On failure, it returns a `CliError`.
-fn process_files_with_window_size(
+fn process_files_with_window_size<H>(
     file_paths: &[PathBuf],
     window_size: u64,
     pool: &rayon::ThreadPool,
-) -> Result<(DashMap<String, FileManifestParent>, //file_manifest
-    HashMap<u64, Vec<u8>>, //data_store
+) -> Result<(DashMap<String, FileManifestParent<H>>, //file_manifest
+    HashMap<H, Vec<u8>>, //data_store
     DashMap<String, [u8; 64]>), //veri_hashes
     CliError>
+where
+    H: Hashable
+        + Ord
+        + Display
+        + Serialize
+        + for<'de> serde::Deserialize<'de>,
 {
     //Read and process each file. Low memory mode limits this to 1 worker.
     let processed_files = pool.install(|| {
@@ -540,8 +567,8 @@ fn process_files_with_window_size(
             .collect::<Result<Vec<_>, _>>()
     })?;
 
-    let file_manifest: DashMap<String, FileManifestParent> = DashMap::new();
-    let mut data_store: HashMap<u64, Vec<u8>> = HashMap::new();
+    let file_manifest: DashMap<String, FileManifestParent<H>> = DashMap::new();
+    let mut data_store: HashMap<H, Vec<u8>> = HashMap::new();
     let veri_hashes: DashMap<String, [u8; 64]> = DashMap::new();
 
     //Data must be ordered sequentially.

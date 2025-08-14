@@ -843,6 +843,7 @@ dependencies = [
  "libc",
  "range-parser",
  "rayon",
+ "serde",
  "sprite_shrink",
  "thiserror 2.0.12",
  "thread-priority",

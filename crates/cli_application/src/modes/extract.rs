@@ -6,10 +6,15 @@
 //! then proceeds to decompress and write the files requested by the user
 //! to the designated output directory.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fmt::Display,
+    hash::Hash,
+    path::{Path, PathBuf},
+};
 use rayon::prelude::*;
+use serde::{Deserialize, Serialize};
 
-use sprite_shrink::{decompress_chunk};
+use sprite_shrink::{Hashable, decompress_chunk};
 
 use crate::archive_parser::{
     get_chunk_index, get_file_header, get_file_manifest, 
@@ -54,7 +59,8 @@ use crate::storage_io::{
 /// - `CliError::InvalidRomIndex` if a requested ROM index does not exist
 ///   in the archive.
 /// - Any error propagated from the decompression or file writing stages.
-pub fn run_extraction(file_path: &PathBuf, 
+pub fn run_extraction(
+    file_path: &PathBuf, 
     out_dir: &Path, 
     rom_indices: &Vec<u8>,
     args: &Args,
@@ -62,6 +68,41 @@ pub fn run_extraction(file_path: &PathBuf,
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
 
+    /*Get the identifier for the hash type stored in the archive.*/
+    let hash_bit_length = header.hash_type;
+
+    match hash_bit_length {
+        1 => extract_data::<u64>(file_path, out_dir, rom_indices, args, &header),
+        2 => extract_data::<u128>(file_path, out_dir, rom_indices, args, &header),
+        _ => //Handle other cases or return an error for unsupported hash types
+            Err(CliError::InternalError(
+                "Unsupported hash type in archive header.".to_string()
+            )),
+           
+    }
+}
+
+/// Generic implementation of the file extraction process.
+///
+/// This function is parameterized over the hash type `H` and contains the
+/// core logic for reading the manifest and chunk index, decompressing chunks,
+/// and writing the final files to disk.
+fn extract_data<H>(
+    file_path: &PathBuf,
+    out_dir: &Path,
+    rom_indices: &Vec<u8>,
+    args: &Args,
+    header: &sprite_shrink::FileHeader,
+) -> Result<(), CliError>
+where
+    H: Hashable + 
+        Ord + 
+        Display + 
+        Serialize + 
+        for<'de> Deserialize<'de> + 
+        Eq + 
+        Hash,
+{
     /*Stores the length of the file_manifest from the header.*/
     let man_length = header.man_length as usize;
 
@@ -73,7 +114,7 @@ pub fn run_extraction(file_path: &PathBuf,
 
     /*Read and store the file manifest from the target file in memory in 
     the file_manifest variable*/
-    let file_manifest = get_file_manifest(
+    let file_manifest = get_file_manifest::<H>(
         file_path, 
         &header.man_offset, 
         &man_length)?;
@@ -87,7 +128,7 @@ pub fn run_extraction(file_path: &PathBuf,
 
     /*Read and store the file zstd compression dictionary from the target 
     file in memory in the dictionary variable.*/
-    let chunk_index = get_chunk_index(
+    let chunk_index = get_chunk_index::<H>(
         file_path, 
         &header.chunk_index_offset, 
         &chunk_length)?;
@@ -178,4 +219,4 @@ pub fn run_extraction(file_path: &PathBuf,
         })
     })?;
     Ok(())
-}
+}    

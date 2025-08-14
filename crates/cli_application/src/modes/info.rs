@@ -5,10 +5,19 @@
 //! a summary of the archive's contents, such as the names and indices of
 //! all contained files, to the console.
 
-use std::path::PathBuf;
+use std::{
+    fmt::Display,
+    path::PathBuf,
+};
 
 use crate::archive_parser::{
     get_file_header, get_file_manifest
+};
+
+use serde::Serialize;
+
+use sprite_shrink::{
+    FileManifestParent, Hashable
 };
 
 use crate::error_handling::CliError;
@@ -56,15 +65,58 @@ pub fn run_info(
     /*Stores the length of the file_manifest from the header.*/
     let man_length = header.man_length as usize;
 
+    /*Get the identifier for the hash type stored in the archive.*/
+    let hash_bit_length = header.hash_type;
+
     /*Read and store the file manifest from the target file in memory in 
     the file_manifest variable*/
-    let file_manifest = get_file_manifest(
-        file_path, 
-        &header.man_offset, 
-        &man_length
-    )?;
+    match hash_bit_length {
+        1 => {
+            let file_manifest = get_file_manifest::<u64>(
+                file_path, 
+                &header.man_offset, 
+                &man_length
+            )?;
+            print_info_table::<u64>(file_manifest);
+        },
+        2 => {
+            let file_manifest = get_file_manifest::<u128>(
+                file_path, 
+                &header.man_offset, 
+                &man_length
+            )?;
+            print_info_table::<u128>(file_manifest);
+        },
+        _ => {
+            //Handle other cases or return an error for unsupported hash types
+            return Err(CliError::InternalError(
+                "Unsupported hash type in archive header.".to_string()));
+        }   
+    };
 
+    Ok(())
+}
 
+/// Prints a formatted table of the file manifest's contents.
+///
+/// # Arguments
+///
+/// * `file_manifest`: A vector of `FileManifestParent` structs to display.
+///
+/// # Type Parameters
+///
+/// * `H`: The hash type used in the file manifest, which must implement
+///   the necessary traits for serialization and display.
+fn print_info_table<H>(
+    file_manifest: Vec<FileManifestParent<H>>
+)
+where
+    H: Hashable
+        + Ord
+        + Display
+        + Serialize
+        + for<'de> serde::Deserialize<'de>,
+{
     println!("Index\t| Filename");
     println!("------------------");
 
@@ -74,5 +126,4 @@ pub fn run_info(
         println!("{}\t| {}", index + 1, fmp.filename);
     });
     
-    Ok(())
 }
