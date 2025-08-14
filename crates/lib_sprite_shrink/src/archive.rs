@@ -348,23 +348,23 @@ where
         }
 
         //Make dictionary from sorted data.
-        //let mut _dictionary: Vec<u8> = Vec::new();
+        let mut _dictionary: Vec<u8> = Vec::new();
 
         //Report progress before starting a dictionary generation
         self.report_progress(Progress::GeneratingDictionary);
         
-        /*if self.opt_dict{
+        if self.opt_dict{
             _dictionary = gen_zstd_opt_dict(
             samples_for_dict, 
             self.dictionary_size as usize, 
             self.worker_threads, 
             self.compression_level)?;
-        } else {*/
-        let _dictionary = zstd::dict::from_samples(
-        &samples_for_dict,
-        self.dictionary_size as usize, //Dictionary size in bytes
-        ).map_err(|e| LibError::CompressionError(e.to_string()))?;
-        //}
+        } else {
+            _dictionary = zstd::dict::from_samples(
+            &samples_for_dict,
+            self.dictionary_size as usize, //Dictionary size in bytes
+            ).map_err(|e| LibError::CompressionError(e.to_string()))?;
+        }
 
         //Report progress after dictionary generation is done.
         self.report_progress(Progress::DictionaryDone);
