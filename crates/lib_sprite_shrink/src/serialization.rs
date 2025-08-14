@@ -150,6 +150,44 @@ where
     Ok((data_store, chunk_index))
 }
 
+pub fn serialize_store_from_dashmap<H>(
+    store: DashMap<H, Vec<u8>>,
+    sorted_hashes: &[H],
+) -> Result<(Vec<u8>, HashMap<H, ChunkLocation>), LibError>
+where
+    H: Copy + Eq + std::hash::Hash + std::fmt::Display,
+{
+    // Pre-calculate the total size for a single allocation.
+    let total_size = store.iter().map(|entry| entry.value().len()).sum();
+    
+    let mut data_vec = Vec::with_capacity(total_size);
+    let mut chunk_index = HashMap::with_capacity(sorted_hashes.len());
+    let mut offset = 0u64;
+
+    for hash in sorted_hashes {
+        // Use `remove` to take ownership of the chunk's Vec<u8>.
+        if let Some((_, mut chunk_data)) = store.remove(hash) {
+            let data_len = chunk_data.len() as u64;
+
+            chunk_index.insert(
+                *hash,
+                ChunkLocation {
+                    offset,
+                    length: data_len as u32, // Using u64 as per our previous fixes
+                },
+            );
+
+            // Append the owned data. This is a fast move, not a copy.
+            data_vec.append(&mut chunk_data);
+            offset += data_len;
+        } else {
+            return Err(LibError::SerializationMissingChunkError(hash.to_string()));
+        }
+    }
+
+    Ok((data_vec, chunk_index))
+}
+
 /// Prepares and serializes all data for the final archive.
 ///
 /// This function orchestrates the serialization of the primary data

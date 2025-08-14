@@ -39,7 +39,7 @@ use crate::parsing::{MAGIC_NUMBER, SUPPORTED_VERSION};
 
 use crate::processing::gen_zstd_opt_dict;
 
-use crate::serialization::{serialize_store};
+use crate::serialization::{serialize_store, serialize_store_from_dashmap};
 
 unsafe impl Send for FFIUserData {}
 unsafe impl Sync for FFIUserData {}
@@ -212,6 +212,11 @@ where
         self
     }
 
+    pub fn worker_threads(&mut self, threads: usize) -> &mut Self {
+        self.worker_threads = threads;
+        self
+    }
+
     /// Enables dictionary optimization.
     ///
     /// This can improve compression but is significantly slower.
@@ -290,31 +295,75 @@ where
     ///   compression, or serialization.
     pub fn build(self) -> Result<Vec<u8>, LibError> {
         //Sort to prepare data to be analyzed to build dictionary.
-        let samples_for_dict: Vec<&[u8]> = self.sorted_hashes
+        /*let samples_for_dict: Vec<&[u8]> = self.sorted_hashes
             .iter()
             .filter_map(|hash| self.data_store
                 .get(hash)
                 .map(|data| data.as_slice()))
-            .collect();
+            .collect();*/
+
+        const MAX_SAMPLES_SIZE: u64 = 3 * 1024 * 1024 * 1024;
+
+        let mut samples_for_dict: Vec<&[u8]> = Vec::new();
+        let mut current_samples_size: u64 = 0;
+
+        let total_chunks = self.sorted_hashes.len();
+        if total_chunks > 0 {
+            /*Calculate a step value to sample evenly across all chunks.
+            This ensures we select chunks from the beginning, middle, and 
+            end.*/
+            let step = (total_chunks as u64 * 100 / 
+                MAX_SAMPLES_SIZE.min(self.data_store
+                    .values()
+                    .map(|v| v.len() as u64)
+                    .sum()))
+                .max(1) as usize;
+
+            for i in (0..total_chunks).step_by(step) {
+                if let Some(hash) = self.sorted_hashes.get(i) {
+                    if let Some(data) = self.data_store.get(hash) {
+                        // Check if adding the next sample would exceed the limit.
+                        if current_samples_size + (data.len() as u64) > MAX_SAMPLES_SIZE {
+                            break; // Stop if we hit the size limit.
+                        }
+                        samples_for_dict.push(data.as_slice());
+                        current_samples_size += data.len() as u64;
+                    }
+                }
+            }
+        }
+        //If the dataset is small enough, this will just use all the chunks.
+        if samples_for_dict.is_empty() && total_chunks > 0 {
+            /*Fallback for very small datasets where the step calculation 
+            might be off.*/
+            for hash in &self.sorted_hashes {
+                if let Some(data) = self.data_store.get(hash) {
+                    if current_samples_size + (data.len() as u64) > 
+                        MAX_SAMPLES_SIZE { break; }
+                    samples_for_dict.push(data.as_slice());
+                    current_samples_size += data.len() as u64;
+                }
+            }
+        }
 
         //Make dictionary from sorted data.
-        let mut _dictionary: Vec<u8> = Vec::new();
+        //let mut _dictionary: Vec<u8> = Vec::new();
 
         //Report progress before starting a dictionary generation
         self.report_progress(Progress::GeneratingDictionary);
         
-        if self.opt_dict{
+        /*if self.opt_dict{
             _dictionary = gen_zstd_opt_dict(
             samples_for_dict, 
             self.dictionary_size as usize, 
             self.worker_threads, 
             self.compression_level)?;
-        } else {
-            _dictionary = zstd::dict::from_samples(
-            &samples_for_dict,
-            self.dictionary_size as usize, //Dictionary size in bytes
-            ).map_err(|e| LibError::CompressionError(e.to_string()))?;
-        }
+        } else {*/
+        let _dictionary = zstd::dict::from_samples(
+        &samples_for_dict,
+        self.dictionary_size as usize, //Dictionary size in bytes
+        ).map_err(|e| LibError::CompressionError(e.to_string()))?;
+        //}
 
         //Report progress after dictionary generation is done.
         self.report_progress(Progress::DictionaryDone);
@@ -378,11 +427,15 @@ where
 
         //Check if any of the parallel operations failed.
         comp_result?;
+        /*
+        let (compressed_data_store, chunk_index) = 
+            serialize_store(&compressed_dash, &self.sorted_hashes)?;*/
+        
+
+        //drop(compressed_dash);
 
         let (compressed_data_store, chunk_index) = 
-            serialize_store(&compressed_dash, &self.sorted_hashes)?;
-
-        drop(compressed_dash);
+            serialize_store_from_dashmap(compressed_dash, &self.sorted_hashes)?;
 
         /*The following are now prepared:
         compressed_data store
