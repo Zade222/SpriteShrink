@@ -183,7 +183,7 @@ pub enum Progress {
 #[derive(Clone, Deserialize, Serialize)]
 pub struct SSAChunkMeta<H>{
     pub hash:   H,
-    pub offset: u32,
+    pub offset: u64,
     pub length: u32,
 }
 

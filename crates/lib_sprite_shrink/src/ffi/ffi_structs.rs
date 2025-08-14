@@ -249,7 +249,7 @@ pub struct FFISerializedOutputU128 {
 #[derive(Clone)]
 pub struct FFISSAChunkMetaU64 {
     pub hash: u64,
-    pub offset: u32,
+    pub offset: u64,
     pub length: u32,
 }
 
@@ -258,7 +258,7 @@ pub struct FFISSAChunkMetaU64 {
 #[derive(Clone)]
 pub struct FFISSAChunkMetaU128 {
     pub hash: u128,
-    pub offset: u32,
+    pub offset: u64,
     pub length: u32,
 }
 

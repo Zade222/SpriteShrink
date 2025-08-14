@@ -180,7 +180,7 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
         //Populate the metadata for the manifest
         chunk_metadata.push(SSAChunkMeta {
             hash: data_hash,
-            offset: chunk.offset as u32,
+            offset: chunk.offset as u64,
             length: chunk.length as u32,
         });
     }
