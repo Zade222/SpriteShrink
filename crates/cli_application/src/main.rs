@@ -81,7 +81,7 @@ fn run(args: &Args) -> Result<(), CliError> {
         
         (None, true) =>{
             match file_paths.len() {
-                1 => run_info(&file_paths[0])?,
+                1 => run_info(&file_paths[0], args.json)?,
                 0 => return Err(CliError::NoFilesError()),
                 _ => {
                     if !dir_paths.is_empty() {

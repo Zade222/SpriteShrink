@@ -6,7 +6,6 @@
 //! all contained files, to the console.
 
 use std::{
-    fmt::Display,
     path::PathBuf,
 };
 
@@ -14,10 +13,10 @@ use crate::archive_parser::{
     get_file_header, get_file_manifest
 };
 
-use serde::Serialize;
+use serde_json::{self, json, Value, to_string_pretty};
 
 use sprite_shrink::{
-    FileManifestParent, Hashable
+    FileManifestParent
 };
 
 use crate::error_handling::CliError;
@@ -57,7 +56,8 @@ use crate::error_handling::CliError;
 /// 3       | file_c.rom
 /// ```
 pub fn run_info(
-    file_path: &PathBuf
+    file_path: &PathBuf,
+    json: bool
 ) -> Result<(), CliError> {
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
@@ -77,7 +77,7 @@ pub fn run_info(
                 &header.man_offset, 
                 &man_length
             )?;
-            print_info_table::<u64>(file_manifest);
+            dispatch_print_info::<u64>(file_manifest, json);
         },
         2 => {
             let file_manifest = get_file_manifest::<u128>(
@@ -85,7 +85,7 @@ pub fn run_info(
                 &header.man_offset, 
                 &man_length
             )?;
-            print_info_table::<u128>(file_manifest);
+            dispatch_print_info::<u128>(file_manifest, json);
         },
         _ => {
             //Handle other cases or return an error for unsupported hash types
@@ -95,6 +95,38 @@ pub fn run_info(
     };
 
     Ok(())
+}
+
+/// Dispatches the print operation to the appropriate output format function.
+///
+/// This function acts as a router, taking the parsed file manifest and a
+/// format specifier. Based on the `json` flag, it delegates the final
+/// output to either a human-readable table format or a machine-readable
+/// JSON format. This approach allows for easy extension with additional
+/// output formats in the future.
+///
+/// # Arguments
+///
+/// * `file_manifest`: A vector of `FileManifestParent` structs, where each
+///   struct contains the metadata for a single file in the archive.
+/// * `json`: A boolean flag that determines the output format. If `true`,
+///   the output will be JSON; otherwise, it will be a plain text table.
+///
+/// # Type Parameters
+///
+/// * `H`: A generic type parameter representing the hash type used in the
+///   file manifest. It must implement the `Clone` trait to allow the data
+///   to be passed to the underlying print functions.
+fn dispatch_print_info<H: Clone>(
+    file_manifest: Vec<FileManifestParent<H>>,
+    json: bool,
+)
+{
+    if json {
+        print_info_json::<H>(file_manifest); 
+    } else {
+        print_info_table::<H>(file_manifest);
+    }
 }
 
 /// Prints a formatted table of the file manifest's contents.
@@ -107,16 +139,9 @@ pub fn run_info(
 ///
 /// * `H`: The hash type used in the file manifest, which must implement
 ///   the necessary traits for serialization and display.
-fn print_info_table<H>(
+fn print_info_table<H: Clone>(
     file_manifest: Vec<FileManifestParent<H>>
-)
-where
-    H: Hashable
-        + Ord
-        + Display
-        + Serialize
-        + for<'de> serde::Deserialize<'de>,
-{
+){
     println!("Index\t| Filename");
     println!("------------------");
 
@@ -126,4 +151,31 @@ where
         println!("{}\t| {}", index + 1, fmp.filename);
     });
     
+}
+
+/// Prints a json formatted table of the file manifest's contents.
+///
+/// # Arguments
+///
+/// * `file_manifest`: A vector of `FileManifestParent` structs to display.
+///
+/// # Type Parameters
+///
+/// * `H`: The hash type used in the file manifest, which must implement
+///   the necessary traits for serialization and display.
+fn print_info_json<H: Clone>(
+    file_manifest: Vec<FileManifestParent<H>>
+){
+    let files_json: Vec<Value> = file_manifest.iter()
+        .enumerate()
+        .map(|(index, fmp)| json!({
+            "index": index + 1,
+            "filename": &fmp.filename
+        }))
+        .collect();
+
+    
+    let output = json!(files_json);
+
+    println!("{}", to_string_pretty(&output).unwrap());
 }

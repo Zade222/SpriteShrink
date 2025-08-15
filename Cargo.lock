@@ -844,6 +844,7 @@ dependencies = [
  "range-parser",
  "rayon",
  "serde",
+ "serde_json",
  "sprite_shrink",
  "thiserror 2.0.12",
  "thread-priority",

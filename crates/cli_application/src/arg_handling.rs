@@ -45,6 +45,12 @@ pub struct Args {
     conflicts_with = "extract")]
     pub metadata: bool,
 
+    ///Activates json metadata mode. The metadata output will be printed in 
+    /// json format.
+    #[arg(short, long, help_heading = "Primary Options", 
+    conflicts_with = "extract")]
+    pub json: bool,
+
     ///Specifies the index number(s) of the ROM(s) to be extracted,
     ///as listed by the -m flag.
     #[arg(short, long, help_heading = "Primary Options")]
