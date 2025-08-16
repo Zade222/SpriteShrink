@@ -283,9 +283,8 @@ where
 
         //Starting dictionary size, 8kb
         let mut current_dict_size: usize = 8192; 
-
-        loop {
-            if args.dictionary.is_none() {
+        if args.dictionary.is_none() {
+            loop {
                 if args.verbose{
                     println!("Testing dictionary size: {current_dict_size}");
                 }
@@ -312,12 +311,12 @@ where
                 current_dict_size *= 2;
 
                 //Accept reasonable upper limit for dictionary size.
-                //This will stop it at an accepted value of 1024 * 512
+                //This will stop it at an accepted value of 1024 * 1024
                 if current_dict_size > 1024 * 1024 { 
                     break;
                 }
             }
-        } 
+        }
     } else {
 
         (_file_manifest, _data_store, _veri_hashes) =
