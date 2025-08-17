@@ -12,6 +12,7 @@ sprite_shrink = {path = "../lib_sprite_shrink"}
 
 bytesize = "2.0.1"
 clap = { version = "4.5.40", features = ["derive"] }
+confy = "1.0"
 dashmap = "6.1.0"
 indicatif = "0.18.0"
 libc = "0.2.174"

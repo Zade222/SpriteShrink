@@ -12,7 +12,110 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 
 use sprite_shrink::{FileData};
 
+use serde::{Serialize, Deserialize};
+
 use crate::error_handling::CliError;
+
+/// Represents the user-configurable settings for the SpriteShrink application.
+///
+/// This struct is automatically serialized to and deserialized from a TOML 
+/// configuration file, allowing users to persist their preferred settings 
+/// across sessions. It holds all parameters related to compression, 
+/// performance, and output formatting.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SpriteShrinkConfig {
+    pub compression_level: u8,
+    pub window_size: String,
+    pub dictionary_size: String,
+    pub hash_bit_length: u32,
+    pub auto_tune: bool,
+    pub autotune_timeout: u64,
+    pub optimize_dictionary: bool,
+    pub threads: usize,
+    pub low_memory: bool,
+    pub json_output: bool,
+    pub verbose: bool,
+}
+
+impl Default for SpriteShrinkConfig {
+    fn default() -> Self {
+        Self {
+            json_output: false,
+            compression_level: 19,
+            window_size: "2kb".to_string(),
+            dictionary_size: "16kb".to_string(),
+            hash_bit_length: 64,
+            auto_tune: false,
+            autotune_timeout: 15,
+            optimize_dictionary: false,
+            threads: 0,
+            low_memory: false,
+            verbose: false,
+        }
+    }
+}
+
+/// A string literal representing the default, commented configuration file.
+///
+/// This constant holds the content that is written to `spriteshrink.toml` 
+/// when the application is run for the first time and no existing 
+/// configuration is found.
+///
+/// Its primary purpose is to provide a user-friendly template, with each 
+/// option explained, so that users can easily understand and customize their
+/// settings.
+const DEFAULT_CONFIG_WITH_COMMENTS: &str = r#"
+# Sets the numerical compression level.
+# Default = 19
+compression_level = 19
+
+# Sets the hashing algorithm window size (e.g., "2KB", "4KB").
+# Default = "2kb"
+window_size = "2kb"
+
+# Sets the zstd compression algorithm dictionary size.
+# Default = "16kb"
+dictionary_size = "16kb"
+
+# Sets the hasing algorithm bit length.
+# Default = 64
+hash_bit_length = 64
+
+# Enable (true) or disable (false) whether to auto tune the window and 
+# dictionary size.
+# Default = false
+auto_tune = false
+
+# Sets the maximum time for each auto tune iteration to take. If exceeded take
+# the latest result.
+# Default = 15 seconds
+autotune_timeout = 15
+
+# Enable (true) or disable (false) whether to optimze the ztd compression 
+# dictionary when it is generated. Be sure to disable when processing large 
+# amounts of data (e.g. If a single ROM exceed approximately 64 megabytes, 
+# set to false) as this step can take a significant amount of time for neglible 
+# gain for large amounts of data.
+# Default = false
+optimize_dictionary = false
+
+# Sets the maximum number of worker threads to use.
+# 0 means use all available cores.
+threads = 0
+
+# Enable (true) or disable (false) low memory mode.
+# Default = false
+low_memory = false
+
+# Enable (true) or disable (false) whether to print metadata info in
+# json format.
+# Default = false
+json_output = false
+
+# Activates verbose output for detailed diagnostic information.
+# Default = false
+verbose = false
+"#;
 
 /// Checks if a given path points to a regular file.
 ///
@@ -254,4 +357,59 @@ pub fn write_final_archive(output_path: &Path, data: &[u8]) -> Result<(), CliErr
     }
     //Write data to disk.
     fs::write(output_path, data).map_err(CliError::Io)
+}
+
+/// Loads the application configuration from a file, creating a default one if
+/// needed.
+///
+/// This function orchestrates the loading of the `SpriteShrinkConfig` struct.
+/// It first determines the appropriate, platform-specific path for the 
+/// configuration file using the `confy` crate.
+///
+/// If the configuration file does not exist at that path, it will create the
+/// necessary parent directories and write a default, well-commented 
+/// configuration file to help the user get started.
+///
+/// It then proceeds to load and parse the TOML configuration file into a
+/// `SpriteShrinkConfig` instance.
+///
+/// # Returns
+///
+/// A `Result` which is:
+/// - `Ok(SpriteShrinkConfig)` containing the loaded application settings.
+/// - `Err(CliError)` if any part of the process fails.
+///
+/// # Errors
+///
+/// This function will return an error in the following situations:
+/// - The configuration directory cannot be created due to permissions issues.
+/// - The default configuration file cannot be written to disk.
+/// - The existing configuration file is malformed (invalid TOML) and cannot 
+///   be parsed.
+/// - A general I/O error occurs during file reading or writing.
+pub fn load_config() -> Result<SpriteShrinkConfig, CliError> {
+    //Set app name to be reused.
+    let app_name = "spriteshrink";
+
+    //Get the confy config_path for where the config will be stored.
+    let config_path = confy::get_configuration_file_path(
+        app_name, 
+        "spriteshrink-config")?;
+    
+    /*Check if the config exists. 
+    If it does not create and fill that config with a default commented
+    config file.
+    If the config does, continue to loading it with confy.*/
+    if !config_path.exists() {
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(config_path, DEFAULT_CONFIG_WITH_COMMENTS)?;
+    }
+
+    //Load config from disk.
+    match confy::load(app_name, "spriteshrink-config"){
+        Ok(cfg) => Ok(cfg),
+        Err(e) => Err(CliError::from(e)),
+    }
 }

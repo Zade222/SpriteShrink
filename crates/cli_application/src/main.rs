@@ -7,7 +7,7 @@
 //! metadata retrieval. It serves as the central hub that connects all
 //! other components of the CLI application.
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 
 mod modes;
 use modes::{run_compression, run_extraction, run_info};
@@ -16,13 +16,15 @@ mod archive_parser;
 use archive_parser::{get_max_rom_index};
 
 mod arg_handling;
-use arg_handling::{validate_args, Args};
+use arg_handling::{merge_config_and_args, validate_args, Args};
 
 mod error_handling;
 use error_handling::CliError;
     
 mod storage_io;
-use crate::storage_io::{files_from_dirs, organize_paths};
+use crate::storage_io::{
+    load_config, files_from_dirs, organize_paths
+};
 
 /// Executes the main application logic based on parsed arguments.
 ///
@@ -137,13 +139,23 @@ fn main() -> Result<(), CliError>{
     //Initiate logging
     /*Line for initiating logging needed. Must be started as early as possible
     in application logic.*/
-    
+
+    //Load config from disk.
+    let cfg = load_config()?;
+
     //Receive and validate user specified arguments/flags where applicable.
-    let args = Args::parse();
-    validate_args(&args)?;
+    let matches = Args::command().get_matches();
+    let args = Args::from_arg_matches(&matches)?;
+
+    /*Determine which options supercede others between the user provided 
+    flags and the on disk config.*/
+    let final_args = merge_config_and_args(cfg, args, &matches);
+
+    //Further validate and check for conflicting options.
+    validate_args(&final_args, &matches)?;
     
     //Begin application logic.
-    run(&args)?;
+    run(&final_args)?;
 
     Ok(())
 }

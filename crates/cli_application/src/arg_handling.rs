@@ -5,12 +5,19 @@
 //! all available options and flags, and the validation logic to ensure
 //! that user input is sensible and complete before execution.
 
-use std::path::{PathBuf};
+use std::{
+    path::PathBuf,
+    option::Option
+};
 
 use bytesize::ByteSize;
-use clap::Parser;
+use clap::{ArgMatches, Parser};
 
 use crate::error_handling::CliError;
+
+use crate::storage_io::{
+    SpriteShrinkConfig
+};
 
 const CUSTOM_HELP_TEMPLATE: &str = "\
 {before-help}{name} {version}
@@ -24,7 +31,7 @@ const CUSTOM_HELP_TEMPLATE: &str = "\
 /// inputs provided by the user. It is organized into logical groups for
 /// primary operations, tuning, and behavior control to provide a clear
 /// and user-friendly command-line interface.
-#[derive(Parser, Debug)]
+#[derive(Clone, Parser, Debug)]
 #[command(version, about, long_about = None, 
     help_template = CUSTOM_HELP_TEMPLATE)]
 pub struct Args {
@@ -138,14 +145,16 @@ pub struct Args {
 /// Validates the command-line arguments provided by the user.
 ///
 /// This function checks for logical conflicts, missing required options,
-/// and improper usage of flags based on the selected operation mode. Its
-/// purpose is to ensure the application has a valid set of arguments
-/// before proceeding with any work.
+/// improper usage of flags based on the selected operation mode and resolves
+/// config conflicts. Its purpose is to ensure the application has a valid 
+/// set of arguments before proceeding with any work.
 ///
 /// # Arguments
 ///
 /// * `args`: A reference to the `Args` struct, which contains the
 ///   parsed command-line arguments.
+/// * `matches`: A reference to `clap::ArgMatches`, used to determine which
+///   arguments were actually provided by the user on the command line.
 ///
 /// # Returns
 ///
@@ -165,7 +174,11 @@ pub struct Args {
 /// - Missing an output path (`-o`) for extraction or compression.
 /// - The output path for compression is a directory.
 /// - Initiating compression with only one input file.
-pub fn validate_args(args: &Args) -> Result<(), CliError> {
+pub fn validate_args(
+    args: &Args,
+    matches: &ArgMatches
+) -> Result<(), CliError> {
+    let arg_was_provided = |name: &str| matches.contains_id(name);
     /*Will need to come back and work on validation logic. Due to modular
     intent of adding compression algorithms I want to assess how to best 
     accomplish this with the validation.*/
@@ -253,5 +266,94 @@ pub fn validate_args(args: &Args) -> Result<(), CliError> {
         }
     }
 
+    /*Check if both window and dictionary parameters are specified when 
+    auto-tune flag is provided.*/
+    if arg_was_provided("auto_tune") &&
+       arg_was_provided("window") &&
+       arg_was_provided("dictionary")
+    {
+        return Err(CliError::ConflictingFlagsError(
+                "When using auto-tune only one, window or dictionary, \
+                    parameters can be used.".to_string(),
+            ));
+    }
+
     Ok(())
+}
+
+/// Merges settings from a configuration file with command-line arguments.
+///
+/// This function establishes a clear order of precedence for application
+/// settings, where command-line arguments override the corresponding values
+/// found in the configuration file. It iterates through each configurable
+/// option, checks if it was provided by the user as a command-line argument,
+/// and if not, falls back to the value from the loaded configuration.
+///
+/// # Arguments
+///
+/// * `config`: A `SpriteShrinkConfig` struct containing the settings loaded
+///   from the configuration file.
+/// * `args`: An `Args` struct that has been parsed from the command-line
+///   arguments. This struct will be mutated to incorporate the settings
+///   from the config file.
+/// * `matches`: A reference to `clap::ArgMatches`, used to determine which
+///   arguments were actually provided by the user on the command line.
+///
+/// # Returns
+///
+/// An `Args` struct where the final, merged settings are stored. This returned
+/// struct is what the application will use to control its execution.
+pub fn merge_config_and_args (
+    config: SpriteShrinkConfig,
+    mut args: Args, 
+    matches: &ArgMatches,
+) -> Args {
+    //This helper checks if an argument was present on the command line.
+    let arg_was_present = |name: &str| matches.contains_id(name);
+
+    //If the user did NOT provide a flag, use the value from the config file.
+    if !arg_was_present("compression_level") {
+        args.compression_level = config.compression_level;
+    }
+    if !arg_was_present("window") {
+        args.window = config.window_size.parse().ok();
+    }
+    if !arg_was_present("dictionary") {
+        args.dictionary = config.dictionary_size.parse().ok();
+    }
+    if !arg_was_present("hash_bit_length") {
+        args.hash_bit_length = Some(config.hash_bit_length);
+    }
+    if !arg_was_present("auto_tune") {
+        args.auto_tune = config.auto_tune;
+    }
+    if !arg_was_present("autotune_timeout") {
+        args.autotune_timeout = Some(config.autotune_timeout);
+    }
+    if !arg_was_present("optimize_dictionary") {
+        args.optimize_dictionary = config.optimize_dictionary;
+    }
+    if !arg_was_present("threads") {
+        args.threads = Some(config.threads);
+    }
+    if !arg_was_present("low_memory") {
+        args.low_memory = config.low_memory;
+    }
+    if !arg_was_present("verbose") {
+        args.verbose = config.verbose;
+    }
+    if !arg_was_present("json") {
+        args.json = config.json_output;
+    }
+
+    if args.auto_tune {
+        if !arg_was_present("window") {
+            args.window = None;
+        }
+        if !arg_was_present("dictionary") {
+            args.dictionary = None;
+        }
+    }
+
+    args
 }

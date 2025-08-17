@@ -68,4 +68,10 @@ pub enum CliError {
 
     #[error("Hash bit length error {0}")]
     HashBitLengthError(String),
+
+     #[error("Confy config error {0}")]
+    ConfigError(#[from] confy::ConfyError),
+
+     #[error("Confy config error {0}")]
+    ClapError(#[from] clap::Error),
 }
