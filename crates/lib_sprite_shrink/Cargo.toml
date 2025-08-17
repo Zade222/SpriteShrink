@@ -18,7 +18,7 @@ rayon = "1.10.0"
 serde = { version = "1.0", features = ["derive"] }
 sha2 = "0.10.9"
 thiserror = "2.0.12"
-xxhash-rust = {version = "0.8.12", features = ["xxh3", "const_xxh3"] }
+xxhash-rust = {version = "0.8.12", features = ["xxh3"] }
 zerocopy = { version = "0.8.26", features = ["derive"] }
 zstd = { version = "0.13.3", features = ["zdict_builder"] }
 zstd-sys = { version = "2.0.15", features = ["zdict_builder", "experimental", "zstdmt"] }
