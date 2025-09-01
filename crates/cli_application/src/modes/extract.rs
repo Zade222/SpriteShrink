@@ -7,11 +7,8 @@
 //! to the designated output directory.
 
 use std::{
-    fmt::Display,
-    hash::Hash,
-    path::{Path, PathBuf},
+    fmt::Display, fs::File, hash::Hash, io::{BufWriter, Write}, path::{Path, PathBuf}
 };
-use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use sprite_shrink::{Hashable, decompress_chunk};
@@ -22,7 +19,7 @@ use crate::archive_parser::{
 use crate::arg_handling::Args;
 use crate::error_handling::CliError;
 use crate::storage_io::{
-    read_file_data, write_file
+    read_file_data
 };
 
 /// Executes the file extraction process from an archive.
@@ -72,8 +69,20 @@ pub fn run_extraction(
     let hash_bit_length = header.hash_type;
 
     match hash_bit_length {
-        1 => extract_data::<u64>(file_path, out_dir, rom_indices, args, &header),
-        2 => extract_data::<u128>(file_path, out_dir, rom_indices, args, &header),
+        1 => extract_data::<u64>(
+            file_path, 
+            out_dir, 
+            rom_indices, 
+            args, 
+            &header
+        ),
+        2 => extract_data::<u128>(
+            file_path, 
+            out_dir, 
+            rom_indices, 
+            args, 
+            &header
+        ),
         _ => //Handle other cases or return an error for unsupported hash types
             Err(CliError::InternalError(
                 "Unsupported hash type in archive header.".to_string()
@@ -152,6 +161,60 @@ where
             "Failed to create thread pool: {e}"
         )))?;
 
+    for rom in rom_indices {
+        let fmp = file_manifest
+        .get((*rom - 1)  as usize)
+        .ok_or_else(|| CliError::InvalidRomIndex(
+            format!("ROM index {rom} is out of bounds.")
+        ))?;
+
+        let final_output_path = out_dir.join(
+            &fmp.filename);
+
+        let file = File::create(&final_output_path)?;
+
+        let mut writer = BufWriter::new(file);
+
+        fmp.chunk_metadata
+            .iter()
+            .try_for_each(|scm| -> Result<(), CliError> {
+            /*Get the chunk location from the chunk index.*/
+            let chunk_location = chunk_index.get(&scm.hash)
+                .ok_or_else(|| {
+                CliError::InternalError(format!(
+                    "Decompression failed: Missing chunk with hash\
+                    {}",
+                    scm.hash
+                ))
+            })?;
+
+            /*Store the chunk data offset within the compressed
+            store, from the ChunkLocation struct.*/
+            let absolute_offset = 
+                chunk_location.offset + 
+                header.data_offset;
+
+            let comp_chunk_data = read_file_data(
+                file_path, 
+                &absolute_offset, 
+                &(chunk_location.length as usize)
+            )?;
+
+            let decomp_chunk_data = decompress_chunk(
+                    &comp_chunk_data, 
+                    &dictionary
+            )?;
+
+            writer.write_all(&decomp_chunk_data)?;
+
+            Ok(())
+        })?;
+
+        if args.verbose{
+                println!("{} extracted successfully", &fmp.filename);
+            }
+    }
+
     /*In parallel, for each ROM file index provided, the below code
     accomplishes the following:
     - Get the FileManifestParent and store it in fmp.
@@ -161,7 +224,7 @@ where
     - Prepare the output path by appending the file name to the provided 
         output directory.
     - Write the file to the destination.*/
-    worker_pool.install(|| {
+    /*worker_pool.install(|| {
         rom_indices.par_iter().try_for_each(|rom| -> Result<(), CliError> {
             let fmp = file_manifest
                 .get((*rom - 1)  as usize)
@@ -174,9 +237,11 @@ where
                 .par_iter()
                 .map(|scm| -> Result<Vec<u8>, CliError> {
                     /*Get the chunk location from the chunk index.*/
-                        let chunk_location = chunk_index.get(&scm.hash).ok_or_else(|| {
+                        let chunk_location = chunk_index.get(&scm.hash)
+                            .ok_or_else(|| {
                             CliError::InternalError(format!(
-                                "Decompression failed: Missing chunk with hash {}",
+                                "Decompression failed: Missing chunk with hash\
+                                {}",
                                 scm.hash
                             ))
                         })?;
@@ -210,13 +275,15 @@ where
                 .collect();
             
             write_file(&final_output_path, file_data_ref)?;
+
             
-            if args.verbose{
-                println!("{} extracted successfully", &fmp.filename);
-            }
+            
+            
+
+            
 
             Ok(())
         })
-    })?;
+    })?;*/
     Ok(())
 }    

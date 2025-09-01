@@ -159,7 +159,7 @@ where
 
     let cache_dir = proj_dirs.cache_dir();
     create_dir_all(cache_dir).unwrap();
-    let db_path = cache_dir.join(file_stem.clone()).with_extension(".redb");
+    let db_path = cache_dir.join(file_stem.clone()).with_extension("redb");
 
     //When the guard falls out of scope the scope will be deleted.
     let _temp_db_guard = TempDatabase { path: db_path.clone() };
@@ -308,7 +308,7 @@ where
                 /*Set temporary db path using task output file name.*/
                 let at_stem = format!("auto_tune_{}", file_stem);
                 let db_path = cache_dir.join(at_stem)
-                    .with_extension(".redb");
+                    .with_extension("redb");
 
                 //When the guard falls out of scope the scope will be deleted.
                 let _auto_tune_db_guard = TempDatabase {
