@@ -36,6 +36,12 @@ pub struct FFIChunk{
     pub length: usize,
 }
 
+#[repr(C)]
+pub struct FFIChunkDataArray {
+    pub ptr: *mut FFIVecBytes,
+    pub len: usize,
+}
+
 /// FFI-safe representation for a single entry in the ChunkIndex HashMap with a
 /// u64 hash.*/
 #[repr(C)]
@@ -246,8 +252,6 @@ pub struct FFISeekInfoArrayU128 {
 pub struct FFISerializedOutputU64 {
     pub ser_manifest_ptr: *mut FFIFileManifestParentU64,
     pub ser_manifest_len: usize,
-    pub ser_data_store_ptr: *const u8,
-    pub ser_data_store_len: usize,
     pub ser_chunk_index_ptr: *mut FFIChunkIndexEntryU64,
     pub ser_chunk_index_len: usize,
     pub sorted_hashes_ptr: *const u64,
@@ -262,8 +266,6 @@ pub struct FFISerializedOutputU64 {
 pub struct FFISerializedOutputU128 {
     pub ser_manifest_ptr: *mut FFIFileManifestParentU128,
     pub ser_manifest_len: usize,
-    pub ser_data_store_ptr: *const u8,
-    pub ser_data_store_len: usize,
     pub ser_chunk_index_ptr: *mut FFIChunkIndexEntryU128,
     pub ser_chunk_index_len: usize,
     pub sorted_hashes_ptr: *const u128,
@@ -293,6 +295,12 @@ pub struct FFISSAChunkMetaU128 {
 #[derive(Clone, Copy)]
 pub struct FFIUserData(pub *mut c_void);
 
+#[repr(C)]
+pub struct FFIVecBytes {
+    pub ptr: *mut u8,
+    pub len: usize,
+}
+
 /// FFI-safe representation for a single entry in the VeriHashes DashMap.
 /// The C caller retains ownership of the memory pointed to by `key` and 
 /// `value`.
@@ -301,3 +309,8 @@ pub struct FFIVeriHashesEntry {
     pub key: *const c_char,
     pub value: *const [u8; 64],
 }
+
+#[derive(Clone, Copy)]
+pub struct ThreadSafeUserData(pub *mut c_void);
+unsafe impl Send for ThreadSafeUserData {}
+unsafe impl Sync for ThreadSafeUserData {}

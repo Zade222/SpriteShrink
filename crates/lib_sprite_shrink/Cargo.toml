@@ -11,8 +11,10 @@ crate-type = ["rlib", "staticlib"]
 [dependencies]
 bincode = { version = "2.0.1", features = ["serde"] }
 bytemuck = { version = "1.23.1", features = ["derive"] }
+crossbeam-deque = "0.8"
 dashmap = "6.1.0"
 fastcdc = "3.2.1"
+flume = "0.11.1"
 libc = "0.2.174"
 rayon = "1.10.0"
 serde = { version = "1.0", features = ["derive"] }
@@ -22,9 +24,6 @@ xxhash-rust = {version = "0.8.12", features = ["xxh3"] }
 zerocopy = { version = "0.8.26", features = ["derive"] }
 zstd = { version = "0.13.3", features = ["zdict_builder"] }
 zstd-sys = { version = "2.0.15", features = ["zdict_builder", "experimental", "zstdmt"] }
-
-[target.'cfg(target_os = "macos")'.dependencies]
-dispatch2 = "0.3.0"
 
 [build-dependencies]
 cbindgen = "0.29"

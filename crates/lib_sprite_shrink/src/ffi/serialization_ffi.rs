@@ -3,15 +3,19 @@
 //! This module exposes Rust's serialization logic to C callers, handling the
 //! complex conversion of data structures and memory management.
 
-use std::collections::HashMap;
-use std::ffi::CString;
-use std::slice;
+use std::{
+    ffi::CString,
+    os::raw::c_void,
+    slice
+};
+
+
 
 use dashmap::DashMap;
 
 use crate::ffi::ffi_structs::{
-    FFIChunkLocation, FFIChunkIndexEntryU64, FFIChunkIndexEntryU128,
-    FFIDataStoreEntryU64, FFIDataStoreEntryU128,
+    FFIChunkDataArray, FFIChunkLocation, 
+    FFIChunkIndexEntryU64, FFIChunkIndexEntryU128,
     FFIFileManifestParentU64, FFIFileManifestParentU128, 
     FFISerializedOutputU64, FFISerializedOutputU128,
     FFISSAChunkMetaU64, FFISSAChunkMetaU128
@@ -25,7 +29,6 @@ macro_rules! serialize_uncompressed_data_ffi_setter {
         $doc_l11:literal,
         $fn_name:ident,
         $ffi_file_man_par:path,
-        $ffi_data_store_entry:ty,
         $ffi_ser_out:path,
         $hash_type:ty,
         $ffi_ssa_chunk_meta:path,
@@ -46,17 +49,24 @@ macro_rules! serialize_uncompressed_data_ffi_setter {
         pub unsafe extern "C" fn $fn_name(
             manifest_array_ptr: *const $ffi_file_man_par,
             manifest_len: usize,
-            data_store_array_ptr: *const $ffi_data_store_entry,
-            data_store_len: usize,
+            user_data: *mut c_void,
+            get_keys_cb: unsafe extern "C" fn(
+                user_data: *mut c_void, 
+                out_len: *mut usize
+            ) -> *mut $hash_type,
+            get_chunks_cb: unsafe extern "C" fn(
+                user_data: *mut c_void, 
+                hashes: *const $hash_type, 
+                hashes_len: usize
+            ) -> FFIChunkDataArray,
             out_ptr: *mut *mut $ffi_ser_out
         ) -> FFIStatus {
             if manifest_array_ptr.is_null() 
-                || data_store_array_ptr.is_null() 
                 || out_ptr.is_null() {
                 return FFIStatus::NullArgument;
             }
             
-            let (file_manifest, data_store) = unsafe {
+            let file_manifest = unsafe {
                 //Convert C inputs to Rust types
 
                 /*Prepare file_manifest DashMap, which is the first parameter
@@ -65,13 +75,6 @@ macro_rules! serialize_uncompressed_data_ffi_setter {
                 let ffi_manifests = slice::from_raw_parts(
                     manifest_array_ptr, 
                     manifest_len
-                );
-                
-                /*Prepare data_store, which is the second parameter of the 
-                original serialize_uncompressed_data function, from C input.*/
-                let ffi_data_store = slice::from_raw_parts(
-                    data_store_array_ptr, 
-                    data_store_len
                 );
 
                 /*Since DashMap is not a supported type in C, the following 
@@ -106,27 +109,49 @@ macro_rules! serialize_uncompressed_data_ffi_setter {
                     });
                 }
 
-                //Reconstruct the data_store HashMap via the following.
-                let data_store: HashMap<$hash_type, Vec<u8>> = 
-                    ffi_data_store.iter().map(|entry| {
-                        let data_slice = std::slice::from_raw_parts(
-                            entry.data, 
-                            entry.data_len
-                        );
-                        (entry.hash, data_slice.to_vec())
-                }).collect();
+                (file_manifest)
+            };
 
-                (file_manifest, data_store)
+            let get_keys_closure = || {
+                let mut len = 0;
+                let ptr = unsafe {get_keys_cb(user_data, &mut len)};
+                //Take ownership of the C-allocated array
+                let keys = unsafe {Vec::from_raw_parts(ptr, len, len)};
+                keys
+            };
+
+            let get_chunks_closure = |hashes: &[$hash_type]| {
+                let ffi_chunks_array = unsafe {
+                    get_chunks_cb(
+                        user_data, 
+                        hashes.as_ptr(), 
+                        hashes.len()
+                    )};
+                
+                let ffi_chunks_slice = unsafe {slice::from_raw_parts(
+                    ffi_chunks_array.ptr, 
+                    ffi_chunks_array.len
+                )};
+
+                let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
+                    unsafe {Vec::from_raw_parts(c.ptr, c.len, c.len)}
+                }).collect();
+                
+                let _ = unsafe {Vec::from_raw_parts(
+                    ffi_chunks_array.ptr, 
+                    ffi_chunks_array.len, 
+                    ffi_chunks_array.len)};
+                chunks
             };
                 
             let (
                 ser_file_manifest,
-                ser_data_store,
                 chunk_index,
                 sorted_hashes
             ) = match serialize_uncompressed_data(
-                &file_manifest, 
-                &data_store
+                &file_manifest,
+                &get_keys_closure,
+                &get_chunks_closure
             ) {
                 Ok(data) => data,
                 Err(_) => return FFIStatus::SerializationMissingChunkError,
@@ -196,15 +221,12 @@ macro_rules! serialize_uncompressed_data_ffi_setter {
             let output = Box::new({$ffi_ser_out {
                 ser_manifest_ptr: manifests_ptr,
                 ser_manifest_len: manifests_len,
-                ser_data_store_ptr: ser_data_store.as_ptr(),
-                ser_data_store_len: ser_data_store.len(),
                 ser_chunk_index_ptr: entries_ptr,
                 ser_chunk_index_len: entries_len,
                 sorted_hashes_ptr: sorted_hashes.as_ptr(),
                 sorted_hashes_len: sorted_hashes.len(),
             }});
 
-            std::mem::forget(ser_data_store);
             std::mem::forget(sorted_hashes);
 
             unsafe {
@@ -219,7 +241,6 @@ serialize_uncompressed_data_ffi_setter!(
     "  `free_serialized_output_u64`.",
     serialize_uncompressed_data_ffi_u64,
     FFIFileManifestParentU64,
-    FFIDataStoreEntryU64,
     FFISerializedOutputU64,
     u64,
     FFISSAChunkMetaU64,
@@ -230,7 +251,6 @@ serialize_uncompressed_data_ffi_setter!(
     "  `free_serialized_output_u128`.",
     serialize_uncompressed_data_ffi_u128,
     FFIFileManifestParentU128,
-    FFIDataStoreEntryU128,
     FFISerializedOutputU128,
     u128,
     FFISSAChunkMetaU128,
@@ -287,11 +307,6 @@ macro_rules! free_serialized_output_setter {
                     );
                 }
 
-                let _ = Vec::from_raw_parts(
-                    output.ser_data_store_ptr as *mut u8, 
-                    output.ser_data_store_len, 
-                    output.ser_data_store_len
-                );
                 let _ = Vec::from_raw_parts(
                     output.ser_chunk_index_ptr, 
                     output.ser_chunk_index_len, 

@@ -24,7 +24,7 @@ use zerocopy::{IntoBytes, FromBytes};
 /// * `offset`: The starting position of the chunk in bytes, relative
 ///   to the beginning of the archive's data section.
 /// * `length`: The size of the compressed chunk in bytes.
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ChunkLocation {
     pub offset: u64,
     pub length: u32,
@@ -104,7 +104,7 @@ pub struct FileData{
 /// * `chunk_count`: The total number of chunks that make up the file.
 /// * `chunk_metadata`: A vector of metadata for each chunk, sorted in
 ///   the order needed for reconstruction.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct FileManifestParent<H> {
     pub filename:       String,
     pub chunk_count:    u64,
@@ -180,7 +180,7 @@ pub enum Progress {
 /// * `offset`: The starting position of this chunk in bytes within the
 ///   original, uncompressed file.
 /// * `length`: The size of the chunk in bytes.
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SSAChunkMeta<H>{
     pub hash:   H,
     pub offset: u64,

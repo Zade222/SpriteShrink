@@ -5,29 +5,106 @@
 //! Rust and C data types, ensuring memory safety across the FFI boundary.
 
 use std::{
-    collections::HashMap,
     os::raw::c_void,
-    slice
+    slice,
 };
 
 use crate::archive::{ArchiveBuilder};
 use crate::lib_error_handling::LibError;
-use crate::lib_structs::{Progress};
 use crate::ffi::FFIStatus;
 use crate::ffi::ffi_structs::{
-    FFIArchiveData, FFIFileManifestParentU64, FFIFileManifestParentU128,
-    FFIDataStoreEntryU64, 
-    FFIDataStoreEntryU128, FFIProgress
+    FFIArchiveData, FFIChunkDataArray,
+    FFIFileManifestParentU64, FFIFileManifestParentU128,
+    FFIProgress
 };
 use crate::{FileManifestParent, SSAChunkMeta};
 
 //Type alias for clarity in other functions
 type BuilderHandle = *mut c_void;
 
-type BuilderU64 = ArchiveBuilder<'static, fn(Progress), u64>;
-type BuilderU128 = ArchiveBuilder<'static, fn(Progress), u128>;
+trait ArchiveBuilderTraitU64 {
+        fn set_compression_algorithm(&mut self, algorithm: u16);
+        fn set_compression_level(&mut self, level: i32);
+        fn set_dictionary_size(&mut self, size: u64);
+        fn with_c_progress(&mut self, callback: extern "C" fn(FFIProgress, *mut c_void), user_data: *mut c_void);
+        fn set_worker_threads(&mut self, threads: usize);
+        fn set_optimize_dictionary(&mut self, optimize: bool);
 
+        //This method consumes the builder
+        fn build(self: Box<Self>) -> Result<Vec<u8>, LibError>;
+}
 
+impl<'a, R, W> ArchiveBuilderTraitU64 for ArchiveBuilder<'a, u64, R, W>
+where
+    R: Fn(&[u64]) -> Vec<Vec<u8>> + Send + Sync + 'static,
+    W: FnMut(&[u8], bool) + Send + Sync + 'static,
+{
+    fn set_compression_algorithm(&mut self, algorithm: u16) {
+        self.compression_algorithm(algorithm);
+    }
+    fn set_compression_level(&mut self, level: i32) {
+        self.compression_level(level);
+    }
+    fn set_dictionary_size(&mut self, size: u64) {
+        self.dictionary_size(size);
+    }
+    fn set_worker_threads(&mut self, threads: usize) {
+        self.worker_threads(threads);
+    }
+    fn set_optimize_dictionary(&mut self, optimize: bool) {
+        self.optimize_dictionary(optimize);
+    }
+    fn with_c_progress(&mut self, callback: extern "C" fn(FFIProgress, *mut c_void), user_data: *mut c_void) {
+        self.with_c_progress(callback, user_data);
+    }
+    
+
+    fn build(self: Box<Self>) -> Result<Vec<u8>, LibError> {
+        (*self).build()
+    }
+}
+
+trait ArchiveBuilderTraitU128 {
+        fn set_compression_algorithm(&mut self, algorithm: u16);
+        fn set_compression_level(&mut self, level: i32);
+        fn set_dictionary_size(&mut self, size: u64);
+        fn with_c_progress(&mut self, callback: extern "C" fn(FFIProgress, *mut c_void), user_data: *mut c_void);
+        fn set_worker_threads(&mut self, threads: usize);
+        fn set_optimize_dictionary(&mut self, optimize: bool);
+
+        //This method consumes the builder
+        fn build(self: Box<Self>) -> Result<Vec<u8>, LibError>;
+}
+
+impl<'a, R, W> ArchiveBuilderTraitU128 for ArchiveBuilder<'a, u128, R, W>
+where
+    R: Fn(&[u128]) -> Vec<Vec<u8>> + Send + Sync + 'static,
+    W: FnMut(&[u8], bool) + Send + Sync + 'static,
+{
+    fn set_compression_algorithm(&mut self, algorithm: u16) {
+        self.compression_algorithm(algorithm);
+    }
+    fn set_compression_level(&mut self, level: i32) {
+        self.compression_level(level);
+    }
+    fn set_dictionary_size(&mut self, size: u64) {
+        self.dictionary_size(size);
+    }
+    fn set_worker_threads(&mut self, threads: usize) {
+        self.worker_threads(threads);
+    }
+    fn set_optimize_dictionary(&mut self, optimize: bool) {
+        self.optimize_dictionary(optimize);
+    }
+    fn with_c_progress(&mut self, callback: extern "C" fn(FFIProgress, *mut c_void), user_data: *mut c_void) {
+        self.with_c_progress(callback, user_data);
+    }
+    
+
+    fn build(self: Box<Self>) -> Result<Vec<u8>, LibError> {
+        (*self).build()
+    }
+}
 
 /// Creates a new ArchiveBuilder and returns it via an out-parameter.
 ///
@@ -44,9 +121,8 @@ macro_rules! archive_builder_new{
         $fn_name:ident,
         $manifest_array_type:ty,
         $data_store_array_type:ty,
-        $hash_type:ty,
-        $builder_type:ty,
-        $hash_type_identifier:literal,
+        $hash_type:path,
+        $builder_type:path,
     ) => {
         /// Creates a new ArchiveBuilder and returns it via an out-parameter.
         ///
@@ -60,27 +136,35 @@ macro_rules! archive_builder_new{
         pub unsafe extern "C" fn $fn_name(
             manifest_array_ptr: *const $manifest_array_type,
             manifest_len: usize,
-            data_store_array_ptr: *const $data_store_array_type,
-            data_store_len: usize,
             sorted_hashes_array_ptr: *const $hash_type,
             sorted_hashes_len: usize,
             file_count: u32,
+            hash_type: u8,
+            total_size: u64,
+            user_data: *mut c_void,
+            get_chunks_cb: unsafe extern "C" fn(
+                user_data: *mut c_void, 
+                hashes: *const $hash_type, 
+                hashes_len: usize
+            ) -> FFIChunkDataArray,
+            write_comp_data_cb: unsafe extern "C" fn(
+                user_data: *mut c_void, 
+                data: *const u8, 
+                data_len: usize, 
+                is_flush: bool
+            ),
             out_ptr: *mut BuilderHandle,
         ) -> FFIStatus {
             /*Fail early on null pointers to prevent dereferencing invalid 
             memory.*/
             if manifest_array_ptr.is_null()
-                || data_store_array_ptr.is_null()
                 || sorted_hashes_array_ptr.is_null()
                 || out_ptr.is_null()
             {
                 return FFIStatus::NullArgument;
             }
             
-            let (ser_file_manifest, 
-                data_store, 
-                sorted_hashes
-            ) = unsafe {
+            let (ser_file_manifest, sorted_hashes) = unsafe {
                 /*Prepare ser_file_manifest, which is the first parameter of 
                 the original ArchiveBuilder function, from C input.*/
                 let ser_file_manifest = slice::from_raw_parts(
@@ -113,23 +197,6 @@ macro_rules! archive_builder_new{
                     }
                 }).collect::<Vec<_>>();
 
-                /*Prepare data_store, which is the second parameter of the 
-                original ArchiveBuilder function, from C input.*/
-                //Reconstruct the data_store HashMap via the following.
-                let data_store: HashMap<$hash_type, Vec<u8>> = 
-                    slice::from_raw_parts(
-                        data_store_array_ptr, 
-                        data_store_len
-                    )
-                    .iter()
-                    .map(|entry| {
-                        let data_slice = std::slice::from_raw_parts(
-                            entry.data, 
-                            entry.data_len
-                        );
-                        (entry.hash, data_slice.to_vec())
-                }).collect();
-
                 /*Prepare sorted_hashes, which is the third parameter of the 
                 original ArchiveBuilder function, from C input.*/
                 let sorted_hashes = slice::from_raw_parts(
@@ -137,19 +204,63 @@ macro_rules! archive_builder_new{
                     sorted_hashes_len
                 );
 
-                (ser_file_manifest, data_store, sorted_hashes)
+                (ser_file_manifest, sorted_hashes)
             };
 
-            let builder = <$builder_type>::new(
+            let user_data_addr = user_data as usize;
+
+            let get_chunks_closure = move |hashes: &[$hash_type]| {
+                let ffi_chunks_array = unsafe {
+                    get_chunks_cb(
+                        user_data_addr as *mut c_void, 
+                        hashes.as_ptr(), 
+                        hashes.len()
+                    )};
+                
+                let ffi_chunks_slice = unsafe {slice::from_raw_parts(
+                    ffi_chunks_array.ptr, 
+                    ffi_chunks_array.len
+                )};
+
+                let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
+                    unsafe {Vec::from_raw_parts(c.ptr, c.len, c.len)}
+                }).collect();
+                
+                let _ = unsafe {Vec::from_raw_parts(
+                    ffi_chunks_array.ptr, 
+                    ffi_chunks_array.len, 
+                    ffi_chunks_array.len)};
+                chunks
+            };
+
+            let write_data_closure = move |data: &[u8], flush: bool| {
+                unsafe {
+                    write_comp_data_cb(
+                        user_data_addr as *mut c_void, 
+                        data.as_ptr(), 
+                        data.len(), 
+                        flush
+                    );
+                }
+            };
+
+            let builder = ArchiveBuilder::new(
                 ser_file_manifest,
-                data_store,
-                sorted_hashes.to_vec(),
+                sorted_hashes,
                 file_count,
-                $hash_type_identifier
+                hash_type, 
+                total_size,
+                get_chunks_closure,
+                write_data_closure
             );
 
+            let builder_trait_object: Box<dyn $builder_type>
+                = Box::new(builder);
+
+            let handle_box = Box::new(builder_trait_object);
+
             unsafe {
-                *out_ptr = Box::into_raw(Box::new(builder)) as *mut c_void;
+                *out_ptr = Box::into_raw(handle_box) as *mut c_void;
             };
             FFIStatus::Ok
         }
@@ -163,8 +274,7 @@ archive_builder_new!(
     FFIFileManifestParentU64,
     FFIDataStoreEntryU64,
     u64,
-    BuilderU64,
-    1, //Set type to xxhash3_64bit
+    ArchiveBuilderTraitU64,
 );
 
 archive_builder_new!(
@@ -174,8 +284,7 @@ archive_builder_new!(
     FFIFileManifestParentU128,
     FFIDataStoreEntryU128,
     u128,
-    BuilderU128,
-    2, //Set type to xxhash3_128bit
+    ArchiveBuilderTraitU128,
 );
 
 
@@ -187,7 +296,7 @@ macro_rules! ffi_builder_setter {
         $doc_l1:literal,
         $doc_l5:literal,
         $fn_name:ident,
-        $builder_type:ty,
+        $builder_type:path,
         $param_name:ident,
         $param_type:ty,
         $builder_method:ident
@@ -208,11 +317,10 @@ macro_rules! ffi_builder_setter {
             /*Placeholder for the specific builder type (BuilderU64 or 
             BuilderU128)*/
             unsafe{
-                let builder_mut = (builder_handle as *mut $builder_type)
-                    .as_mut();
-                
-                if let Some(builder) = builder_mut {
-                    //Placeholder for the builder's method to call
+                let handle_box_ptr = builder_handle as *mut Box<dyn $builder_type>;
+
+                if let Some(builder_box) = handle_box_ptr.as_mut() {
+                    let builder = builder_box.as_mut();
                     builder.$builder_method($param_name);
                     FFIStatus::Ok
                 } else {
@@ -228,10 +336,10 @@ ffi_builder_setter!(
     a u64 hash.",
     "`archive_builder_new_u64`.",
     archive_builder_set_compression_algorithm_u64,
-    BuilderU64,
+    ArchiveBuilderTraitU64,
     code,
     u16,
-    compression_algorithm
+    set_compression_algorithm
 );
 
 ffi_builder_setter!(
@@ -239,50 +347,90 @@ ffi_builder_setter!(
     a u64 hash.",
     "`archive_builder_new_u128`.",
     archive_builder_set_compression_algorithm_u128,
-    BuilderU128,
+    ArchiveBuilderTraitU128,
     code,
     u16,
-    compression_algorithm
+    set_compression_algorithm
 );
 
 ffi_builder_setter!(
     "Sets the compression level on the ArchiveBuilder for a u64 hash.",
     "`archive_builder_new_u64`.",
     archive_builder_set_compression_level_u64,
-    BuilderU64,
+    ArchiveBuilderTraitU64,
     level,
     i32,
-    compression_level
+    set_compression_level
 );
 
 ffi_builder_setter!(
     "Sets the compression level on the ArchiveBuilder for a u128 hash.",
     "`archive_builder_new_u128`.",
     archive_builder_set_compression_level_u128,
-    BuilderU128,
+    ArchiveBuilderTraitU128,
     level,
     i32,
-    compression_level
+    set_compression_level
 );
 
 ffi_builder_setter!(
     "Sets the dictionary size on the ArchiveBuilder for a u64 hash.",
     "`archive_builder_new_u64`.",
     archive_builder_set_dictionary_size_u64,
-    BuilderU64,
+    ArchiveBuilderTraitU64,
     size,
     u64,
-    dictionary_size
+    set_dictionary_size
 );
 
 ffi_builder_setter!(
     "Sets the dictionary size on the ArchiveBuilder for a u128 hash.",
     "`archive_builder_new_u128`.",
     archive_builder_set_dictionary_size_u128,
-    BuilderU128,
+    ArchiveBuilderTraitU128,
     size,
     u64,
-    dictionary_size
+    set_dictionary_size
+);
+
+ffi_builder_setter!(
+    "Sets the amount of worker threads on the ArchiveBuilder for a u64 hash.",
+    "`archive_builder_new_u64`.",
+    archive_builder_set_worker_count_size_u64,
+    ArchiveBuilderTraitU64,
+    threads,
+    usize,
+    set_worker_threads
+);
+
+ffi_builder_setter!(
+    "Sets the amount of worker threads on the ArchiveBuilder for a u128 hash.",
+    "`archive_builder_new_u128`.",
+    archive_builder_set_worker_count_size_u128,
+    ArchiveBuilderTraitU128,
+    threads,
+    usize,
+    set_worker_threads
+);
+
+ffi_builder_setter!(
+    "Sets the amount of worker threads on the ArchiveBuilder for a u64 hash.",
+    "`archive_builder_new_u64`.",
+    archive_builder_set_optimize_dictionary_flag_size_u64,
+    ArchiveBuilderTraitU64,
+    optimize,
+    bool,
+    set_optimize_dictionary
+);
+
+ffi_builder_setter!(
+    "Sets the amount of worker threads on the ArchiveBuilder for a u128 hash.",
+    "`archive_builder_new_u128`.",
+    archive_builder_set_optimize_dictionary_flag_size_u128,
+    ArchiveBuilderTraitU128,
+    optimize,
+    bool,
+    set_optimize_dictionary
 );
 
 macro_rules! ffi_builder_progress_setter{
@@ -290,7 +438,7 @@ macro_rules! ffi_builder_progress_setter{
         $doc_l1:literal,
         $doc_l5:literal,
         $fn_name:ident,
-        $builder_type:ty,
+        $builder_type:path,
     ) => {
         #[doc = $doc_l1]
         ///
@@ -305,11 +453,12 @@ macro_rules! ffi_builder_progress_setter{
             user_data: *mut c_void,
         ) -> FFIStatus {
             unsafe {
-                let builder_mut = (builder_handle as *mut $builder_type)
-                    .as_mut();
+                let handle_box_ptr = builder_handle as *mut Box<
+                    dyn $builder_type
+                >;
 
-                if let Some(builder) = 
-                builder_mut {
+                if let Some(builder_box) = handle_box_ptr.as_mut() {
+                    let builder = builder_box.as_mut();
                     builder.with_c_progress(callback, user_data);
                     FFIStatus::Ok
                 } else {
@@ -325,7 +474,7 @@ ffi_builder_progress_setter!(
     "`archive_builder_new_u64`. The `callback` function pointer must be \
     valid for",
     archive_builder_set_c_progress_u64,
-    BuilderU64,
+    ArchiveBuilderTraitU64,
 );
 
 ffi_builder_progress_setter!(
@@ -333,7 +482,7 @@ ffi_builder_progress_setter!(
     "`archive_builder_new_u128`. The `callback` function pointer must be \
     valid for",
     archive_builder_set_c_progress_u128,
-    BuilderU128,
+    ArchiveBuilderTraitU128,
 );
 
 macro_rules! ffi_builder_build_setter{
@@ -343,7 +492,7 @@ macro_rules! ffi_builder_build_setter{
         $doc_l6:literal,
         $doc_l11:literal,
         $fn_name:ident,
-        $builder_type:ty,
+        $builder_type:path,
 
     ) => {
         #[doc = $doc_l1]
@@ -367,10 +516,13 @@ macro_rules! ffi_builder_build_setter{
                 return FFIStatus::NullArgument;
             }
             
-            // Retake ownership of the builder from the raw pointer
-            let builder = unsafe {
-                Box::from_raw(builder_handle as *mut $builder_type)
+            //Retake ownership of the outer Box from the raw pointer.
+            let handle_box = unsafe {
+                Box::from_raw(builder_handle as *mut Box<dyn $builder_type>)
             };
+            /*Dereference the outer box, moving the inner `Box<dyn Trait>` out,
+            giving ownership of it.*/
+            let builder = *handle_box;
             
             match builder.build() {
                 Ok(mut archive_data) => {
@@ -409,7 +561,7 @@ ffi_builder_build_setter!(
     "    `archive_builder_new_u64`.",
     "    `archive_data_free_u64`",
     archive_builder_build_u64,
-    BuilderU64,
+    ArchiveBuilderTraitU64,
 );
 
 ffi_builder_build_setter!(
@@ -419,7 +571,7 @@ ffi_builder_build_setter!(
     "    `archive_builder_new_u128`.",
     "    `archive_data_free_u128`",
     archive_builder_build_u128,
-    BuilderU128,
+    ArchiveBuilderTraitU128,
 );
 
 macro_rules! archive_builder_free_setter {
@@ -428,7 +580,7 @@ macro_rules! archive_builder_free_setter {
         $doc_l5:literal,
         $doc_l6:literal,
         $fn_name:ident,
-        $builder_type:ty,
+        $builder_trait:path,
     ) => {
         #[doc = $doc_l1]
         ///
@@ -441,7 +593,7 @@ macro_rules! archive_builder_free_setter {
             unsafe{
                 if !builder_handle.is_null() {
                     let _ = Box::from_raw(
-                        builder_handle as *mut $builder_type
+                        builder_handle as *mut Box<dyn $builder_trait>
                     );
                 }
             }
@@ -454,7 +606,7 @@ archive_builder_free_setter!(
     "`archive_builder_new_u64` that has not been passed to",
     "`archive_builder_build_u64`.",
     archive_builder_free_u64,
-    BuilderU64,
+    ArchiveBuilderTraitU64,
 );
 
 archive_builder_free_setter!(
@@ -462,7 +614,7 @@ archive_builder_free_setter!(
     "`archive_builder_new_u128` that has not been passed to",
     "`archive_builder_build_u128`.",
     archive_builder_free_u128,
-    BuilderU128,
+    ArchiveBuilderTraitU128,
 );
 
 /// Frees the data returned by a successful build.

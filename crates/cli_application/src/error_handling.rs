@@ -69,9 +69,21 @@ pub enum CliError {
     #[error("Hash bit length error {0}")]
     HashBitLengthError(String),
 
-     #[error("Confy config error {0}")]
+    #[error("Confy config error {0}")]
     ConfigError(#[from] confy::ConfyError),
 
-     #[error("Confy config error {0}")]
+    #[error("Confy config error {0}")]
     ClapError(#[from] clap::Error),
+
+    #[error("RedB Table error {0}")]
+    RedbTableError(#[from] redb::TableError),
+
+    #[error("RedB Storage error {0}")]
+    RedbStorageError(#[from] redb::StorageError),
+
+    #[error("Key not found {0}")]
+    KeyNotFound(String),
+    
+    #[error("Chunking Error {0}")]
+    FileChunkingError(#[from] fastcdc::v2020::Error),
 }

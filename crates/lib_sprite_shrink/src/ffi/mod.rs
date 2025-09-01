@@ -31,4 +31,5 @@ pub enum FFIStatus {
     SerializationMissingChunkError = -12,
     InvalidMagicNumber = -13,
     SeekOutOfBounds = -14,
+    IncorrectArrayLength = -15,
 }

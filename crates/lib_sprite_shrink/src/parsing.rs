@@ -128,11 +128,14 @@ pub fn parse_file_chunk_index<H>(chunk_index_data: &[u8])
 where
     for<'de> H: Eq + std::hash::Hash + Deserialize<'de>,
 {
+    //Set default bincode config.
     let config = bincode::config::standard();
 
-    let (chunk_index, _len) =
+    let (bin_chunk_index, _len): (Vec<(H, ChunkLocation)>, usize) =
         bincode::serde::decode_from_slice(chunk_index_data, config)
             .map_err(|e| {LibError::IndexDecodeError(e.to_string())})?;
+
+    let chunk_index: HashMap<H, ChunkLocation> = bin_chunk_index.into_iter().collect();
 
     Ok(chunk_index)
 }

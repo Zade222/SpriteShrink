@@ -6,11 +6,9 @@
 //! and collecting all files from a set of directories. All functions are
 //! designed to be robust and provide clear error handling.
 
+use std::fs::{self, File, OpenOptions, remove_file};
+use std::io::{BufWriter, copy, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::fs::{self, File};
-use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
-
-use sprite_shrink::{FileData};
 
 use serde::{Serialize, Deserialize};
 
@@ -213,7 +211,7 @@ pub fn files_from_dirs(dir_paths: &[PathBuf]) -> Result<Vec<PathBuf>, CliError> 
         Ok(file_paths)
     })
 }
-
+/* Deprecated function. Marked for removal.
 /// Reads an entire file into memory and packages it.
 ///
 /// This function takes a file path, reads its full content into a byte
@@ -250,7 +248,7 @@ pub fn load_file(
 
     //Return file data.
     Ok(file_data)
-}
+}*/
 
 /// Reads a specific segment of a file into a byte vector.
 ///
@@ -332,31 +330,57 @@ pub fn write_file(
     Ok(())
 }
 
-/// Writes a complete byte slice to a specified file path.
+/// Writes the final archive file by combining the header and compressed data.
 ///
-/// This function handles writing a generated archive to disk. It ensures
-/// the parent directory of the output path exists, creating it if
-/// necessary. It then performs a single write operation to save the
-/// entire data slice to the destination file.
+/// This function orchestrates the final step of the archive creation process.
+/// It performs a two-stage write to ensure atomicity and handle large data
+/// sets efficiently. First, it writes the metadata portion (header, manifest,
+/// etc.) to the final destination file. Second, it appends the compressed
+/// chunk data, which is read from a temporary file (`.tmp`) created during
+/// the compression stage.
+///
+/// After successfully appending the data, the temporary file is deleted, 
+/// leaving a complete and valid `.ssmc` archive.
 ///
 /// # Arguments
 ///
 /// * `output_path`: A `Path` reference to the destination file.
-/// * `data`: A byte slice (`&[u8]`) containing the full content.
+/// * `data`: A byte slice (`&[u8]`) containing the archive's header and
+///   metadata.
 ///
 /// # Returns
 ///
 /// A `Result` which is:
 /// - `Ok(())` on a successful write operation.
-/// - `Err(CliError::Io)` if creating the directory or writing fails.
+/// - `Err(CliError::Io)` if creating directories, writing the header,
+///   reading the temporary file, or cleaning up fails.
 pub fn write_final_archive(output_path: &Path, data: &[u8]) -> Result<(), CliError> {
     /*Check if the parent directory of the target output exists, 
     if not create it.*/
     if let Some(dir) = output_path.parent() {
         fs::create_dir_all(dir)?;
     }
-    //Write data to disk.
-    fs::write(output_path, data).map_err(CliError::Io)
+    //Write header data to disk
+    fs::write(output_path, data).map_err(CliError::Io)?;
+
+    //Derive tmp file from output path
+    let tmp_file_path = output_path.with_extension(".tmp");
+
+    //Open the tmp file
+    let mut tmp_file = File::open(&tmp_file_path)?;
+
+    //Set the file open options to append data to the written header
+    let mut final_file = OpenOptions::new()
+        .append(true)
+        .open(output_path)?;
+
+    //Copy the tmp file data to the end of the .ssmc file.
+    copy(&mut tmp_file, &mut final_file)?;
+
+    //Remove the tmp file as it is no longer needed.
+    remove_file(&tmp_file_path)?;
+
+    Ok(())
 }
 
 /// Loads the application configuration from a file, creating a default one if
@@ -412,4 +436,54 @@ pub fn load_config() -> Result<SpriteShrinkConfig, CliError> {
         Ok(cfg) => Ok(cfg),
         Err(e) => Err(CliError::from(e)),
     }
+}
+
+/// Appends a slice of bytes to the end of a file, creating the file if it
+/// does not exist.
+///
+/// This function is designed for efficiently writing data in chunks, such as
+/// when buffering compressed data to a temporary file. It opens the file in
+/// append mode and uses a `BufWriter` to batch writes, minimizing system calls
+/// and improving performance.
+///
+/// # Arguments
+///
+/// * `path`: A `Path` reference to the file to which data will be appended.
+/// * `data`: A byte slice (`&[u8]`) containing the data to write.
+///
+/// # Returns
+///
+/// A `Result` which is:
+/// - `Ok(())` if the data was successfully appended to the file.
+/// - `Err(CliError::Io)` if the file cannot be opened or written to.
+pub fn append_data_to_file(path: &Path, data: &[u8]) -> Result<(), CliError> {
+    let file = OpenOptions::new()
+        //Create the file if it doesn't exist.
+        .create(true)   
+        //Append to the end of the file.
+        .append(true)   
+        //Open the file with the specified options at the specified path
+        .open(path)?; 
+
+    //Creates an in-memory buffer that batches writes to the OS.
+    let mut writer = BufWriter::new(file);
+
+    //`write_all` ensures that the entire `data` slice is written.
+    writer.write_all(data)?;
+
+    Ok(())
+}
+
+
+pub fn calc_tot_input_size(
+    file_paths: &[PathBuf],
+) -> Result<u64, CliError> {
+    let mut size_sum: u64 = 0;
+    
+    for path in file_paths{
+        let metadata = fs::metadata(path)?;
+        size_sum += metadata.len();
+    }
+
+    Ok(size_sum)
 }
