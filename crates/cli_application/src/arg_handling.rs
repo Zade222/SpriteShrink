@@ -192,15 +192,17 @@ pub fn validate_args(
         _ => unreachable!(),
     }*/
 
-    if !args.force && !args.metadata && args.extract.is_none() {
-        if let Some(output_path) = &args.output {
-            if output_path.exists() {
-                return Err(CliError::FileExistsError(format!(
-                    "Output file already exists: {}. Use --force to overwrite.",
-                    output_path.display()
-                )));
-            }
-        }
+    //Check if the output file already exists and if the force flag is set.
+    if let Some(output_path) = &args.output
+        && !args.force
+        && !args.metadata
+        && args.extract.is_none()
+        && output_path.exists()
+    {
+        return Err(CliError::FileExistsError(format!(
+            "Output file already exists: {}. Use --force to overwrite.",
+            output_path.display()
+        )));
     }
 
     //Extraction Mode ROM Index Validation 
@@ -212,17 +214,24 @@ pub fn validate_args(
         }
         if range_parser::parse::<u32>(rom_range).is_err() {
             return Err(CliError::InvalidFormRomRange(
-                "The ROM index range format is invalid. Use a comma-separated list or a range (e.g., 1,3,5-7).".to_string(),
+                "The ROM index range format is invalid. \
+                Use a comma-separated list or a range (e.g., 1,3,5-7)."
+                .to_string(),
             ));
         }
-        if let Some(output_path) = &args.output {
-            if !output_path.is_dir() && output_path.exists() {
-                return Err(CliError::InvalidPath(
-                    "The output path for extraction must be a directory."
-                        .to_string(),
-                ));
-            }
+
+
+        if let Some(output_path) = &args.output 
+            && !output_path.is_dir()
+            && output_path.exists()
+        {
+            return Err(CliError::InvalidPath(
+                "The output path for extraction must be a directory."
+                    .to_string(),
+            ));
         }
+
+
         if args.output.is_none() {
             return Err(CliError::MissingFlag(
                 "Output path (-o, --output) is required for extraction.".to_string(),
@@ -243,12 +252,12 @@ pub fn validate_args(
             ));
         }
 
-        if let Some(output_path) = &args.output {
-             if output_path.is_dir() {
-                return Err(CliError::InvalidPath(
-                    "The output path must be a file, not a directory.".to_string()
-                ));
-            }
+        if let Some(output_path) = &args.output
+            && output_path.is_dir()
+        {
+            return Err(CliError::InvalidPath(
+                "The output path must be a file, not a directory.".to_string()
+            ));
         }
 
         if args.input.len() == 1 && args.input[0].is_file() {
@@ -268,7 +277,7 @@ pub fn validate_args(
 
     /*Check if both window and dictionary parameters are specified when 
     auto-tune flag is provided.*/
-    if arg_was_provided("auto_tune") &&
+    if args.auto_tune &&
        arg_was_provided("window") &&
        arg_was_provided("dictionary")
     {

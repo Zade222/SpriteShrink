@@ -4,20 +4,19 @@
 //! verification) to C callers with robust error handling and memory 
 //! management.
 
-use std::collections::HashMap;
-use std::ffi::CString;
-use std::slice;
+use std::{
+    ffi::CString,
+    os::raw::c_void,
+    slice
+};
 
-use dashmap::DashMap;
 use fastcdc::v2020::Chunk;
 use libc::c_char;
 
 use crate::ffi::FFIStatus;
 use crate::ffi::ffi_structs::{
-    FFIChunk, 
-    FFIChunkIndexEntryU64, FFIChunkIndexEntryU128, 
+    FFIChunk, FFIChunkDataArray,
     FFIFileManifestChunksU64, FFIFileManifestChunksU128, 
-    FFIDataStoreEntryU64, FFIDataStoreEntryU128, 
     FFIFileData, 
     FFIFileManifestParentU64, FFIFileManifestParentU128, 
     FFIHashedChunkDataU64, FFIHashedChunkDataU128,
@@ -25,13 +24,12 @@ use crate::ffi::ffi_structs::{
     FFISeekChunkInfoU64, FFISeekChunkInfoU128,
     FFISeekInfoArrayU64, FFISeekInfoArrayU128,
     FFISSAChunkMetaU64, FFISSAChunkMetaU128, 
-    FFIVeriHashesEntry
 };
 use crate::lib_error_handling::LibError;
-use crate::lib_structs::{ChunkLocation, SSAChunkMeta};
+use crate::lib_structs::{SSAChunkMeta};
 use crate::processing::{
     create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory, 
-    rebuild_and_verify_single_file, test_compression};
+    verify_single_file, test_compression};
 use crate::{FileData, FileManifestParent};
 
 macro_rules! create_file_manifest_and_chunks_ffi_setter {
@@ -386,7 +384,7 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
     }
 }
 
-macro_rules! rebuild_and_verify_single_file_ffi_setter {
+macro_rules! verify_single_file_ffi_setter {
     (
         $doc_l2:literal,
         $fn_name:ident,
@@ -403,23 +401,27 @@ macro_rules! rebuild_and_verify_single_file_ffi_setter {
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $fn_name(
             file_manifest_parent: *const $ffi_file_man_par,
-            ser_data_store_array_ptr: *const u8,
-            ser_data_store_len: usize,
-            chunk_index_array_ptr: *const $ffi_chunk_index_entry,
-            chunk_index_len: usize,
-            veri_hashes_array_ptr: *const FFIVeriHashesEntry,
-            veri_hashes_len: usize
+            veri_hash_array_ptr: *const u8,
+            veri_hash_len: usize,
+            user_data: *mut c_void,
+            get_chunks_cb: unsafe extern "C" fn(
+                user_data: *mut c_void, 
+                hashes: *const $hash_type, 
+                hashes_len: usize
+            ) -> FFIChunkDataArray,
         ) -> FFIStatus {
             //Immediately check for null pointers to fail early.
             if file_manifest_parent.is_null()
-                || ser_data_store_array_ptr.is_null()
-                || chunk_index_array_ptr.is_null()
-                || veri_hashes_array_ptr.is_null()
+                || veri_hash_array_ptr.is_null()
             {
                 return FFIStatus::NullArgument;
             }
 
-            let(fmp, ser_data_store, chunk_index, veri_hashes) = unsafe {
+            if veri_hash_len != 64 {
+                return FFIStatus::IncorrectArrayLength
+            }
+
+            let(fmp, veri_hash) = unsafe {
                 //Dereference the main struct pointer once.
                 let ffi_fmp_ref = &*file_manifest_parent;
                 
@@ -447,64 +449,48 @@ macro_rules! rebuild_and_verify_single_file_ffi_setter {
                     chunk_count: ffi_fmp_ref.chunk_metadata_len as u64,
                     chunk_metadata: vec_chunk_metadata
                 };
-                
-                /*Prepare ser_data_store, which is the second parameter of the
-                original rebuild_and_verify_single_file function, from C 
-                input.*/
-                let ser_data_store = slice::from_raw_parts(
-                    ser_data_store_array_ptr, 
-                    ser_data_store_len
+
+                /*Prepare and reconstruct veri_hash, which is the fourth 
+                parameter of the original verify_single_file 
+                function, from C input.*/
+                let veri_hash_slice = slice::from_raw_parts(
+                    veri_hash_array_ptr, 
+                    64
                 );
 
-                /*Prepare and reconstruct chunk_index, which is the third 
-                parameter of the original rebuild_and_verify_single_file 
-                function, from C input.*/
-                let chunk_index: HashMap<$hash_type, ChunkLocation> = {
-                    let ffi_chunk_index_slice = 
-                        slice::from_raw_parts(
-                            chunk_index_array_ptr, 
-                            chunk_index_len
-                        );
-                    ffi_chunk_index_slice
-                        .iter()
-                        .map(|entry| {
-                            (entry.hash, ChunkLocation {
-                                offset: entry.data.offset,
-                                length: entry.data.length,
-                            })
-                        })
-                        .collect()
-                };
+                let veri_hash: [u8; 64] = veri_hash_slice.try_into().unwrap();
 
-                /*Prepare and reconstruct veri_hashes, which is the fourth 
-                parameter of the original rebuild_and_verify_single_file 
-                function, from C input.*/
-                let veri_hashes: DashMap<String, [u8; 64]> = {
-                    let ffi_veri_hashes_slice = 
-                        slice::from_raw_parts(
-                            veri_hashes_array_ptr, 
-                            veri_hashes_len
-                        );
-
-                    let map = DashMap::with_capacity(
-                        ffi_veri_hashes_slice.len());
-                    
-                    for entry in ffi_veri_hashes_slice{
-                        let filename = std::ffi::CStr::from_ptr(entry.key)
-                        .to_string_lossy()
-                        .into_owned();
-
-                        let hash_array = *entry.value;
-                        map.insert(filename, hash_array);
-                    }
-                    map
-                };
-
-                (fmp, ser_data_store, chunk_index, veri_hashes)
+                (fmp, veri_hash)
             };
 
-            match rebuild_and_verify_single_file::<$hash_type>(
-                &fmp, ser_data_store, &chunk_index, &veri_hashes
+            let user_data_addr = user_data as usize;
+
+            let get_chunks_closure = move |hashes: &[$hash_type]| {
+                let ffi_chunks_array = unsafe {
+                    get_chunks_cb(
+                        user_data_addr as *mut c_void, 
+                        hashes.as_ptr(), 
+                        hashes.len()
+                    )};
+                
+                let ffi_chunks_slice = unsafe {slice::from_raw_parts(
+                    ffi_chunks_array.ptr, 
+                    ffi_chunks_array.len
+                )};
+
+                let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
+                    unsafe {Vec::from_raw_parts(c.ptr, c.len, c.len)}
+                }).collect();
+                
+                let _ = unsafe {Vec::from_raw_parts(
+                    ffi_chunks_array.ptr, 
+                    ffi_chunks_array.len, 
+                    ffi_chunks_array.len)};
+                chunks
+            };
+
+            match verify_single_file(
+                &fmp, &veri_hash, get_chunks_closure
             ){
                 Ok(()) => FFIStatus::Ok,
                 Err(LibError::HashMismatchError(_)) => 
@@ -517,17 +503,17 @@ macro_rules! rebuild_and_verify_single_file_ffi_setter {
     };
 }
 
-rebuild_and_verify_single_file_ffi_setter!(
+verify_single_file_ffi_setter!(
     "an FFI-safe interface for u64 hashes.",
-    rebuild_and_verify_single_file_ffi_u64,
+    verify_single_file_ffi_u64,
     FFIFileManifestParentU64,
     FFIChunkIndexEntryU64,
     u64,
 );
 
-rebuild_and_verify_single_file_ffi_setter!(
+verify_single_file_ffi_setter!(
     "an FFI-safe interface for u128 hashes.",
-    rebuild_and_verify_single_file_ffi_u128,
+    verify_single_file_ffi_u128,
     FFIFileManifestParentU128,
     FFIChunkIndexEntryU128,
     u128,
@@ -551,34 +537,21 @@ macro_rules! test_compression_ffi_setter {
         /// - `out_size` must be a valid, non-null pointer to a `u64`.
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn $fn_name(
-            data_store_array_ptr: *const $ffi_data_store_entry,
-            data_store_len: usize, 
+            total_data_size: u64,
             sorted_hashes_array_ptr: *const $hash_type,
             sorted_hashes_len: usize,
             worker_count: usize,
             dictionary_size: usize,
             out_size: *mut u64,
+            user_data: *mut c_void,
+            get_chunks_cb: unsafe extern "C" fn(
+                user_data: *mut c_void, 
+                hashes: *const $hash_type, 
+                hashes_len: usize
+            ) -> FFIChunkDataArray,
         ) -> FFIStatus {
-            let (data_store, sorted_hashes) = unsafe {
+            let sorted_hashes = unsafe {
                 //Convert C inputs to Rust types
-
-                /*Prepare data_store, which is the first parameter of the 
-                original test_compression function, from C input.*/
-                let ffi_data_store = slice::from_raw_parts(
-                    data_store_array_ptr, 
-                    data_store_len
-                );
-
-                //Reconstruct the data_store HashMap via the following.
-                let data_store: HashMap<$hash_type, Vec<u8>> = ffi_data_store
-                    .iter()
-                    .map(|entry| {
-                        let data_slice = std::slice::from_raw_parts(
-                            entry.data, 
-                            entry.data_len
-                        );
-                        (entry.hash, data_slice.to_vec())
-                    }).collect();
 
                 /*Prepare data_store, which is the second parameter of the 
                 original test_compression function, from C input.*/
@@ -587,15 +560,42 @@ macro_rules! test_compression_ffi_setter {
                     sorted_hashes_len
                 );
 
-                (data_store, sorted_hashes_slice)
+                (sorted_hashes_slice)
+            };
+
+            let user_data_addr = user_data as usize;
+
+            let get_chunks_closure = move |hashes: &[$hash_type]| {
+                let ffi_chunks_array = unsafe {
+                    get_chunks_cb(
+                        user_data_addr as *mut c_void, 
+                        hashes.as_ptr(), 
+                        hashes.len()
+                    )};
+                
+                let ffi_chunks_slice = unsafe {slice::from_raw_parts(
+                    ffi_chunks_array.ptr, 
+                    ffi_chunks_array.len
+                )};
+
+                let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
+                    unsafe {Vec::from_raw_parts(c.ptr, c.len, c.len)}
+                }).collect();
+                
+                let _ = unsafe {Vec::from_raw_parts(
+                    ffi_chunks_array.ptr, 
+                    ffi_chunks_array.len, 
+                    ffi_chunks_array.len)};
+                chunks
             };
 
             //Run test compression with received and converted data.
             match test_compression(
-                &data_store, 
                 sorted_hashes, 
+                total_data_size,
                 worker_count, 
-                dictionary_size
+                dictionary_size,
+                get_chunks_closure
             ) {
                 Ok(compressed_size) => {
                     unsafe {

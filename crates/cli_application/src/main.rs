@@ -18,6 +18,10 @@ use archive_parser::{get_max_rom_index};
 mod arg_handling;
 use arg_handling::{merge_config_and_args, validate_args, Args};
 
+mod cli_types;
+
+mod db_transactions;
+
 mod error_handling;
 use error_handling::CliError;
     
@@ -25,6 +29,13 @@ mod storage_io;
 use crate::storage_io::{
     load_config, files_from_dirs, organize_paths
 };
+
+#[cfg(feature = "dhat-heap")]
+use dhat::Profiler;
+
+#[cfg(feature = "dhat-heap")]
+#[global_allocator]
+static ALLOC: dhat::Alloc = dhat::Alloc;
 
 /// Executes the main application logic based on parsed arguments.
 ///
@@ -136,12 +147,15 @@ fn run(args: &Args) -> Result<(), CliError> {
 /// - `Err(CliError)` if a critical error occurs during argument
 ///   parsing, validation, or the main execution flow.
 fn main() -> Result<(), CliError>{
+    #[cfg(feature = "dhat-heap")]
+    let _dhat = Profiler::new_heap();
+
     //Initiate logging
     /*Line for initiating logging needed. Must be started as early as possible
     in application logic.*/
 
     //Load config from disk.
-    let cfg = load_config()?;
+    let file_cfg = load_config()?;
 
     //Receive and validate user specified arguments/flags where applicable.
     let matches = Args::command().get_matches();
@@ -149,7 +163,7 @@ fn main() -> Result<(), CliError>{
 
     /*Determine which options supercede others between the user provided 
     flags and the on disk config.*/
-    let final_args = merge_config_and_args(cfg, args, &matches);
+    let final_args = merge_config_and_args(file_cfg, args, &matches);
 
     //Further validate and check for conflicting options.
     validate_args(&final_args, &matches)?;

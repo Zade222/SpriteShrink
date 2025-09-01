@@ -12,7 +12,8 @@ fn main() {
         .unwrap()
         .to_string();
 
-    let config = cbindgen::Config::from_file("cbindgen.toml").expect("Failed to load cbindgen.toml");
+    let config = cbindgen::Config::from_file("cbindgen.toml")
+        .expect("Failed to load cbindgen.toml");
 
     cbindgen::Builder::new()
       .with_crate(&crate_dir)
@@ -26,7 +27,9 @@ fn target_dir() -> PathBuf {
     let mut path = if let Ok(target_dir) = env::var("CARGO_TARGET_DIR") {
         PathBuf::from(target_dir)
     } else {
-        PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../target")
+        PathBuf::from(env::var("CARGO_MANIFEST_DIR")
+            .unwrap())
+            .join("../../target")
     };
 
     if let Ok(target_triple) = env::var("TARGET") {

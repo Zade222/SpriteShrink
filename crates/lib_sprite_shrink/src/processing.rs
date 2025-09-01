@@ -7,27 +7,22 @@
 //! verifying files from their chunks.
 
 use std::{
-    collections::HashMap,
     ffi::c_void,
-    hash::Hash
+    fmt::Debug,
+    hash::Hash,
+    sync::{Arc, Mutex},
+    thread
 };
 
-use dashmap::DashMap;
 use fastcdc::v2020::{Chunk, FastCDC, Normalization};
-#[cfg(target_os = "macos")]
-use libc::{
-    pthread_self, pthread_set_qos_class_self_np
-};
-use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use sha2::{Digest,Sha512};
 use xxhash_rust::xxh3::{xxh3_64_with_seed, xxh3_128_with_seed};
 use zstd_sys::{self, ZDICT_params_t};
 
-use crate::archive::compress_with_dict;
+use crate::archive::{compress_chunks};
 use crate::lib_error_handling::LibError;
 use crate::lib_structs::{
-    ChunkLocation, FileData, FileManifestParent, ProcessedFileData, 
-    SSAChunkMeta
+    FileData, FileManifestParent, ProcessedFileData, SSAChunkMeta
 };
 use crate::parsing::{SS_SEED};
 
@@ -52,7 +47,6 @@ impl Hashable for u128 {
         xxh3_128_with_seed(bytes, SS_SEED)
     }
 }
-
 
 /// Processes a single file that has been loaded into memory.
 ///
@@ -198,6 +192,7 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
     (file_manifest, chunk_data_list)
 }
 
+/* Deprecated and marked for removal
 /// Rebuilds a single file from chunks and verifies its integrity.
 ///
 /// This function reconstructs a file in memory by fetching each of its
@@ -218,50 +213,185 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 /// A `Result` which is:
 /// - `Ok(())` if the file is rebuilt and its hash matches.
 /// - `Err(LibError)` if a chunk is missing or the hash mismatches.
-pub fn rebuild_and_verify_single_file<H>(
+pub async fn verify_single_file<F, H>(
     fmp: &FileManifestParent<H>,
-    ser_data_store: &[u8],
-    chunk_index: &HashMap<H, ChunkLocation>,
-    veri_hashes: &DashMap<String, [u8; 64]>,
+    veri_hash: &[u8; 64],
+    get_chunk_data: F,
 ) -> Result<(), LibError> 
 where
+    F: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
     //Required for H: being a hash key and displayable in errors.
-    H: Eq + std::hash::Hash + std::fmt::Display,
+    H: Eq + std::hash::Hash + std::fmt::Display + Clone + Send + Sync + 'static,
 {
-    //Calculate the total size of the original file to pre-allocate memory.
-    let file_size: usize = fmp.chunk_metadata.iter().map(|scm|{
-        scm.length as usize}).sum();
-    let mut data_vec: Vec<u8> = Vec::with_capacity(file_size);
+    //Initiate the data hasher
+    let mut hasher = Sha512::new();
 
-    //Rebuild file
-    for scm in &fmp.chunk_metadata {
-        if let Some(location) = chunk_index.get(&scm.hash) {
-            let start = location.offset as usize;
-            let end = start + location.length as usize;
-            data_vec.extend_from_slice(&ser_data_store[start..end]);
+    /*Store all hashes in vector. They are already in the correct order.*/
+    let chunk_hashes: Vec<H> = fmp.chunk_metadata.iter().map(|scm|
+        scm.hash.clone()
+    ).collect();
+
+    //Use arc to safely share the callback between threads.
+    let get_chunk_data_cb = Arc::new(get_chunk_data);
+
+    //Store the amount of hashes for reuse.
+    let chunk_hashes_len = chunk_hashes.len();
+
+    //Clone the arc of the callback for safe use.
+    let pre_gcd_cb = Arc::clone(&get_chunk_data_cb);
+
+    //Safely store the first hash via clone.
+    let first_hash = chunk_hashes[0].clone();
+
+    //Start the retrieval of the first chunk.
+    let mut cur_fetch_handle = spawn(async move{
+        pre_gcd_cb(&[first_hash])
+    });
+
+    /*Loop through all hashes, retrieve each, start the retrieval of the next
+    chunk, and hash the current.*/
+    for i in 0..chunk_hashes_len{
+        //Clone the arc of the callback for safe use.
+        let loop_gcd_cb = Arc::clone(&get_chunk_data_cb);
+
+        let next_fetch_handle = if i + 1 < chunk_hashes_len {
+            /*if the current index + 1 is within the amount of chunk hashes,
+            start the retrieval of the next hunk.*/
+            let next_hash = chunk_hashes[i + 1].clone();
+            Some(spawn(async move { 
+                loop_gcd_cb(&[next_hash]) 
+            }))
         } else {
-            return Err(LibError::VerificationError(format!(
-                "Verification failed: Missing chunk with hash {} for file '{}'",
-                scm.hash, fmp.filename
-            )));
-        } 
-    }
+            //If no hashes are left, value will be none.
+            None
+        };
 
-    //Verify hydrated file hash aginst original
-    if let Some(expected_hash) = veri_hashes.get(&fmp.filename) {
-        let built_file_hash = generate_sha_512(&data_vec);
-        if *expected_hash.value() != built_file_hash {
-            return Err(LibError::HashMismatchError(fmp.filename.clone()));
+        //Store the chunk data once the worker has returned with the data.
+        let chunk_data: Vec<u8> = cur_fetch_handle.await.unwrap()[0].clone();
+
+        //Hash that chunk
+        hasher.update(&chunk_data);
+
+        /*If next_fetch_handle isn't none, move the next fetch handle to be 
+        the next current one.*/
+        if let Some(next_handle) = next_fetch_handle {
+            cur_fetch_handle = next_handle;
+        } else {
+            //This was the last chunk, so we can break the loop.
+            break;
         }
-    } else {
-        // This case would also indicate an internal inconsistency.
-        return Err(LibError::VerificationError(format!(
-            "Verification failed: Missing original hash for file '{}'",
-            fmp.filename
-        )));
     }
 
-    Ok(())
+    let calculated_hash: [u8; 64] = hasher.finalize().into();
+
+    if calculated_hash.as_slice() == veri_hash{
+        Ok(())
+    } else{
+        Err(LibError::HashMismatchError(fmp.filename.clone()))
+    }
+}*/
+
+/// Verifies the integrity of a single file.
+///
+/// This function requests each chunk of a file by fetching each of its
+/// data chunks in order, feeding each chunk to a sha-512 hasing algorithm,
+/// and then computing a final verification hash. To optimize performance, 
+/// it uses a producer-consumer pattern:
+///
+/// 1.  **Producer Thread**: A dedicated fetcher thread reads chunk hashes and
+///     retrieves their corresponding data in batches using the provided
+///     `get_chunk_data` callback.
+/// 2.  **Consumer (Main) Thread**: The main thread receives these batches of
+///     chunk data and continuously updates a SHA-512 hasher.
+///
+/// This concurrent approach allows data fetching (I/O-bound) to happen in
+/// parallel with data hashing (CPU-bound), significantly speeding up the
+/// verification process.
+///
+/// # Arguments
+///
+/// * `fmp`: A reference to the `FileManifestParent` for the file.
+/// * `veri_hash`: The original SHA-512 hash of the file, used for the final
+///   integrity check.
+/// * `get_chunk_data`: A callback function that takes a slice of chunk hashes
+///   and each corresponding chunks byte data.
+///
+/// # Returns
+///
+/// A `Result` which is:
+/// - `Ok(())` if the file is successfully rebuilt and its computed hash
+///   matches the `veri_hash`.
+/// - `Err(LibError)` if the computed hash does not match, or if a thread
+///   panics during execution.
+///
+/// # Type Parameters
+///
+/// * `F`: The type of the `get_chunk_data` callback, which must be a closure
+///   that is `Send`, `Sync`, and has a `'static` lifetime.
+/// * `H`: The generic hash type, which must be `Eq`, `Hash`, `Display`,
+///   `Clone`, `Send`, `Sync`, and have a `'static` lifetime.
+pub fn verify_single_file<F, H>(
+    fmp: &FileManifestParent<H>,
+    veri_hash: &[u8; 64],
+    get_chunk_data: F,
+) -> Result<(), LibError>
+where
+    F: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
+    H: Eq + std::hash::Hash + std::fmt::Display + Clone + Send + Sync + 'static,
+{
+    //Maximum batch size for a single file verification task.
+    const BATCH_SIZE: usize = 64;
+
+    //flume tx and rx channels, limited\bounded to 4 messages.
+    let (to_hash_tx, to_hash_rx) = flume::bounded(4);
+
+    /*Puts the list of all hashes for a file in an arc array.*/
+    let all_hashes: Arc<[H]> = fmp.chunk_metadata.iter().map(|meta| 
+        meta.hash.clone()).collect();
+
+    /*Encapsulates the get_chunk_data callback to be safely used by multiple
+    threads.*/
+    let get_chunk_data_arc = Arc::new(get_chunk_data);
+
+    //Start the fetch handle so it can begin getting the first batch of data.
+    let fetch_handle = {
+        let hashes_clone = Arc::clone(&all_hashes);
+        thread::spawn(move || {
+            for batch in hashes_clone.chunks(BATCH_SIZE) {
+                let chunk_data_batch = (get_chunk_data_arc)(batch);
+
+                if to_hash_tx.send(chunk_data_batch).is_err() {
+                    break;
+                }
+            }
+        })
+    };
+
+    //Start the SHA-512 hasher
+    let mut hasher = Sha512::new();
+
+    /*Until all chunks have been fed to the hasher, while loop will receive
+    chunk data and feed it to the hasher.*/
+    while let Ok(chunk_batch) = to_hash_rx.recv() {
+        for chunk_data in chunk_batch {
+            hasher.update(&chunk_data);
+        }
+    }
+
+    //Finalize and store sha-512 hash
+    let calculated_hash: [u8; 64] = hasher.finalize().into();
+
+    //Clean up threads and propogate errors if needed.
+    fetch_handle.join().map_err(|_| LibError::InternalLibError(
+        "Chunk fetching thread panicked.".to_string()))?;
+
+    /*Compare the generated hash with the pregenerated hash and return OK if
+    they match.*/
+    if calculated_hash.as_slice() == veri_hash {
+        Ok(())
+    } else {
+        Err(LibError::HashMismatchError(fmp.filename.clone()))
+    }
 }
 
 
@@ -276,8 +406,8 @@ where
 ///
 /// # Arguments
 ///
-/// * `samples`: A vector of byte slices, where each slice is a sample
-///   of data to be used for training the dictionary.
+/// * `samples_buffer`: A shared slice reference, that stores a continuous
+///   array of bytes sampled from the input data.
 /// * `max_dict_size`: The maximum desired size for the generated
 ///   dictionary in bytes. The actual size may be smaller.
 /// * `workers`: The number of threads to utilize for dictionary
@@ -301,20 +431,17 @@ where
 ///    valid as they are derived directly from Rust-managed Vecs and slices.
 /// 3. All potential errors from the C function are checked with 
 ///    `ZDICT_isError`.
-pub fn gen_zstd_opt_dict(samples: Vec<&[u8]>,
+pub fn gen_zstd_opt_dict(
+    samples_buffer: &[u8],
+    sample_sizes: &[usize],
     max_dict_size: usize,
     workers: usize,
     compression_level: i32
 ) -> Result<Vec<u8>, LibError> {
-    /*Prepares the samples for the zstd_sys function. */
-    let samples_buffer: Vec<u8> = samples.concat();
-
-    /*This vector will store the size of each sample. */
-    let sample_sizes: Vec<usize> = samples.iter().map(|s| s.len()).collect();
+    /*Prepares the samples for the zstd_sys function.*/
 
     /*This buffer will store the dictionary to be returned.*/
     let mut dict_buffer = Vec::with_capacity(max_dict_size);
-
 
     /*Set and store the ZDICT parameters to be used by the cover algorithm.
     Any values marked as default are either not used by 
@@ -369,6 +496,145 @@ pub fn gen_zstd_opt_dict(samples: Vec<&[u8]>,
     Ok(dict_buffer)
 }
 
+/// Prepares a vector of data samples for Zstandard dictionary training.
+///
+/// The zstd compression algorithm can achieve better compression ratios if 
+/// it's "trained" on a dictionary built from data similar to what it will
+/// compress. This function selects an optimal set of data chunks to be used
+/// as this training data.
+///
+/// To ensure the dictionary training process is does not cause an overflow,
+/// zstd requires a sample data size of no more than 4 GB. This function 
+/// implements two strategies:
+///
+/// 1.  If the total size of all unique chunks (`total_data_size`) is within 
+///     the 4 GB limit, all chunks are used.
+/// 2.  If the total size exceeds the limit, a representative subset of chunks
+///     is selected by stepping through the sorted list of hashes. This ensures
+///     the sample includes data from across the entire dataset while
+///     respecting the size limit.
+///
+/// # Type Parameters
+///
+/// * `F`: A closure that takes a chunk hash and returns its corresponding byte
+///   data.
+/// * `H`: The hash type, which must be copyable and usable as a hash key.
+///
+/// # Arguments
+///
+/// * `sorted_hashes`: A sorted slice of all unique chunk hashes to process.
+/// * `total_data_size`: The total combined size in bytes of all unique chunks.
+/// * `get_chunk_data`: A callback function for retrieving a chunk's data by 
+///   its hash.
+///
+/// # Returns
+///
+/// A `Result` containing a `Vec<Vec<u8>>`, where each inner vector is the byte
+/// data of a selected sample chunk.
+pub fn build_train_samples<F, H>(
+    sorted_hashes: &[H],
+    total_data_size: u64,
+    target_dictionary_size: usize,
+    get_chunk_data: &F,
+) -> Result<(Vec<u8>, Vec<usize>), LibError>
+where
+    F: Fn(&[H]) -> Vec<Vec<u8>> + ?Sized,
+    H: Copy + Eq + Hash + Send + Sync + 'static,
+{
+    /*Max samples is 4.0 gigabytes. This is delibrately set to prevent an
+    overflow in the zstd library.*/
+    const MAX_SAMPLES_SIZE: usize = 4 * 1024 * 1024 * 1024;
+
+    //Get and store the number of chunks in sorted hashes.
+    let number_of_chunks = sorted_hashes.len();
+
+    /*If the total data size is less than MAX_SAMPLES_SIZE, use all data to
+    generate the dictionary and return it.*/
+    if total_data_size as usize <= MAX_SAMPLES_SIZE {
+        //Reserve capacity to avoid reallocations.
+        let mut samples_buffer: Vec<u8> = Vec::with_capacity(
+            target_dictionary_size
+        );
+        let mut sample_sizes: Vec<usize> = Vec::with_capacity(
+            number_of_chunks
+        );
+        for hash in sorted_hashes {
+            let sample = &get_chunk_data(&[*hash])[0];
+            
+            sample_sizes.push(sample.len());
+            samples_buffer.extend_from_slice(sample);
+        }
+
+        //println!("Final sample size, in bytes, is: {}", samples_buffer.len());
+
+        //println!("{} recorded samples sizes", sample_sizes.len());
+
+        let mut total_sizes: usize = 0;
+        
+        sample_sizes.iter().for_each(|size|{
+            total_sizes += size ;
+        });
+
+        //println!("Total calculated size is: {total_sizes} bytes");
+        return Ok((samples_buffer, sample_sizes));
+    }
+
+    //If the data size exceeds the limit, sample the chunks.
+
+    //Reserve capacity to avoid reallocations.
+    let mut samples_buffer: Vec<u8> = Vec::with_capacity(
+        target_dictionary_size
+    );
+    let mut sample_sizes: Vec<usize> = Vec::with_capacity(
+        number_of_chunks
+    );
+
+    //Variable for tracking sum of the samples.
+    let mut current_samples_size: usize = 0;
+
+    /*Calculate a step value to sample evenly across all chunks.
+    This ensures we select chunks from the beginning, middle, and 
+    end.*/
+    let step = (total_data_size as f64 / MAX_SAMPLES_SIZE as f64).ceil() as u64;
+    let step = step.max(1) as usize;
+
+
+    for i in (0..number_of_chunks).step_by(step) {
+        if let Some(hash) = sorted_hashes.get(i) {
+            //Get a sample using the callback.
+            let sample = &get_chunk_data(&[*hash])[0];
+            let sample_size = sample.len();
+
+            //Check if adding the next sample would exceed the limit.
+            if current_samples_size + (sample_size) > 
+                MAX_SAMPLES_SIZE {
+                    break; //Stop if the size limit is exceeded.
+                }
+
+            //Increment total sample size.
+            current_samples_size += sample_size;
+
+            //Add chunk to sample vectors.
+            sample_sizes.push(sample_size);
+            samples_buffer.extend_from_slice(sample);
+        }
+    }
+
+    /*println!("Final sample size, in bytes, is: {}", samples_buffer.len());
+
+    println!("{} recorded samples sizes", sample_sizes.len());
+
+    let mut total_sizes: usize = 0;
+    
+    sample_sizes.iter().for_each(|size|{
+        total_sizes += size ;
+    });
+
+    println!("Total calculated size is: {total_sizes} bytes");*/
+
+    Ok((samples_buffer, sample_sizes))
+}
+
 /// Estimates the total compressed size of the data store.
 ///
 /// This function simulates a full compression cycle to provide a size
@@ -382,90 +648,84 @@ pub fn gen_zstd_opt_dict(samples: Vec<&[u8]>,
 ///
 /// # Arguments
 ///
-/// * `data_store`: A map of chunk hashes to their raw byte data.
 /// * `sorted_hashes`: A sorted slice of all unique chunk hashes to process.
+/// * `total_data_size`: The total combined size in bytes of all unique chunks.
 /// * `worker_count`: The number of threads to use for parallel compression.
 /// * `dictionary_size`: The target size for the temporary dictionary.
+/// * `get_chunk_data`: A callback function for retrieving a chunk's data by 
+///   its hash.
 ///
 /// # Returns
 ///
 /// A `Result` which is:
 /// - `Ok(usize)` containing the total estimated compressed size in bytes.
 /// - `Err(LibError)` if dictionary creation or compression fails.
-pub fn test_compression<H>(
-    data_store: &HashMap<H, Vec<u8>>,
+pub fn test_compression<F, H>(
     sorted_hashes: &[H],
+    total_data_size: u64,
     worker_count: usize,
     dictionary_size: usize,
+    get_chunk_data: F,
 ) -> Result<usize, LibError>
 where
-    H: Copy + Eq + std::hash::Hash + Send + Sync,
+    F: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
+    H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
 {
-    let samples_for_dict: Vec<&[u8]> = sorted_hashes
-        .iter()
-        .filter_map(|hash| data_store.get(hash).map(|data| data.as_slice()))
-        .collect();
+    //Prepare the samples for dictionary generation.
+    let (samples_for_dict, sample_sizes) = build_train_samples(
+        sorted_hashes, 
+        total_data_size, 
+        dictionary_size,
+        &get_chunk_data
+    )?;
 
-    let dictionary = zstd::dict::from_samples(
+    //Build dictionary
+    let dictionary = zstd::dict::from_continuous(
         &samples_for_dict,
-        dictionary_size, // dictionary size in bytes
+        &sample_sizes,
+        dictionary_size, //Max dictionary size in bytes
         ).map_err(|e| LibError::DictionaryError(e.to_string()))?;
-    
-        let task_pool = {
-        let builder = rayon::ThreadPoolBuilder::new()
-            .num_threads(worker_count);
-        
-        #[cfg(target_os = "macos")]
-        {
-            builder = builder.spawn_handler(|thread| {
-                let mut b = thread;
-                //Create a place for the new thread's stack
-                let mut stack = Vec::new(); 
-                mem::swap(b.stack_size_mut(), &mut stack);
 
-                b.spawn(move || {
-                    //Inside the new Rayon thread, set its QoS.
-                    unsafe {
-                        pthread_set_qos_class_self_np(
-                            libc::QOS_CLASS_UTILITY, 0
-                        );
-                    }
-                });
-            });
-        }
-        
-        builder.build()
-            .map_err(|e| LibError::ThreadPoolError(
-                format!("Failed to create thread pool: {e}"))
-            )?
+    //Callback wrapper for getting chunk data from host application.
+    let get_chunk_data_wrapper = move |hashes: &[H]| -> Vec<(H, Vec<u8>)> {
+        let ret_chunks = get_chunk_data(hashes);
+        let mut chunk_pairs: Vec<(H, Vec<u8>)> = 
+            Vec::with_capacity(ret_chunks.len());
+
+        for (index, chunk) in ret_chunks.iter().enumerate(){
+            chunk_pairs.push((hashes[index], chunk.clone()));
+        };
+
+        chunk_pairs
     };
 
-    let compressed_dash: DashMap<H, Vec<u8>> = DashMap::new();
+    //Arc(Mutex) for storing the total data size.
+    let final_size = Arc::new(Mutex::new(0usize));
 
-    let comp_result: Result<(), LibError> = task_pool.install(|| {
-        sorted_hashes.par_iter().try_for_each(|hash| {
-            if let Some(data) = data_store.get(hash){
-                let compressed_chunk = compress_with_dict(
-                    data.as_slice(), 
-                    &dictionary, 
-                    &7)
-                    .map_err(|e| LibError::CompressionError(e.to_string()))?;
+    /*Callback that doesn't store but adds the size of the chunk to 
+    final_size.*/
+    let write_chunk_data_cb = {
+        let final_size_clone = Arc::clone(&final_size);
+        move |chunk: &[u8]| {
+            let mut size = final_size_clone.lock().unwrap();
+            *size += chunk.len();
+        }
+    };
 
-                compressed_dash.insert(*hash, compressed_chunk);
-            }
-            Ok(())
-        })
-    });
+    //Run compression for data for test data.
+    let _chunk_index = compress_chunks(
+        worker_count, 
+        &dictionary, 
+        sorted_hashes, 
+        7, 
+        get_chunk_data_wrapper,
+        write_chunk_data_cb
+    );
 
-    //Check if any of the parallel operations failed.
-    comp_result?;
-
-    let compressed_size:usize = compressed_dash.iter()
-        //Get the length of each Vec
-        .map(|entry| entry.value().len()) 
-        .sum(); //Add everything up.
+    //Pull the finalize size from the Arc(Mutex)
+    let final_size_val = *final_size.lock().unwrap();
     
-    Ok((dictionary.len() as usize) + compressed_size)
+    Ok((dictionary.len() as usize) + final_size_val)
 }
 
 /// Calculates which chunks and what parts of them are needed to satisfy a 

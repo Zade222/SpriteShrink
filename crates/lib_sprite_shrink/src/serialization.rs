@@ -19,7 +19,7 @@ use crate::lib_structs::{ChunkLocation, FileManifestParent};
 /// different underlying map implementations, such as `HashMap` or `DashMap`.
 /// It is used to allow serialization logic to operate on either a
 /// thread-safe or non-thread-safe data store without duplication.
-pub trait ChunkStore<H: Eq + std::hash::Hash> {
+/*pub trait ChunkStore<H: Eq + std::hash::Hash> {
     /// Retrieves a reference to a chunk's data by its hash.
     ///
     /// # Arguments
@@ -33,13 +33,13 @@ pub trait ChunkStore<H: Eq + std::hash::Hash> {
     /// Returns `None` if no chunk with the specified hash is found.
     fn get_chunk(&self, hash: &H) -> 
         Option<impl std::ops::Deref<Target = Vec<u8>>>;
-}
+}*/
 
 /// Implements `ChunkStore` for a standard, single-threaded `HashMap`.
 ///
 /// This implementation allows the generic serialization functions to
 /// operate on a `HashMap` that maps chunk hashes to their byte data.
-impl <H: Eq + std::hash::Hash> ChunkStore<H> for HashMap<H, Vec<u8>> {
+/*impl <H: Eq + std::hash::Hash> ChunkStore<H> for HashMap<H, Vec<u8>> {
     fn get_chunk(&self, hash: &H) -> Option<impl std::ops::Deref<Target = Vec<u8>>> {
         self.get(hash)
     }
@@ -55,7 +55,7 @@ impl <H: Eq + std::hash::Hash + Clone> ChunkStore<H> for DashMap<H, Vec<u8>> {
     fn get_chunk(&self, hash: &H) -> Option<impl std::ops::Deref<Target = Vec<u8>>> {
         self.get(hash)
     }
-}
+}*/
 
 /// Extracts all values from a DashMap into a vector.
 ///
@@ -84,48 +84,66 @@ where
     input_dash.iter().map(|entry| entry.value().clone()).collect()
 }
 
-/// Serializes a chunk store into a byte vector and generates an index.
+/// Serializes a chunk store and generates a corresponding index.
 ///
-/// This function transforms a map of unique data chunks into a single,
-/// ordered byte vector. It also generates a `chunk_index` that maps each
-/// chunk's hash to its precise offset and length within this new data
-/// block. It is generic over any type that implements `ChunkStore`.
+/// This function is responsible for creating a `chunk_index`, which maps each
+/// unique data chunk's hash to its precise offset and length within a
+/// conceptual, serialized data block. Rather than building the entire data
+/// block in memory, this function calculates the layout and returns the index,
+/// making it memory-efficient for large datasets.
+///
+/// The function operates on data retrieved via a callback
+/// (`data_store_get_chunk_cb`). This design decouples the serialization logic
+/// from the underlying storage mechanism, allowing the caller to supply chunk
+/// data from various sources, such as an in-memory `HashMap`, a thread-safe
+/// `DashMap`, or a persistent key-value store like a database.
 ///
 /// # Arguments
 ///
-/// * `store`: A reference to a type implementing `ChunkStore`, which
-///   contains the chunk data mapped by hash.
-/// * `sorted_hashes`: A slice of `u64` hashes, sorted to ensure a
-///   deterministic order for the serialized data.
+/// * `sorted_hashes`: A slice of hashes that have been sorted into a
+///   deterministic order. This consistent ordering is critical for ensuring
+///   that the generated chunk index is correct and reproducible.
+/// * `data_store_get_chunk_cb`: A callback function that the serializer uses 
+///   to fetch the raw byte data for a given set of hashes. It must return a
+///   `Vec<Vec<u8>>` where the data for each chunk is in the same order as the
+///   input hashes.
 ///
 /// # Returns
 ///
-/// A tuple containing:
-/// - A `Vec<u8>` with all chunk data concatenated in order.
-/// - A `HashMap<u64, ChunkLocation>` that serves as the chunk index,
-///   mapping each hash to its location in the returned byte vector.
-pub fn serialize_store<H, S>(
-    store: &S,
+/// A `Result` which is:
+/// - `Ok(HashMap<H, ChunkLocation>)` on success. The `HashMap` is the complete
+///   chunk index, where each key is a chunk's hash and the value is its
+///   `ChunkLocation` (offset and length) in the final serialized data blob.
+/// - `Err(LibError::SerializationMissingChunkError)` if the
+///   `data_store_get_chunk_cb` returns empty data for any requested hash,
+///   which indicates that a required chunk is missing from the data store.
+///
+/// # Type Parameters
+///
+/// * `D`: The type of the `data_store_get_chunk_cb` callback. It must be a
+///   closure that implements `Fn(&[H]) -> Vec<Vec<u8>>`.
+/// * `H`: The generic hash type used for identifying chunks. It must be 
+///   `Copy`,
+///   `Eq`, `Hash`, and `Display`.
+pub fn serialize_store<D, H>(
     sorted_hashes: &[H],
-) -> Result<(Vec<u8>, HashMap<H, ChunkLocation>), LibError>
+    data_store_get_chunk_cb: &D
+) -> Result<HashMap<H, ChunkLocation>, LibError>
 where
+    D: Fn(&[H]) -> Vec<Vec<u8>>,
     H: Copy + Eq + std::hash::Hash + std::fmt::Display,
-    S: ChunkStore<H>,
 {
-    let total_size = sorted_hashes
-        .iter()
-        .map(|hash| store.get_chunk(hash).map_or(0, |data| data.len()))
-        .sum();
     
-    let (data_store, chunk_index, _offset) = sorted_hashes.iter().try_fold(
+    let (chunk_index, _offset) = sorted_hashes.iter().try_fold(
         (
-            Vec::with_capacity(total_size),
             HashMap::with_capacity(sorted_hashes.len()),
             0u64, //Current_offset
         ),
-        |(mut data_vec, mut index_map, mut offset), hash| {
-            if let Some(data_entry) = store.get_chunk(hash) {
-                let data = &*data_entry;
+        |(mut index_map, mut offset), hash| {
+            let data_entry = &data_store_get_chunk_cb(&[*hash])[0];
+            
+            if !data_entry.is_empty() {
+                let data = data_entry;
                 let data_len = data.len() as u64;
 
                 index_map.insert(
@@ -136,10 +154,9 @@ where
                     },
                 );
 
-                data_vec.extend_from_slice(data);
                 offset += data_len;
                 
-                Ok((data_vec, index_map, offset))
+                Ok((index_map, offset))
             } else {
                 //If a chunk is missing, return an error
                 Err(LibError::SerializationMissingChunkError(hash.to_string()))
@@ -147,13 +164,13 @@ where
         },
     )?;
 
-    Ok((data_store, chunk_index))
+    Ok(chunk_index)
 }
-
+/* Depreated and marked for removal.
 pub fn serialize_store_from_dashmap<H>(
     store: DashMap<H, Vec<u8>>,
     sorted_hashes: &[H],
-) -> Result<(Vec<u8>, HashMap<H, ChunkLocation>), LibError>
+) -> Result<(Vec<u8>, Vec<(H, ChunkLocation)>), LibError>
 where
     H: Copy + Eq + std::hash::Hash + std::fmt::Display,
 {
@@ -161,7 +178,8 @@ where
     let total_size = store.iter().map(|entry| entry.value().len()).sum();
     
     let mut data_vec = Vec::with_capacity(total_size);
-    let mut chunk_index = HashMap::with_capacity(sorted_hashes.len());
+    let mut chunk_index: Vec<(H, ChunkLocation)> = 
+        Vec::with_capacity(sorted_hashes.len());
     let mut offset = 0u64;
 
     for hash in sorted_hashes {
@@ -169,13 +187,21 @@ where
         if let Some((_, mut chunk_data)) = store.remove(hash) {
             let data_len = chunk_data.len() as u64;
 
-            chunk_index.insert(
+            /*chunk_index.insert(
                 *hash,
                 ChunkLocation {
                     offset,
-                    length: data_len as u32, // Using u64 as per our previous fixes
+                    length: data_len as u32,
                 },
-            );
+            );*/
+            chunk_index.push((
+                *hash, 
+                ChunkLocation {
+                    offset,
+                    length: data_len as u32,
+                }
+            ));
+
 
             // Append the owned data. This is a fast move, not a copy.
             data_vec.append(&mut chunk_data);
@@ -186,39 +212,71 @@ where
     }
 
     Ok((data_vec, chunk_index))
-}
+}*/
 
-/// Prepares and serializes all data for the final archive.
+/// Prepares and serializes all data necessary for the final archive assembly.
 ///
-/// This function orchestrates the serialization of the primary data
-/// structures. It sorts the file manifests for consistent ordering,
-/// then serializes the data store into a single byte vector and creates
-/// a corresponding chunk index. The result is a tuple containing all
-/// components needed for the final archival step.
+/// This function acts as a final preparation step before the archive is
+/// constructed. It takes the collected file metadata and the unique data 
+/// chunks and organizes them into a consistent, serializable format.
+///
+/// The key operations performed are:
+/// 1.  **Sorting the File Manifest**: It converts the file manifest from a
+///     `DashMap` into a `Vec` and sorts it alphabetically by filename. This
+///     ensures that the file listing in the final archive is deterministic.
+/// 2.  **Sorting Chunk Metadata**: For each file in the manifest, it sorts the
+///     chunk metadata by the original byte offset. This is critical for 
+///     ensuring that files can be correctly reconstructed in order during 
+///     extraction.
+/// 3.  **Collecting and Sorting Hashes**: It retrieves all unique chunk hashes
+///     from the data store (via the `data_store_key_cb`) and sorts them. This
+///     provides a canonical order for both the chunk index and the compressed
+///     data blob.
+/// 4.  **Generating the Chunk Index**: It calls the `serialize_store` function
+///     to create the final chunk index, which maps each sorted hash to its
+///     location in the conceptual data blob.
 ///
 /// # Arguments
 ///
-/// * `file_manifest`: A map of filenames to their manifest data.
-/// * `data_store`: A map of chunk hashes to their raw byte data.
+/// * `file_manifest`: A thread-safe `DashMap` where each key is a filename and
+///   the value is the corresponding `FileManifestParent` struct containing all
+///   of its metadata.
+/// * `data_store_key_cb`: A callback function that, when called, returns a
+///   complete `Vec` of all unique chunk hashes from the data store.
+/// * `data_store_get_chunk_cb`: A callback function that is passed to
+///   `serialize_store` to retrieve the byte data for a given set of hashes.
 ///
 /// # Returns
 ///
-/// A tuple containing:
-/// - A `Vec` of `FileManifestParent` sorted by filename.
-/// - A `Vec<u8>` with all chunk data concatenated in order.
-/// - A `HashMap` that serves as the chunk index.
-/// - A sorted `Vec` of all unique chunk hashes.
-pub fn serialize_uncompressed_data<H>(
+/// A `Result` which is:
+/// - `Ok` on success, containing a tuple with four elements:
+///   - `Vec<FileManifestParent<H>>`: The file manifest, sorted by filename.
+///   - `HashMap<H, ChunkLocation>`: The complete chunk index, mapping each
+///     hash to its location.
+///   - `Vec<H>`: A vector of all unique chunk hashes, sorted in a
+///     deterministic order.
+/// - `Err(LibError)` if any part of the serialization process fails, such as a
+///   missing chunk in the data store.
+///
+/// # Type Parameters
+///
+/// * `D`: The type of the `data_store_get_chunk_cb` callback.
+/// * `H`: The generic hash type, which must be `Copy`, `Ord`, `Eq`, `Hash`,
+///   and `Display`.
+/// * `K`: The type of the `data_store_key_cb` callback.
+pub fn serialize_uncompressed_data<D, H, K>(
     file_manifest: &DashMap<String, FileManifestParent<H>>,
-    data_store: &HashMap<H, Vec<u8>>
+    data_store_key_cb: &K,
+    data_store_get_chunk_cb: &D
 ) -> Result<(
     Vec<FileManifestParent<H>>/*ser_file_manifest */, 
-    Vec<u8> /*ser_data_store */, 
     HashMap<H, ChunkLocation> /*chunk_index */,
     Vec<H> /*sorted_hashes */
 ), LibError>
 where
+    D: Fn(&[H]) -> Vec<Vec<u8>>,
     H: Copy + Ord + Eq + std::hash::Hash + std::fmt::Display,
+    K: Fn() -> Vec<H>
 {
     let mut ser_file_manifest = dashmap_values_to_vec(file_manifest);
 
@@ -230,15 +288,15 @@ where
         fmp.chunk_metadata.sort_by_key(|metadata| metadata.offset);
     });
 
-    let mut sorted_hashes: Vec<H> = data_store.keys().copied().collect();
+    let mut sorted_hashes: Vec<H> = data_store_key_cb();
     
     sorted_hashes.sort_unstable();
 
-    let (ser_data_store, chunk_index) = serialize_store(data_store, &sorted_hashes)?;
+    let chunk_index: HashMap<H, ChunkLocation> = 
+        serialize_store(&sorted_hashes, data_store_get_chunk_cb)?;
     
     Ok((
         ser_file_manifest, 
-        ser_data_store, 
         chunk_index, 
         sorted_hashes
     ))
