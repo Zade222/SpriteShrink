@@ -13,50 +13,6 @@ use dashmap::DashMap;
 use crate::lib_error_handling::LibError;
 use crate::lib_structs::{ChunkLocation, FileManifestParent};
 
-/// A trait abstracting access to a key-value store of chunk data.
-///
-/// This trait provides a generic interface for retrieving chunk data from
-/// different underlying map implementations, such as `HashMap` or `DashMap`.
-/// It is used to allow serialization logic to operate on either a
-/// thread-safe or non-thread-safe data store without duplication.
-/*pub trait ChunkStore<H: Eq + std::hash::Hash> {
-    /// Retrieves a reference to a chunk's data by its hash.
-    ///
-    /// # Arguments
-    ///
-    /// * `hash`: The unique `u64` hash of the chunk to retrieve.
-    ///
-    /// # Returns
-    ///
-    /// An `Option` containing a reference to the chunk's byte `Vec`.
-    /// The reference is wrapped in a type that dereferences to `Vec<u8>`.
-    /// Returns `None` if no chunk with the specified hash is found.
-    fn get_chunk(&self, hash: &H) -> 
-        Option<impl std::ops::Deref<Target = Vec<u8>>>;
-}*/
-
-/// Implements `ChunkStore` for a standard, single-threaded `HashMap`.
-///
-/// This implementation allows the generic serialization functions to
-/// operate on a `HashMap` that maps chunk hashes to their byte data.
-/*impl <H: Eq + std::hash::Hash> ChunkStore<H> for HashMap<H, Vec<u8>> {
-    fn get_chunk(&self, hash: &H) -> Option<impl std::ops::Deref<Target = Vec<u8>>> {
-        self.get(hash)
-    }
-}
-
-/// Implements `ChunkStore` for a thread-safe `DashMap`.
-///
-/// This implementation allows the generic serialization functions to
-/// operate on a `DashMap`. It provides read access to the map in a
-/// concurrent context, returning a read guard that dereferences to the
-/// chunk's data.
-impl <H: Eq + std::hash::Hash + Clone> ChunkStore<H> for DashMap<H, Vec<u8>> {
-    fn get_chunk(&self, hash: &H) -> Option<impl std::ops::Deref<Target = Vec<u8>>> {
-        self.get(hash)
-    }
-}*/
-
 /// Extracts all values from a DashMap into a vector.
 ///
 /// This utility function iterates over a `DashMap`, clones each value,
@@ -166,53 +122,6 @@ where
 
     Ok(chunk_index)
 }
-/* Depreated and marked for removal.
-pub fn serialize_store_from_dashmap<H>(
-    store: DashMap<H, Vec<u8>>,
-    sorted_hashes: &[H],
-) -> Result<(Vec<u8>, Vec<(H, ChunkLocation)>), LibError>
-where
-    H: Copy + Eq + std::hash::Hash + std::fmt::Display,
-{
-    // Pre-calculate the total size for a single allocation.
-    let total_size = store.iter().map(|entry| entry.value().len()).sum();
-    
-    let mut data_vec = Vec::with_capacity(total_size);
-    let mut chunk_index: Vec<(H, ChunkLocation)> = 
-        Vec::with_capacity(sorted_hashes.len());
-    let mut offset = 0u64;
-
-    for hash in sorted_hashes {
-        // Use `remove` to take ownership of the chunk's Vec<u8>.
-        if let Some((_, mut chunk_data)) = store.remove(hash) {
-            let data_len = chunk_data.len() as u64;
-
-            /*chunk_index.insert(
-                *hash,
-                ChunkLocation {
-                    offset,
-                    length: data_len as u32,
-                },
-            );*/
-            chunk_index.push((
-                *hash, 
-                ChunkLocation {
-                    offset,
-                    length: data_len as u32,
-                }
-            ));
-
-
-            // Append the owned data. This is a fast move, not a copy.
-            data_vec.append(&mut chunk_data);
-            offset += data_len;
-        } else {
-            return Err(LibError::SerializationMissingChunkError(hash.to_string()));
-        }
-    }
-
-    Ok((data_vec, chunk_index))
-}*/
 
 /// Prepares and serializes all data necessary for the final archive assembly.
 ///

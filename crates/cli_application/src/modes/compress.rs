@@ -177,7 +177,7 @@ where
     };
 
     let db_info = Arc::new(DBInfo {
-        db: db,
+        db,
         db_def: db_data_store
     });
 
@@ -245,7 +245,7 @@ where
                 db_info_ins_clone.entry(*hash).or_insert(data.to_vec());
             }
         } else {
-            batch_insert(&db_info_ret_clone, &chunk_batch).unwrap();
+            batch_insert(&db_info_ret_clone, chunk_batch).unwrap();
         }
     };
 
@@ -353,7 +353,7 @@ where
                                 .or_insert(data.to_vec());
                         }
                     } else {
-                        batch_insert(&at_db_info_clone, &chunk_batch)
+                        batch_insert(&at_db_info_clone, chunk_batch)
                             .unwrap();
                     }
                 };
@@ -1101,12 +1101,7 @@ fn process_in_memory_check (
 
     let free_mem = system_info.free_memory();
 
-    if (0.8 * free_mem as f64) > (input_data_size + 
+    (0.8 * free_mem as f64) > (input_data_size + 
         (u32::MAX as u64) + 
         ((u32::MAX / 4) as u64)) as f64
-    {
-        true
-    } else {
-        false
-    }
 }

@@ -7,19 +7,20 @@
 //! to the designated output directory.
 
 use std::{
-    fmt::Display, fs::File, hash::Hash, io::{BufWriter, Write}, path::{Path, PathBuf}
+    fmt::Display, 
+    fs::File, 
+    hash::Hash, 
+    io::{BufWriter, Write}, 
+    path::{Path, PathBuf},
 };
 use serde::{Deserialize, Serialize};
 
 use sprite_shrink::{Hashable, decompress_chunk};
 
-use crate::archive_parser::{
+use crate::{
+    archive_parser::{
     get_chunk_index, get_file_header, get_file_manifest, 
-};
-use crate::arg_handling::Args;
-use crate::error_handling::CliError;
-use crate::storage_io::{
-    read_file_data
+    }, arg_handling::Args, error_handling::CliError, storage_io::read_file_data
 };
 
 /// Executes the file extraction process from an archive.
@@ -142,24 +143,7 @@ where
         &header.chunk_index_offset, 
         &chunk_length)?;
 
-    /*If low memory is set limit reads to four workers else set to the user 
-    specified argument or let Rayon decide (which is the amount of threads the
-    host system supports) */
-    let num_threads = if args.low_memory {
-        println!("Low memory mode engaged.");
-        4
-    } else {
-        args.threads.unwrap_or(0)
-    };
-
-    /*Create worker_pool to specify the amount of threads to be used by the 
-    parallel process that follows it.*/
-    let worker_pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .build()
-        .map_err(|e| CliError::InternalError(format!(
-            "Failed to create thread pool: {e}"
-        )))?;
+    
 
     for rom in rom_indices {
         let fmp = file_manifest
@@ -215,75 +199,5 @@ where
             }
     }
 
-    /*In parallel, for each ROM file index provided, the below code
-    accomplishes the following:
-    - Get the FileManifestParent and store it in fmp.
-    - For each SSAChunkMeta in the FileManifestParent, read and decompress
-        each chunk from the compressed data store and assemble the file data 
-        in order.
-    - Prepare the output path by appending the file name to the provided 
-        output directory.
-    - Write the file to the destination.*/
-    /*worker_pool.install(|| {
-        rom_indices.par_iter().try_for_each(|rom| -> Result<(), CliError> {
-            let fmp = file_manifest
-                .get((*rom - 1)  as usize)
-                .ok_or_else(|| CliError::InvalidRomIndex(
-                    format!("ROM index {rom} is out of bounds.")
-                ))?;
-
-            let file_data: Vec<Vec<u8>> = fmp
-                .chunk_metadata
-                .par_iter()
-                .map(|scm| -> Result<Vec<u8>, CliError> {
-                    /*Get the chunk location from the chunk index.*/
-                        let chunk_location = chunk_index.get(&scm.hash)
-                            .ok_or_else(|| {
-                            CliError::InternalError(format!(
-                                "Decompression failed: Missing chunk with hash\
-                                {}",
-                                scm.hash
-                            ))
-                        })?;
-                        /*Store the chunk data offset within the compressed 
-                        store, from the ChunkLocation struct.*/
-                        let absolute_offset = 
-                            chunk_location.offset + 
-                            header.data_offset;
-                        
-                        let comp_chunk_data = read_file_data(
-                        file_path, 
-                        &absolute_offset, 
-                        &(chunk_location.length as usize)
-                        )?;
-
-                        let decompressed_chunk_data = decompress_chunk(
-                            &comp_chunk_data, 
-                            &dictionary
-                        )?;
-
-                        Ok(decompressed_chunk_data)
-                
-                }).collect::<Result<_,_ >>()?;
-
-            let final_output_path = out_dir.join(
-                &fmp.filename);
-
-            let file_data_ref: Vec<&[u8]> = file_data
-                .iter()
-                .map(Vec::as_slice)
-                .collect();
-            
-            write_file(&final_output_path, file_data_ref)?;
-
-            
-            
-            
-
-            
-
-            Ok(())
-        })
-    })?;*/
     Ok(())
-}    
+}
