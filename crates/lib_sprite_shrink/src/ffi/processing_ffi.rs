@@ -25,11 +25,11 @@ use crate::ffi::ffi_structs::{
     FFISeekInfoArrayU64, FFISeekInfoArrayU128,
     FFISSAChunkMetaU64, FFISSAChunkMetaU128, 
 };
-use crate::lib_error_handling::LibError;
+use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{SSAChunkMeta};
 use crate::processing::{
     create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory, 
-    verify_single_file, test_compression};
+    verify_single_file, test_compression, ProcessingError};
 use crate::{FileData, FileManifestParent};
 
 macro_rules! create_file_manifest_and_chunks_ffi_setter {
@@ -493,11 +493,17 @@ macro_rules! verify_single_file_ffi_setter {
                 &fmp, &veri_hash, get_chunks_closure
             ){
                 Ok(()) => FFIStatus::Ok,
-                Err(LibError::HashMismatchError(_)) => 
-                    FFIStatus::VerificationHashMismatch,
-                Err(LibError::VerificationError(_)) => 
-                    FFIStatus::VerificationMissingChunk,
-                _ => FFIStatus::InternalError,
+                Err(e) => match e {
+                    SpriteShrinkError::Processing(processing_error) 
+                        => match processing_error {
+                            ProcessingError::HashMismatchError(_) => 
+                                FFIStatus::VerificationHashMismatch,
+                            ProcessingError::VerificationError(_) => 
+                                FFIStatus::VerificationMissingChunk,
+                            _ => FFIStatus::InternalError,
+                        }
+                    _ => FFIStatus::InternalError,
+                },
             }
         }
     };
@@ -604,9 +610,12 @@ macro_rules! test_compression_ffi_setter {
                     
                     FFIStatus::Ok
                 }
-                Err(LibError::DictionaryError(_)) => 
-                    FFIStatus::DictionaryError,
-                _ => FFIStatus::InternalError,
+                Err(e) => match e {
+                    SpriteShrinkError::Processing(ProcessingError::DictionaryError(_)) => {
+                        FFIStatus::DictionaryError
+                    }
+                    _ => FFIStatus::InternalError,
+                }
             }
         }
     };
@@ -726,9 +735,12 @@ macro_rules! get_seek_chunks_ffi_setter {
 
                     FFIStatus::Ok
                 }
-                Err(LibError::SeekOutOfBounds(_))=>
-                    FFIStatus::SeekOutOfBounds,
-                _ => FFIStatus::InternalError,
+                Err(e) => match e {
+                    SpriteShrinkError::Processing(ProcessingError::SeekOutOfBounds(_)) => {
+                        FFIStatus::SeekOutOfBounds
+                    }
+                    _ => FFIStatus::InternalError,
+                }
             }
         }
     };

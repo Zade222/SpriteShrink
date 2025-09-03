@@ -9,9 +9,16 @@
 use std::collections::HashMap;
 
 use dashmap::DashMap;
+use thiserror::Error;
 
-use crate::lib_error_handling::LibError;
+use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{ChunkLocation, FileManifestParent};
+
+#[derive(Error, Debug)]
+pub enum SerializationError {
+    #[error("Chunk missing: {0}")]
+    SerializationMissingChunkError(String),
+}
 
 /// Extracts all values from a DashMap into a vector.
 ///
@@ -84,7 +91,7 @@ where
 pub fn serialize_store<D, H>(
     sorted_hashes: &[H],
     data_store_get_chunk_cb: &D
-) -> Result<HashMap<H, ChunkLocation>, LibError>
+) -> Result<HashMap<H, ChunkLocation>, SerializationError>
 where
     D: Fn(&[H]) -> Vec<Vec<u8>>,
     H: Copy + Eq + std::hash::Hash + std::fmt::Display,
@@ -115,7 +122,7 @@ where
                 Ok((index_map, offset))
             } else {
                 //If a chunk is missing, return an error
-                Err(LibError::SerializationMissingChunkError(hash.to_string()))
+                Err(SerializationError::SerializationMissingChunkError(hash.to_string()))
             }
         },
     )?;
@@ -181,7 +188,7 @@ pub fn serialize_uncompressed_data<D, H, K>(
     Vec<FileManifestParent<H>>/*ser_file_manifest */, 
     HashMap<H, ChunkLocation> /*chunk_index */,
     Vec<H> /*sorted_hashes */
-), LibError>
+), SpriteShrinkError>
 where
     D: Fn(&[H]) -> Vec<Vec<u8>>,
     H: Copy + Ord + Eq + std::hash::Hash + std::fmt::Display,

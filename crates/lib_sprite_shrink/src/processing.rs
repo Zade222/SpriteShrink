@@ -15,16 +15,38 @@ use std::{
 };
 
 use fastcdc::v2020::{Chunk, FastCDC, Normalization};
+use thiserror::Error;
 use sha2::{Digest,Sha512};
 use xxhash_rust::xxh3::{xxh3_64_with_seed, xxh3_128_with_seed};
 use zstd_sys::{self, ZDICT_params_t};
 
 use crate::archive::{compress_chunks};
-use crate::lib_error_handling::LibError;
+use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{
     FileData, FileManifestParent, ProcessedFileData, SSAChunkMeta
 };
 use crate::parsing::{SS_SEED};
+
+#[derive(Error, Debug)]
+pub enum ProcessingError {
+    #[error("Failed to generate dictionary samples")]
+    SampleGeneration,
+
+    #[error("Verification failed for file:  {0}")]
+    HashMismatchError(String),
+
+    #[error("An internal logic error occurred: {0}")]
+    InternalError(String),
+
+    #[error("Dictionary creation failed: {0}")]
+    DictionaryError(String),
+
+    #[error("Seek request is outside the file bounds: {0}")]
+    SeekOutOfBounds(String),
+
+    #[error("File Verification failed: {0}")]
+    VerificationError(String),
+}
 
 pub trait Hashable:
     //Specifies what capabilities H must have.
@@ -70,13 +92,13 @@ impl Hashable for u128 {
 pub fn process_file_in_memory(
     file_data: FileData,
     window_size: u64,
-) -> Result<Option<ProcessedFileData>, LibError> {
+) -> Result<Option<ProcessedFileData>, SpriteShrinkError> {
     if file_data.file_data.is_empty() {
         return Ok(None);
     }
 
     let veri_hash = generate_sha_512(&file_data.file_data);
-    let chunks = chunk_data(&file_data, SS_SEED, window_size)?;
+    let chunks = chunk_data(&file_data, SS_SEED, window_size);
 
     Ok(Some(ProcessedFileData {
         file_name: file_data.file_name,
@@ -126,7 +148,7 @@ fn generate_sha_512(data: &[u8]) -> [u8; 64]{
 /// - `Ok(Vec<Chunk>)` containing all the identified data chunks.
 /// - `Err(LibError)` if any internal error occurs during chunking.
 fn chunk_data(file_data: &FileData, seed: u64, window_size: u64) -> 
-    Result<Vec<Chunk>, LibError>
+    Vec<Chunk>
 {
     let chunker = FastCDC::with_level_and_seed(
         &file_data.file_data, 
@@ -135,9 +157,7 @@ fn chunk_data(file_data: &FileData, seed: u64, window_size: u64) ->
         (window_size*4) as u32, 
         Normalization::Level1, seed);
 
-    let chunks: Vec<Chunk> = chunker.collect();
-
-    Ok(chunks)
+    chunker.collect()
 }
 
 /// Creates a file manifest and a list of data chunks.
@@ -192,105 +212,6 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
     (file_manifest, chunk_data_list)
 }
 
-/* Deprecated and marked for removal
-/// Rebuilds a single file from chunks and verifies its integrity.
-///
-/// This function reconstructs a file in memory by fetching each of its
-/// data chunks from the serialized data store, using the chunk index for
-/// lookups. After reassembling the file, it computes a SHA-512 hash of
-/// the result and compares it against the original file's hash to ensure
-/// data integrity.
-///
-/// # Arguments
-///
-/// * `fmp`: A reference to the `FileManifestParent` for the file.
-/// * `ser_data_store`: A byte slice of the complete data store.
-/// * `chunk_index`: A map from chunk hashes to their locations.
-/// * `veri_hashes`: A map from filenames to their original SHA-512 hashes.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(())` if the file is rebuilt and its hash matches.
-/// - `Err(LibError)` if a chunk is missing or the hash mismatches.
-pub async fn verify_single_file<F, H>(
-    fmp: &FileManifestParent<H>,
-    veri_hash: &[u8; 64],
-    get_chunk_data: F,
-) -> Result<(), LibError> 
-where
-    F: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
-    //Required for H: being a hash key and displayable in errors.
-    H: Eq + std::hash::Hash + std::fmt::Display + Clone + Send + Sync + 'static,
-{
-    //Initiate the data hasher
-    let mut hasher = Sha512::new();
-
-    /*Store all hashes in vector. They are already in the correct order.*/
-    let chunk_hashes: Vec<H> = fmp.chunk_metadata.iter().map(|scm|
-        scm.hash.clone()
-    ).collect();
-
-    //Use arc to safely share the callback between threads.
-    let get_chunk_data_cb = Arc::new(get_chunk_data);
-
-    //Store the amount of hashes for reuse.
-    let chunk_hashes_len = chunk_hashes.len();
-
-    //Clone the arc of the callback for safe use.
-    let pre_gcd_cb = Arc::clone(&get_chunk_data_cb);
-
-    //Safely store the first hash via clone.
-    let first_hash = chunk_hashes[0].clone();
-
-    //Start the retrieval of the first chunk.
-    let mut cur_fetch_handle = spawn(async move{
-        pre_gcd_cb(&[first_hash])
-    });
-
-    /*Loop through all hashes, retrieve each, start the retrieval of the next
-    chunk, and hash the current.*/
-    for i in 0..chunk_hashes_len{
-        //Clone the arc of the callback for safe use.
-        let loop_gcd_cb = Arc::clone(&get_chunk_data_cb);
-
-        let next_fetch_handle = if i + 1 < chunk_hashes_len {
-            /*if the current index + 1 is within the amount of chunk hashes,
-            start the retrieval of the next hunk.*/
-            let next_hash = chunk_hashes[i + 1].clone();
-            Some(spawn(async move { 
-                loop_gcd_cb(&[next_hash]) 
-            }))
-        } else {
-            //If no hashes are left, value will be none.
-            None
-        };
-
-        //Store the chunk data once the worker has returned with the data.
-        let chunk_data: Vec<u8> = cur_fetch_handle.await.unwrap()[0].clone();
-
-        //Hash that chunk
-        hasher.update(&chunk_data);
-
-        /*If next_fetch_handle isn't none, move the next fetch handle to be 
-        the next current one.*/
-        if let Some(next_handle) = next_fetch_handle {
-            cur_fetch_handle = next_handle;
-        } else {
-            //This was the last chunk, so we can break the loop.
-            break;
-        }
-    }
-
-    let calculated_hash: [u8; 64] = hasher.finalize().into();
-
-    if calculated_hash.as_slice() == veri_hash{
-        Ok(())
-    } else{
-        Err(LibError::HashMismatchError(fmp.filename.clone()))
-    }
-}*/
-
 /// Verifies the integrity of a single file.
 ///
 /// This function requests each chunk of a file by fetching each of its
@@ -334,7 +255,7 @@ pub fn verify_single_file<F, H>(
     fmp: &FileManifestParent<H>,
     veri_hash: &[u8; 64],
     get_chunk_data: F,
-) -> Result<(), LibError>
+) -> Result<(), SpriteShrinkError>
 where
     F: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
     H: Eq + std::hash::Hash + std::fmt::Display + Clone + Send + Sync + 'static,
@@ -382,7 +303,7 @@ where
     let calculated_hash: [u8; 64] = hasher.finalize().into();
 
     //Clean up threads and propogate errors if needed.
-    fetch_handle.join().map_err(|_| LibError::InternalLibError(
+    fetch_handle.join().map_err(|_| ProcessingError::InternalError(
         "Chunk fetching thread panicked.".to_string()))?;
 
     /*Compare the generated hash with the pregenerated hash and return OK if
@@ -390,7 +311,7 @@ where
     if calculated_hash.as_slice() == veri_hash {
         Ok(())
     } else {
-        Err(LibError::HashMismatchError(fmp.filename.clone()))
+        Err(ProcessingError::HashMismatchError(fmp.filename.clone()).into())
     }
 }
 
@@ -437,7 +358,7 @@ pub fn gen_zstd_opt_dict(
     max_dict_size: usize,
     workers: usize,
     compression_level: i32
-) -> Result<Vec<u8>, LibError> {
+) -> Result<Vec<u8>, ProcessingError> {
     /*Prepares the samples for the zstd_sys function.*/
 
     /*This buffer will store the dictionary to be returned.*/
@@ -483,7 +404,7 @@ pub fn gen_zstd_opt_dict(
             std::ffi::CStr::from_ptr(zstd_sys::ZDICT_getErrorName(
                 dict_size)).to_string_lossy()
         };
-        return Err(LibError::DictionaryError(e.to_string()))
+        return Err(ProcessingError::DictionaryError(e.to_string()))
     }
 
     /*Set final length of buffer so that Rust knows how much data is within 
@@ -536,7 +457,7 @@ pub fn build_train_samples<F, H>(
     total_data_size: u64,
     target_dictionary_size: usize,
     get_chunk_data: &F,
-) -> Result<(Vec<u8>, Vec<usize>), LibError>
+) -> Result<(Vec<u8>, Vec<usize>), ProcessingError>
 where
     F: Fn(&[H]) -> Vec<Vec<u8>> + ?Sized,
     H: Copy + Eq + Hash + Send + Sync + 'static,
@@ -666,7 +587,7 @@ pub fn test_compression<F, H>(
     worker_count: usize,
     dictionary_size: usize,
     get_chunk_data: F,
-) -> Result<usize, LibError>
+) -> Result<usize, SpriteShrinkError>
 where
     F: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
     H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
@@ -684,7 +605,7 @@ where
         &samples_for_dict,
         &sample_sizes,
         dictionary_size, //Max dictionary size in bytes
-        ).map_err(|e| LibError::DictionaryError(e.to_string()))?;
+        ).map_err(|e| ProcessingError::DictionaryError(e.to_string()))?;
 
     //Callback wrapper for getting chunk data from host application.
     let get_chunk_data_wrapper = move |hashes: &[H]| -> Vec<(H, Vec<u8>)> {
@@ -746,7 +667,7 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     manifest: &FileManifestParent<H>,
     seek_offset: u64,
     seek_length: u64,
-) -> Result<Vec<(H, (u64, u64))>, LibError> {
+) -> Result<Vec<(H, (u64, u64))>, SpriteShrinkError> {
     //Caluclate original file size.
     let original_file_size: u64 = manifest.chunk_metadata
         .iter()
@@ -756,9 +677,9 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     /*Using the calculated file size, if the seek request is beyond the file
     size fail early.*/
     if seek_offset + seek_length > original_file_size {
-        return Err(LibError::SeekOutOfBounds(
+        return Err(ProcessingError::SeekOutOfBounds(
             "Seek request is outside the bounds of the original file.".to_string(),
-        ));
+        ).into());
     }
     
     //Prepare the return vector

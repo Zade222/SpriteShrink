@@ -9,9 +9,25 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize};
+use thiserror::Error;
 
-use crate::lib_error_handling::{LibError};
+use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{FileHeader, FileManifestParent, ChunkLocation};
+
+#[derive(Error, Debug)]
+pub enum ParsingError {
+    #[error("File header is malformed. {0}")]
+    InvalidHeader(String),
+
+    #[error("Read file is of a newer version than what this library supports.")]
+    InvalidFileVersion(),
+
+    #[error("Failed to decode file manifest: {0}")]
+    ManifestDecodeError(String),
+
+    #[error("Failed to decode chunk index: {0}")]
+    IndexDecodeError(String),
+}
 
 /// The magic number used to identify a sprite-shrink archive file.
 ///
@@ -54,22 +70,24 @@ pub const SS_SEED: u64 = 0x4202803010192019;
 /// - `Ok(FileHeader)` containing the parsed and validated header.
 /// - `Err(LibError)` if the data is malformed, the magic number is
 ///   incorrect, or the file version is unsupported.
-pub fn parse_file_header(header_data: &[u8]) -> Result<FileHeader, LibError>{
+pub fn parse_file_header(
+    header_data: &[u8]
+) -> Result<FileHeader, SpriteShrinkError>{
     //Attempt to cast the byte slice to a FileHeader.
     let file_header = 
         bytemuck::try_from_bytes::<FileHeader>(header_data)
-        .map_err(|e| LibError::InvalidHeaderError(e.to_string()))?;
+        .map_err(|e| ParsingError::InvalidHeader(e.to_string()))?;
 
     //Verify the magic number to ensure it's the correct file type.
     if file_header.magic_num != MAGIC_NUMBER {
-        return Err(LibError::InvalidHeaderError(
+        return Err(ParsingError::InvalidHeader(
             "File Magic Number is invalid.".to_string(),
-        ));
+        ).into());
     }
 
     //Check if the file version is supported by this library version.
     if file_header.file_version > SUPPORTED_VERSION {
-        return Err(LibError::FileVersionError());
+        return Err(ParsingError::InvalidFileVersion().into());
     };
 
     Ok(*file_header)
@@ -94,7 +112,7 @@ pub fn parse_file_header(header_data: &[u8]) -> Result<FileHeader, LibError>{
 ///   corruption or a format mismatch.
 pub fn parse_file_metadata<H>(
     manifest_data: &[u8]
-) -> Result<Vec<FileManifestParent<H>>, LibError>
+) -> Result<Vec<FileManifestParent<H>>, SpriteShrinkError>
 where 
     for<'de> H: serde::Deserialize<'de>
 {
@@ -102,7 +120,7 @@ where
 
     let (file_manifest, _len) =
         bincode::serde::decode_from_slice(manifest_data, config)
-            .map_err(|e| {LibError::ManifestDecodeError(e.to_string())})?;
+            .map_err(|e| {ParsingError::ManifestDecodeError(e.to_string())})?;
 
     Ok(file_manifest)
 }
@@ -123,8 +141,9 @@ where
 /// A `Result` which is:
 /// - `Ok(HashMap<u64, ChunkLocation>)` containing the parsed index.
 /// - `Err(LibError)` if the byte slice cannot be decoded.
-pub fn parse_file_chunk_index<H>(chunk_index_data: &[u8]) 
-    -> Result<HashMap<H, ChunkLocation>, LibError>
+pub fn parse_file_chunk_index<H>(
+    chunk_index_data: &[u8]
+) -> Result<HashMap<H, ChunkLocation>, SpriteShrinkError>
 where
     for<'de> H: Eq + std::hash::Hash + Deserialize<'de>,
 {
@@ -133,7 +152,7 @@ where
 
     let (bin_chunk_index, _len): (Vec<(H, ChunkLocation)>, usize) =
         bincode::serde::decode_from_slice(chunk_index_data, config)
-            .map_err(|e| {LibError::IndexDecodeError(e.to_string())})?;
+            .map_err(|e| {ParsingError::IndexDecodeError(e.to_string())})?;
 
     let chunk_index: HashMap<H, ChunkLocation> = bin_chunk_index.into_iter().collect();
 

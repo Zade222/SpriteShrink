@@ -14,9 +14,11 @@ use crate::ffi::ffi_structs::{
     FFIParsedManifestArrayU64, FFIParsedManifestArrayU128,
     FFISSAChunkMetaU64, FFISSAChunkMetaU128
 };
+use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{FileHeader, FileManifestParent};
 use crate::parsing::{
-    parse_file_chunk_index, parse_file_header, parse_file_metadata
+    parse_file_chunk_index, parse_file_header, parse_file_metadata,
+    ParsingError
 };
 
 macro_rules! parse_file_chunk_index_ffi_setter {
@@ -202,10 +204,11 @@ pub unsafe extern "C" fn parse_file_header_ffi(
             FFIStatus::Ok
         }
         Err(e) => match e {
-            crate::LibError::InvalidHeaderError(_) => 
-                FFIStatus::InvalidHeader,
-            crate::LibError::FileVersionError() => 
-                FFIStatus::UnsupportedVersion,
+            SpriteShrinkError::Parsing(parsing_error) => match parsing_error {
+                ParsingError::InvalidHeader(_) => FFIStatus::InvalidHeader,
+                ParsingError::InvalidFileVersion() => FFIStatus::UnsupportedVersion,
+                _ => FFIStatus::InternalError,
+            },
             _ => FFIStatus::InternalError,
         },
     }

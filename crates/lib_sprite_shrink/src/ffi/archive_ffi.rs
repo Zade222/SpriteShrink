@@ -9,14 +9,15 @@ use std::{
     slice,
 };
 
-use crate::archive::{ArchiveBuilder};
-use crate::lib_error_handling::LibError;
+use crate::archive::{ArchiveBuilder, ArchiveError};
 use crate::ffi::FFIStatus;
 use crate::ffi::ffi_structs::{
     FFIArchiveData, FFIChunkDataArray,
     FFIFileManifestParentU64, FFIFileManifestParentU128,
     FFIProgress
 };
+use crate::lib_error_handling::SpriteShrinkError;
+use crate::processing::ProcessingError;
 use crate::{FileManifestParent, SSAChunkMeta};
 
 //Type alias for clarity in other functions
@@ -31,7 +32,7 @@ trait ArchiveBuilderTraitU64 {
         fn set_optimize_dictionary(&mut self, optimize: bool);
 
         //This method consumes the builder
-        fn build(self: Box<Self>) -> Result<Vec<u8>, LibError>;
+        fn build(self: Box<Self>) -> Result<Vec<u8>, SpriteShrinkError>;
 }
 
 impl<'a, R, W> ArchiveBuilderTraitU64 for ArchiveBuilder<'a, u64, R, W>
@@ -59,7 +60,7 @@ where
     }
     
 
-    fn build(self: Box<Self>) -> Result<Vec<u8>, LibError> {
+    fn build(self: Box<Self>) -> Result<Vec<u8>, SpriteShrinkError> {
         (*self).build()
     }
 }
@@ -73,7 +74,7 @@ trait ArchiveBuilderTraitU128 {
         fn set_optimize_dictionary(&mut self, optimize: bool);
 
         //This method consumes the builder
-        fn build(self: Box<Self>) -> Result<Vec<u8>, LibError>;
+        fn build(self: Box<Self>) -> Result<Vec<u8>, SpriteShrinkError>;
 }
 
 impl<'a, R, W> ArchiveBuilderTraitU128 for ArchiveBuilder<'a, u128, R, W>
@@ -101,7 +102,7 @@ where
     }
     
 
-    fn build(self: Box<Self>) -> Result<Vec<u8>, LibError> {
+    fn build(self: Box<Self>) -> Result<Vec<u8>, SpriteShrinkError> {
         (*self).build()
     }
 }
@@ -541,12 +542,18 @@ macro_rules! ffi_builder_build_setter{
                     FFIStatus::Ok
                 }
                 Err(e) => match e {
-                    LibError::DictionaryError(_) =>
-                        FFIStatus::DictionaryError,
-                    LibError::CompressionError(_) =>
-                        FFIStatus::CompressionError,
-                    LibError::ThreadPoolError(_) => 
-                        FFIStatus::ThreadPoolError,
+                    SpriteShrinkError::Archive(
+                        ArchiveError::Dictionary(_)
+                    ) => FFIStatus::DictionaryError,
+                    SpriteShrinkError::Archive(
+                        ArchiveError::CompressionError(_)
+                    ) => FFIStatus::CompressionError,
+                    SpriteShrinkError::Archive(
+                        ArchiveError::ThreadPool(_)
+                    ) => FFIStatus::ThreadPoolError,
+                    SpriteShrinkError::Processing(
+                        ProcessingError::SampleGeneration
+                    ) => FFIStatus::DictionaryError,
                     _ => FFIStatus::InternalError,
                 },
             }

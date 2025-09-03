@@ -8,7 +8,7 @@
 
 use std::io;
 
-use sprite_shrink::LibError;
+use sprite_shrink::SpriteShrinkError;
 use range_parser::RangeError;
 use thiserror::Error;
 
@@ -58,7 +58,7 @@ pub enum CliError {
     InternalError(String),
 
     #[error("Library error: {0}")]
-    Lib(#[from] LibError),
+    SpriteShrinkError(#[from] SpriteShrinkError),
 
     #[error("Range parse error {0}")]
     RangeParseError(#[from] RangeError),

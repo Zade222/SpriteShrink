@@ -12,24 +12,21 @@ use std::{
     },
     fmt::{Debug, Display},
     hash::Hash,
-    io::{Read, Write},
+    io::{self, Read, Write},
     mem,
     os::raw::c_void,
     sync::{Arc, Mutex},
     thread
 };
 
+use thiserror::Error;
 use serde::Serialize;
 use zerocopy::IntoBytes;
 
 
-use crate::ffi::ffi_structs::{
-    FFIUserData, FFIProgress, FFIProgressType
-};
-
-
-use crate::lib_error_handling::LibError;
-
+use crate::{ffi::ffi_structs::{
+    FFIProgress, FFIProgressType, FFIUserData
+}, SpriteShrinkError};
 use crate::lib_structs::{
     ChunkLocation, FileHeader, FileManifestParent, Progress
 };  
@@ -37,8 +34,41 @@ use crate::lib_structs::{
 use crate::parsing::{MAGIC_NUMBER, SUPPORTED_VERSION};
 
 use crate::processing::{
-    build_train_samples, gen_zstd_opt_dict
+    build_train_samples, gen_zstd_opt_dict, ProcessingError
 };
+
+#[derive(Error, Debug)]
+pub enum ArchiveError {
+    #[error("I/O Error")]
+    Io(#[from] io::Error),
+
+    #[error("Compression failed: {0}")]
+    CompressionError(String),
+
+    #[error("Dictionary creation failed: {0}")]
+    Dictionary(String),
+
+    #[error("Thread pool creation failed: {0}")]
+    ThreadPool(String),
+
+    #[error("Failed to encode file manifest: {0}")]
+    ManifestEncodeError(String),
+
+    #[error("Worker Error {0}")]
+    WorkerError(String),
+
+    #[error("Failed to encode file manifest: {0}")]
+    IndexEncodeError(String),
+
+    #[error("A data processing step failed: {0}")]
+    ProcessingError(#[from] ProcessingError),
+
+    #[error("A data processing step failed: {0}")]
+    ZstdError(String),
+
+    #[error("Thread pool creation failed: {0}")]
+    ThreadPoolError(String),
+}
 
 unsafe impl Send for FFIUserData {}
 unsafe impl Sync for FFIUserData {}
@@ -140,7 +170,7 @@ pub fn compress_with_dict(
     data_payload: &[u8], 
     dict: &[u8], 
     level: &i32
-) -> Result<Vec<u8>, LibError> {
+) -> Result<Vec<u8>, ArchiveError> {
     //Create and initiate vector for storing compressed data bytes.
     let mut compressed_data = Vec::new();
 
@@ -233,7 +263,7 @@ pub fn compress_chunks<H, R, W>(
     compression_level: i32,
     chunk_list_read_cb: R,
     chunk_write_cb: W,
-) -> Result<Vec<(H, ChunkLocation)>, LibError>
+) -> Result<Vec<(H, ChunkLocation)>, ArchiveError>
 where
     H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
     R: Fn(&[H]) -> Vec<(H, Vec<u8>)> + Send + Sync + 'static,
@@ -260,7 +290,7 @@ where
         flume::unbounded::<(H, Vec<u8>)>();
 
     //Error channels
-    let (err_tx, err_rx) = std::sync::mpsc::channel::<LibError>();
+    let (err_tx, err_rx) = std::sync::mpsc::channel::<ArchiveError>();
 
     //Create arc for safely sharing dictionary.
     let dictionary_arc = Arc::new(dictionary.to_vec());
@@ -331,7 +361,7 @@ where
     let chunk_index_clone = Arc::clone(&chunk_index);
 
     //Create handle/thread for IO coordinator.
-    let io_handle = thread::spawn(move || -> Result<usize, LibError> {
+    let io_handle = thread::spawn(move || -> Result<usize, ArchiveError> {
         /*Tracks which chunks have been read from the source and sent to the 
         workers for compression. */
         let mut read_cursor = 0usize;
@@ -368,7 +398,7 @@ where
                     for chunk in chunk_list_read_cb(hashes_to_read) {
                         if to_compress_tx.send(chunk).is_err() {
                             //State if error occurred.
-                            return Err(LibError::InternalLibError(
+                            return Err(ArchiveError::WorkerError(
                                 "Worker pool terminated unexpectedly."
                                 .to_string()));
                         }
@@ -390,7 +420,7 @@ where
                 //Else catch error.
                 Err(_) => {
                     if write_cursor < total_chunks {
-                         return Err(LibError::InternalLibError(
+                         return Err(ArchiveError::WorkerError(
                             "Worker pool finished but not all chunks \
                             were processed.".to_string()));
                     }
@@ -584,7 +614,7 @@ where
     ///   header.
     /// - `Err(LibError)` if any step fails, such as dictionary training,
     ///   compression, or serialization.
-    pub fn build(self) -> Result<Vec<u8>, LibError> {
+    pub fn build(self) -> Result<Vec<u8>, SpriteShrinkError> {
         //Destructure self into its fields
         let ArchiveBuilder {
             ser_file_manifest,
@@ -671,7 +701,7 @@ where
             &samples_for_dict,
             &sample_sizes,
             dictionary_size as usize, //Dictionary size in bytes
-            ).map_err(|e| LibError::DictionaryError(e.to_string()))?;
+            ).map_err(|e| ArchiveError::ZstdError(e.to_string()))?;
         }
 
         //Samples are no longer needed.
@@ -731,58 +761,6 @@ where
         let mut writer = write_comp_data_arc.lock().unwrap();
         (*writer)(&empty_data, true);
 
-        /*let task_pool = {
-            let builder = rayon::ThreadPoolBuilder::new()
-                .num_threads(worker_threads);
-            
-            builder.build()
-                .map_err(|e| LibError::ThreadPoolError(
-                    format!("Failed to create thread pool: {e}"))
-                )?
-        };*/
-        /*
-        let compressed_dash: DashMap<H, Vec<u8>> = DashMap::new();
-
-        let comp_result: Result<(), LibError> = task_pool.install(|| {
-            //Report that compression is starting
-            /*self.report_progress(Progress::Compressing { 
-                total_chunks: (
-                    self.sorted_hashes.len() as u64 
-                )
-            });*/
-            
-            self.sorted_hashes.par_iter().try_for_each(|hash| {
-                let data = (get_chunk_data_arc.as_ref())(&[*hash]);
-
-                let compressed_chunk = compress_with_dict(
-                    data[0].as_slice(), 
-                    &_dictionary, 
-                    &self.compression_level)
-                    .map_err(|e| LibError::CompressionError(
-                        e.to_string()
-                    ))?;
-
-                compressed_dash.insert(*hash, compressed_chunk);
-
-                    //self.report_progress(Progress::ChunkCompressed);
-                
-                Ok(())
-            })
-        });
-
-        //Check if any of the parallel operations failed.
-        comp_result?;
-        /*
-        let (compressed_data_store, chunk_index) = 
-            serialize_store(&compressed_dash, &self.sorted_hashes)?;*/
-        */
-
-        //drop(compressed_dash);
-
-        /*println!("Serializing data");
-        let (compressed_data_store, chunk_index) = 
-            serialize_store_from_dashmap(compressed_dash, self.sorted_hashes)?;*/
-
         /*The following are now prepared:
         compressed_data store
         chunk_index
@@ -793,14 +771,14 @@ where
         //println!("Converting ser_file_manifest.");
         let bin_file_manifest = bincode::serde::encode_to_vec(
         &ser_file_manifest, config
-        ).map_err(|e| LibError::ManifestEncodeError(e.to_string()))?;
+        ).map_err(|e| ArchiveError::ManifestEncodeError(e.to_string()))?;
         
         drop(ser_file_manifest);
 
         //println!("Converting chunk_index.");
         let bin_chunk_index = bincode::serde::encode_to_vec(
         &chunk_index, config
-        ).map_err(|e| LibError::IndexEncodeError(e.to_string()))?;
+        ).map_err(|e| ArchiveError::IndexEncodeError(e.to_string()))?;
 
         drop(chunk_index);
 
@@ -841,7 +819,7 @@ where
 pub fn decompress_chunk(
     comp_chunk_data: &[u8],
     dictionary: &[u8]
-) -> Result<Vec<u8>, LibError> {
+) -> Result<Vec<u8>, SpriteShrinkError> {
     /*Create a zstd decoder with the prepared dictionary from the file
     archive.*/
     let mut decoder = zstd::stream::Decoder::with_dictionary(
