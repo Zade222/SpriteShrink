@@ -46,6 +46,9 @@ pub enum ProcessingError {
 
     #[error("File Verification failed: {0}")]
     VerificationError(String),
+
+    #[error("A thread panic occurred: {0}")]
+    ThreadPanic(String),
 }
 
 pub trait Hashable:
@@ -86,26 +89,25 @@ impl Hashable for u128 {
 /// # Returns
 ///
 /// A `Result` which is:
-/// - `Ok(Some(ProcessedFileData))` on successful processing.
-/// - `Ok(None)` if the input file data is empty.
-/// - `Err(LibError)` if chunking or other processing fails.
+/// - `Some(ProcessedFileData)` on successful processing.
+/// - `None` if the input file data is empty.
 pub fn process_file_in_memory(
     file_data: FileData,
     window_size: u64,
-) -> Result<Option<ProcessedFileData>, SpriteShrinkError> {
+) -> Option<ProcessedFileData> {
     if file_data.file_data.is_empty() {
-        return Ok(None);
+        return None;
     }
 
     let veri_hash = generate_sha_512(&file_data.file_data);
     let chunks = chunk_data(&file_data, SS_SEED, window_size);
 
-    Ok(Some(ProcessedFileData {
+    Some(ProcessedFileData {
         file_name: file_data.file_name,
         veri_hash,
         chunks,
         file_data: file_data.file_data,
-    }))
+    })
 }
 
 /// Generates a SHA-512 hash for a given data slice.
@@ -145,11 +147,12 @@ fn generate_sha_512(data: &[u8]) -> [u8; 64]{
 /// # Returns
 ///
 /// A `Result` which is:
-/// - `Ok(Vec<Chunk>)` containing all the identified data chunks.
-/// - `Err(LibError)` if any internal error occurs during chunking.
-fn chunk_data(file_data: &FileData, seed: u64, window_size: u64) -> 
-    Vec<Chunk>
-{
+/// - `Vec<Chunk>` containing all the identified data chunks.
+fn chunk_data(
+    file_data: &FileData, 
+    seed: u64, 
+    window_size: u64
+) -> Vec<Chunk> {
     let chunker = FastCDC::with_level_and_seed(
         &file_data.file_data, 
         (window_size/4) as u32, 
@@ -242,8 +245,8 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 /// A `Result` which is:
 /// - `Ok(())` if the file is successfully rebuilt and its computed hash
 ///   matches the `veri_hash`.
-/// - `Err(LibError)` if the computed hash does not match, or if a thread
-///   panics during execution.
+/// - `Err(SpriteShrinkError)` if the computed hash does not match, or if a 
+///   thread panics during execution.
 ///
 /// # Type Parameters
 ///
@@ -303,7 +306,7 @@ where
     let calculated_hash: [u8; 64] = hasher.finalize().into();
 
     //Clean up threads and propogate errors if needed.
-    fetch_handle.join().map_err(|_| ProcessingError::InternalError(
+    fetch_handle.join().map_err(|_| ProcessingError::ThreadPanic(
         "Chunk fetching thread panicked.".to_string()))?;
 
     /*Compare the generated hash with the pregenerated hash and return OK if
@@ -340,7 +343,7 @@ where
 ///
 /// A `Result` which is:
 /// - `Ok(Vec<u8>)` containing the generated dictionary data.
-/// - `Err(LibError::DictionaryError)` if the underlying zstd library
+/// - `Err(ProcessingError::DictionaryError)` if the underlying zstd library
 ///   encounters an error during the dictionary training process.
 ///
 /// # Safety
@@ -580,7 +583,7 @@ where
 ///
 /// A `Result` which is:
 /// - `Ok(usize)` containing the total estimated compressed size in bytes.
-/// - `Err(LibError)` if dictionary creation or compression fails.
+/// - `Err(SpriteShrinkError)` if dictionary creation or compression fails.
 pub fn test_compression<F, H>(
     sorted_hashes: &[H],
     total_data_size: u64,
@@ -668,7 +671,7 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     seek_offset: u64,
     seek_length: u64,
 ) -> Result<Vec<(H, (u64, u64))>, SpriteShrinkError> {
-    //Caluclate original file size.
+    //Calculate original file size.
     let original_file_size: u64 = manifest.chunk_metadata
         .iter()
         .map(|c| c.length as u64)

@@ -247,13 +247,13 @@ pub fn compress_with_dict(
 ///   index. The index is a vector of tuples, where each tuple maps a chunk's
 ///   hash to its `ChunkLocation` (offset and length) in the final compressed
 ///   data blob.
-/// - `Err(LibError)` if any part of the process fails, such as a worker thread
-///   panicking, a failure in a callback, or an internal logic error.
+/// - `Err(ArchiveError)` if any part of the process fails, such as a worker 
+///   thread panicking, a failure in a callback, or an internal logic error.
 ///
 /// # Errors
 ///
 /// This function can return an error in the following cases:
-/// - `LibError::InternalLibError` if a worker thread pool terminates
+/// - `ArchiveError::WorkerError` if a worker thread pool terminates
 ///   unexpectedly or if not all chunks are processed correctly.
 /// - Any error propagated from the compression logic within a worker thread.
 pub fn compress_chunks<H, R, W>(
@@ -612,7 +612,7 @@ where
     /// A `Result` which is:
     /// - `Ok(Vec<u8>)` containing the complete binary data of the archive 
     ///   header.
-    /// - `Err(LibError)` if any step fails, such as dictionary training,
+    /// - `Err(SpriteShrinkError)` if any step fails, such as dictionary training,
     ///   compression, or serialization.
     pub fn build(self) -> Result<Vec<u8>, SpriteShrinkError> {
         //Destructure self into its fields

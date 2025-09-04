@@ -68,7 +68,7 @@ pub const SS_SEED: u64 = 0x4202803010192019;
 ///
 /// A `Result` which is:
 /// - `Ok(FileHeader)` containing the parsed and validated header.
-/// - `Err(LibError)` if the data is malformed, the magic number is
+/// - `Err(SpriteShrinkError)` if the data is malformed, the magic number is
 ///   incorrect, or the file version is unsupported.
 pub fn parse_file_header(
     header_data: &[u8]
@@ -108,7 +108,7 @@ pub fn parse_file_header(
 ///
 /// A `Result` which is:
 /// - `Ok(Vec<FileManifestParent>)` containing the parsed file manifests.
-/// - `Err(LibError)` if the byte slice cannot be decoded due to data
+/// - `Err(SpriteShrinkError)` if the byte slice cannot be decoded due to data
 ///   corruption or a format mismatch.
 pub fn parse_file_metadata<H>(
     manifest_data: &[u8]
@@ -140,7 +140,7 @@ where
 ///
 /// A `Result` which is:
 /// - `Ok(HashMap<u64, ChunkLocation>)` containing the parsed index.
-/// - `Err(LibError)` if the byte slice cannot be decoded.
+/// - `Err(SpriteShrinkError)` if the byte slice cannot be decoded.
 pub fn parse_file_chunk_index<H>(
     chunk_index_data: &[u8]
 ) -> Result<HashMap<H, ChunkLocation>, SpriteShrinkError>

@@ -295,9 +295,8 @@ pub unsafe extern "C" fn process_file_in_memory_ffi(
     let processed_data = match process_file_in_memory(
         native_file_data, 
         window_size){
-        Ok(Some(data)) => data,
-        Ok(None) => return FFIStatus::Ok, //No error, but no data to return
-        Err(_) => return FFIStatus::InternalError,
+        Some(data) => data,
+        None => return FFIStatus::Ok, //No error, but no data to return
     };
 
     /*Convert filename String to *mut c_char to be compatible with return 

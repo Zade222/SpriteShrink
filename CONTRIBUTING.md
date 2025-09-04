@@ -145,9 +145,9 @@ A failure to meet this threshold in a proposed code change will cause the automa
 
 ### Error Handling
 
-The `lib_sprite_shrink` library defines a single, public error enum (`LibError`) that represents all possible failure conditions. All public, fallible functions in the library must use this error type in their returned `Result`.
+The `lib_sprite_shrink` library defines a single, public error enum (`SpriteShrinkError`) that represents all possible failure conditions. All public, fallible functions in the library must use this error type in their returned `Result`.
 
-When implementing new functionality, ensure that errors are handled gracefully and propagated using this `LibError` enum where appropriate.
+When implementing new functionality, ensure that errors are handled gracefully and propagated using this `SpriteShrinkError` enum where appropriate.
 
 ## 4. Reporting Issues
 

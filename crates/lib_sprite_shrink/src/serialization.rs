@@ -17,7 +17,7 @@ use crate::lib_structs::{ChunkLocation, FileManifestParent};
 #[derive(Error, Debug)]
 pub enum SerializationError {
     #[error("Chunk missing: {0}")]
-    SerializationMissingChunkError(String),
+    MissingChunk(String),
 }
 
 /// Extracts all values from a DashMap into a vector.
@@ -77,7 +77,7 @@ where
 /// - `Ok(HashMap<H, ChunkLocation>)` on success. The `HashMap` is the complete
 ///   chunk index, where each key is a chunk's hash and the value is its
 ///   `ChunkLocation` (offset and length) in the final serialized data blob.
-/// - `Err(LibError::SerializationMissingChunkError)` if the
+/// - `Err(SerializationError::SerializationMissingChunkError)` if the
 ///   `data_store_get_chunk_cb` returns empty data for any requested hash,
 ///   which indicates that a required chunk is missing from the data store.
 ///
@@ -122,7 +122,7 @@ where
                 Ok((index_map, offset))
             } else {
                 //If a chunk is missing, return an error
-                Err(SerializationError::SerializationMissingChunkError(hash.to_string()))
+                Err(SerializationError::MissingChunk(hash.to_string()))
             }
         },
     )?;
@@ -171,7 +171,7 @@ where
 ///     hash to its location.
 ///   - `Vec<H>`: A vector of all unique chunk hashes, sorted in a
 ///     deterministic order.
-/// - `Err(LibError)` if any part of the serialization process fails, such as a
+/// - `Err(SpriteShrinkError)` if any part of the serialization process fails, such as a
 ///   missing chunk in the data store.
 ///
 /// # Type Parameters

@@ -21,7 +21,8 @@ use crate::{
 /// This enum centralizes failure conditions that arise during the core
 /// processes of compression, archiving, and data verification. It is
 /// designed to be used by applications that consume this library,
-/// providing clear, specific error variants for robust handling.
+/// providing clear, specific error variants and surface interior errors 
+/// for robust handling.
 #[derive(Error, Debug)]
 pub enum SpriteShrinkError {
     #[error("An error occurred during archive processing")]
