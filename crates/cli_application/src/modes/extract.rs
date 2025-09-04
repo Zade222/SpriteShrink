@@ -189,6 +189,17 @@ where
                     &dictionary
             )?;
 
+            let decomp_chunk_hash = H::from_bytes_with_seed(
+                &decomp_chunk_data
+            );
+
+            if scm.hash != decomp_chunk_hash {
+                return Err(CliError::DataIntegrityError(format!(
+                    "chunk hash mismatch (expected: {}, calculated: {})",
+                    scm.hash, decomp_chunk_hash
+                )));
+            };
+
             writer.write_all(&decomp_chunk_data)?;
 
             Ok(())

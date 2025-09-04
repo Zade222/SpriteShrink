@@ -86,4 +86,7 @@ pub enum CliError {
     
     #[error("Chunking Error {0}")]
     FileChunkingError(#[from] fastcdc::v2020::Error),
+
+    #[error("Data integrity check failed: {0}. The archive file may be corrupt.")]
+    DataIntegrityError(String),
 }
