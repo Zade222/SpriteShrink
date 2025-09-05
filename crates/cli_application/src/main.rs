@@ -31,9 +31,9 @@ mod error_handling;
 use error_handling::{CliError,
     initiate_logging};
 mod storage_io;
-use crate::storage_io::{
-    cleanup_old_logs, load_config, files_from_dirs, organize_paths
-};
+use crate::{cli_types::SpriteShrinkConfig, storage_io::{
+    cleanup_old_logs, files_from_dirs, load_config, organize_paths
+}};
 
 #[cfg(feature = "dhat-heap")]
 use dhat::Profiler;
@@ -174,23 +174,29 @@ fn main() -> Result<(), CliError>{
     #[cfg(feature = "dhat-heap")]
     let _dhat = Profiler::new_heap();
 
-    //Load config from disk.
-    let file_cfg = match load_config() {
-        Ok(cfg) => {
-            cfg
-        },
-        Err(e) => {
-            error!(error = %e, "Failed to load application configuration.\
-                Exiting."
-            );
-
-            std::process::exit(1);
-        }
-    };
-
     //Receive and validate user specified arguments/flags where applicable.
     let matches = Args::command().get_matches();
     let args = Args::from_arg_matches(&matches)?;
+
+    //Load config from disk if the ignore_config flag isn't provided.
+    let file_cfg = if args.ignore_config {
+        debug!("Ignoring config.");
+        SpriteShrinkConfig::default()
+    } else {
+        match load_config() {
+            Ok(cfg) => {
+                debug!("Config loaded.");
+                cfg
+            },
+            Err(e) => {
+                error!(error = %e, "Failed to load application configuration.\
+                    Exiting."
+                );
+
+                std::process::exit(1);
+            }
+        }
+    };
 
     /*Determine which options supersede others between the user provided 
     flags and the on disk config.*/

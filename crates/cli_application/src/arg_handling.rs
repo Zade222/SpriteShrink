@@ -120,6 +120,12 @@ pub struct Args {
     #[arg(short, long, help_heading = "Behavior and Output Control")]
     pub threads: Option<usize>,
 
+    ///Forces SpriteShrink to not read it's config and won't create one if it
+    ///doesn't already exist. For an flags not specified, each will use 
+    ///default values.
+    #[arg(long, help_heading = "Behavior and Output Control")]
+    pub ignore_config: bool,
+
     ///Forces low-memory mode by processing files sequentially and
     ///limiting worker threads to 4 for compression.
     #[arg(long, help_heading = "Behavior and Output Control", 
