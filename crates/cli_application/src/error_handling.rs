@@ -47,6 +47,11 @@ pub enum CliError {
     #[error("Provided path does not exist. {0}")]
     InvalidPath(String),
 
+    #[error("Provided output path does not exist. \
+        Use force flag to create parent directory."
+    )]
+    InvalidOutputPath(),
+
     #[error("Invalid ROM index range format. {0}")]
     InvalidFormRomRange(String),
 

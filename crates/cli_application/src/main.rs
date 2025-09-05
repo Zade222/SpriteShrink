@@ -10,7 +10,8 @@
 use clap::{CommandFactory, FromArgMatches};
 use tracing::{
     debug,
-    error, 
+    error,
+    warn,
 };
 
 mod modes;
@@ -197,7 +198,7 @@ fn main() -> Result<(), CliError>{
 
     //Cleanup old log files according to retention policy.
     if let Err(e) = cleanup_old_logs(file_cfg.log_retention_days){
-        error!("Failed to clean up old log files. Error: {}", e);
+        warn!("Failed to clean up old log files. Error: {}", e);
     }
 
     //Initiate logging

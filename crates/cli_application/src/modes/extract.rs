@@ -8,7 +8,7 @@
 
 use std::{
     fmt::Display, 
-    fs::File, 
+    fs::{File, create_dir_all}, 
     hash::Hash, 
     io::{BufWriter, Write}, 
     path::{Path, PathBuf},
@@ -77,13 +77,15 @@ pub fn run_extraction(
             file_path, 
             out_dir, 
             rom_indices,  
-            &header
+            &header,
+            args
         ),
         2 => extract_data::<u128>(
             file_path, 
             out_dir, 
             rom_indices, 
-            &header
+            &header,
+            args
         ),
         _ => //Handle other cases or return an error for unsupported hash types
             Err(CliError::InternalError(
@@ -103,6 +105,7 @@ fn extract_data<H>(
     out_dir: &Path,
     rom_indices: &Vec<u8>,
     header: &sprite_shrink::FileHeader,
+    args: &Args,
 ) -> Result<(), CliError>
 where
     H: Hashable + 
@@ -127,23 +130,30 @@ where
     let file_manifest = get_file_manifest::<H>(
         file_path, 
         &header.man_offset, 
-        &man_length)?;
+        &man_length
+    )?;
 
     /*Read and store the zstd compression dictionary from the target file in 
     memory in the dictionary variable.*/
     let dictionary = read_file_data(
         file_path, 
         &header.dict_offset, 
-        &dictionary_length)?;
+        &dictionary_length
+    )?;
 
     /*Read and store the file zstd compression dictionary from the target 
     file in memory in the dictionary variable.*/
     let chunk_index = get_chunk_index::<H>(
         file_path, 
         &header.chunk_index_offset, 
-        &chunk_length)?;
+        &chunk_length
+    )?;
 
-    
+    if !out_dir.exists() && !args.force{
+        return Err(CliError::InvalidOutputPath())
+    } else {
+        create_dir_all(out_dir)?;
+    }
 
     for rom in rom_indices {
         let fmp = file_manifest

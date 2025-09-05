@@ -238,11 +238,6 @@ pub fn validate_args(
                     .to_string(),
             ));
         }
-        if args.force {
-            return Err(CliError::ConflictingFlagsError(
-                "--force cannot be used with --extract".to_string(),
-            ));
-        }
     }
 
     //Compression Mode

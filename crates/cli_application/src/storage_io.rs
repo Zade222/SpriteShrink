@@ -189,44 +189,6 @@ pub fn files_from_dirs(dir_paths: &[PathBuf]) -> Result<Vec<PathBuf>, CliError> 
         Ok(file_paths)
     })
 }
-/* Deprecated function. Marked for removal.
-/// Reads an entire file into memory and packages it.
-///
-/// This function takes a file path, reads its full content into a byte
-/// vector, and extracts the file name. It then returns this data
-/// encapsulated within a `FileData` struct, ready for processing.
-///
-/// # Arguments
-///
-/// * `filepath`: A `PathBuf` pointing to the file to be loaded.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(FileData)` on success, containing the file's name and content.
-/// - `Err(CliError::Io)` if the file cannot be read.
-pub fn load_file(
-    filepath: &PathBuf
-) -> Result<FileData, CliError> {
-    //Read all file data of the filepath target.
-    let file_contents = fs::read(filepath).map_err(CliError::Io)?;
-    
-    //Store the filename
-    let file_name = filepath
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default()
-        .to_string();
-    
-    //Create FileData struct containing the name and file data.
-    let file_data = FileData {
-        file_name,
-        file_data: file_contents,
-    };
-
-    //Return file data.
-    Ok(file_data)
-}*/
 
 /// Reads a specific segment of a file into a byte vector.
 ///

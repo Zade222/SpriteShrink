@@ -108,10 +108,21 @@ where
         + redb::Key
         + for<'a> redb::Value<SelfType<'a> = H>,
 {
-    
     /*Verify if the list of files paths is empty, throw error if true. */
     if file_paths.is_empty() {
         return Err(CliError::NoFilesError());
+    }
+
+    let out_dir = args.output
+        .as_ref()
+        .unwrap()
+        .parent()
+        .unwrap();
+
+    if !out_dir.exists() && !args.force{
+        return Err(CliError::InvalidOutputPath())
+    } else {
+        create_dir_all(out_dir)?;
     }
 
     /*Set OS process priority to be undertypical user facing application 
