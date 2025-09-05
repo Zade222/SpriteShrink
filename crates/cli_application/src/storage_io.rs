@@ -6,52 +6,19 @@
 //! and collecting all files from a set of directories. All functions are
 //! designed to be robust and provide clear error handling.
 
-use std::fs::{self, File, OpenOptions, remove_file};
-use std::io::{BufWriter, copy, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, File, OpenOptions, metadata, read_dir, remove_file},
+    io::{BufWriter, copy, Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
+    time::SystemTime
+};
 
-use serde::{Serialize, Deserialize};
+use directories::ProjectDirs;
 
-use crate::error_handling::CliError;
-
-/// Represents the user-configurable settings for the SpriteShrink application.
-///
-/// This struct is automatically serialized to and deserialized from a TOML 
-/// configuration file, allowing users to persist their preferred settings 
-/// across sessions. It holds all parameters related to compression, 
-/// performance, and output formatting.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct SpriteShrinkConfig {
-    pub compression_level: u8,
-    pub window_size: String,
-    pub dictionary_size: String,
-    pub hash_bit_length: u32,
-    pub auto_tune: bool,
-    pub autotune_timeout: u64,
-    pub optimize_dictionary: bool,
-    pub threads: usize,
-    pub low_memory: bool,
-    pub json_output: bool,
-    pub verbose: bool,
-}
-
-impl Default for SpriteShrinkConfig {
-    fn default() -> Self {
-        Self {
-            json_output: false,
-            compression_level: 19,
-            window_size: "2kb".to_string(),
-            dictionary_size: "16kb".to_string(),
-            hash_bit_length: 64,
-            auto_tune: false,
-            autotune_timeout: 15,
-            optimize_dictionary: false,
-            threads: 0,
-            low_memory: false,
-            verbose: false,
-        }
-    }
-}
+use crate::{
+    cli_types::{APPIDENTIFIER, SpriteShrinkConfig},
+    error_handling::CliError
+};
 
 /// A string literal representing the default, commented configuration file.
 ///
@@ -75,7 +42,7 @@ window_size = "2kb"
 # Default = "16kb"
 dictionary_size = "16kb"
 
-# Sets the hasing algorithm bit length.
+# Sets the hashing algorithm bit length.
 # Default = 64
 hash_bit_length = 64
 
@@ -91,8 +58,8 @@ autotune_timeout = 15
 
 # Enable (true) or disable (false) whether to optimze the ztd compression 
 # dictionary when it is generated. Be sure to disable when processing large 
-# amounts of data (e.g. If a single ROM exceed approximately 64 megabytes, 
-# set to false) as this step can take a significant amount of time for neglible 
+# amounts of data (e.g. If a single ROM exceeds approximately 64 megabytes, 
+# set to false) as this step can take a significant amount of time for neglible
 # gain for large amounts of data.
 # Default = false
 optimize_dictionary = false
@@ -113,6 +80,17 @@ json_output = false
 # Activates verbose output for detailed diagnostic information.
 # Default = false
 verbose = false
+
+# Specifies the amount of days the application will retain log files. Any log
+# file found to be older than the retention period, upon the application being
+# run, will be removed. A value of 0 will keep logs forever.
+# Default = 7
+log_retention_days = 7
+
+# Whether to print anything to console. True will disable printing to console
+# and false will enable.
+# Default = false
+quiet_output = false
 "#;
 
 /// Checks if a given path points to a regular file.
@@ -354,7 +332,10 @@ pub fn write_file(
 /// - `Ok(())` on a successful write operation.
 /// - `Err(CliError::Io)` if creating directories, writing the header,
 ///   reading the temporary file, or cleaning up fails.
-pub fn write_final_archive(output_path: &Path, data: &[u8]) -> Result<(), CliError> {
+pub fn write_final_archive(
+    output_path: &Path, 
+    data: &[u8]
+) -> Result<(), CliError> {
     /*Check if the parent directory of the target output exists, 
     if not create it.*/
     if let Some(dir) = output_path.parent() {
@@ -486,4 +467,49 @@ pub fn calc_tot_input_size(
     }
 
     Ok(size_sum)
+}
+
+
+pub fn cleanup_old_logs(
+    retention_days: u16
+) -> Result<(), CliError> {
+    if retention_days == 0 {
+        //A value of 0 will "keep logs forever"
+        return Ok(());
+    }
+
+    let proj_dirs = ProjectDirs::from(
+        APPIDENTIFIER.qualifier, 
+        APPIDENTIFIER.organization, 
+        APPIDENTIFIER.application)
+    .expect("Failed to find a valid project directory.");
+
+    let mut log_dir = PathBuf::from(proj_dirs.data_local_dir());
+    log_dir.push("logs");
+
+    if !log_dir.exists() {
+        return Ok(());
+    }
+
+    let now = SystemTime::now();
+    let retention_duration = std::time::Duration::from_secs(
+        retention_days as u64 * 24 * 60 * 60 //Convert to secs
+    );
+
+    for log in read_dir(log_dir)? {
+        let log = log?;
+        let path = log.path();
+
+        if path.is_file() && 
+            path.to_string_lossy().contains("debug.log") &&
+            let Ok(metadata) = metadata(&path) &&
+            let Ok(created_time) = metadata.created() &&
+            let Ok(age) = now.duration_since(created_time) &&
+            age > retention_duration {
+                remove_file(&path)?;
+            }
+    }
+
+
+    Ok(())
 }

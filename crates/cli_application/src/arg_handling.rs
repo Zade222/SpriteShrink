@@ -13,10 +13,10 @@ use std::{
 use bytesize::ByteSize;
 use clap::{ArgMatches, Parser};
 
-use crate::error_handling::CliError;
 
-use crate::storage_io::{
-    SpriteShrinkConfig
+use crate::{
+    cli_types::SpriteShrinkConfig,
+    error_handling::CliError
 };
 
 const CUSTOM_HELP_TEMPLATE: &str = "\
@@ -234,7 +234,8 @@ pub fn validate_args(
 
         if args.output.is_none() {
             return Err(CliError::MissingFlag(
-                "Output path (-o, --output) is required for extraction.".to_string(),
+                "Output path (-o, --output) is required for extraction."
+                    .to_string(),
             ));
         }
         if args.force {
@@ -248,7 +249,8 @@ pub fn validate_args(
     if !args.metadata && args.extract.is_none() {
         if args.output.is_none() {
             return Err(CliError::MissingFlag(
-                "Output path (-o) is required when in compression mode.".to_string(),
+                "Output path (-o) is required when in compression mode."
+                    .to_string(),
             ));
         }
 
@@ -313,7 +315,7 @@ pub fn validate_args(
 /// An `Args` struct where the final, merged settings are stored. This returned
 /// struct is what the application will use to control its execution.
 pub fn merge_config_and_args (
-    config: SpriteShrinkConfig,
+    config: &SpriteShrinkConfig,
     mut args: Args, 
     matches: &ArgMatches,
 ) -> Args {
@@ -353,6 +355,9 @@ pub fn merge_config_and_args (
     }
     if !arg_was_present("json") {
         args.json = config.json_output;
+    }
+    if !arg_was_present("quiet") {
+        args.quiet = config.quiet_output;
     }
 
     if args.auto_tune {

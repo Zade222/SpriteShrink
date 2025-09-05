@@ -6,11 +6,31 @@
 //! provides a clear and consistent error-handling mechanism for all
 //! of its command-line operations.
 
-use std::io;
+use std::{
+    io,
+    path::PathBuf
+};
 
 use sprite_shrink::SpriteShrinkError;
+use directories::ProjectDirs;
 use range_parser::RangeError;
 use thiserror::Error;
+use tracing::{
+    level_filters::LevelFilter,
+    error,
+};
+use tracing_appender::{
+    rolling, non_blocking::WorkerGuard,
+};
+use tracing_subscriber::{
+    prelude::*,
+    registry,
+    fmt,
+};
+
+use crate::{
+    cli_types::APPIDENTIFIER
+};
 
 /// Represents all possible errors that can occur in the application.
 ///
@@ -67,7 +87,7 @@ pub enum CliError {
     OSPriorityError(#[from] thread_priority::Error),
 
     #[error("Hash bit length error {0}")]
-    HashBitLengthError(String),
+    InvalidHashBitLength(String),
 
     #[error("Confy config error {0}")]
     ConfigError(#[from] confy::ConfyError),
@@ -89,4 +109,59 @@ pub enum CliError {
 
     #[error("Data integrity check failed: {0}. The archive file may be corrupt.")]
     DataIntegrityError(String),
+
+    #[error("Logging Error {0}")]
+    LoggingError(#[from] tracing::dispatcher::SetGlobalDefaultError),
+
+    #[error("Logging Subscriber Error {0}")]
+    LoggingSubscriberError(#[from] tracing_subscriber::util::TryInitError),
+}
+
+
+pub fn initiate_logging(
+    verbose: bool,
+    quiet: bool
+) -> Result<WorkerGuard, CliError> {
+    let proj_dirs = ProjectDirs::from(
+        APPIDENTIFIER.qualifier, 
+        APPIDENTIFIER.organization, 
+        APPIDENTIFIER.application)
+    .expect("Failed to find a valid project directory.");
+
+    let mut log_dir = PathBuf::from(proj_dirs.data_local_dir());
+    log_dir.push("logs");
+
+    let file_appender = rolling::daily(
+        log_dir, 
+        "debug.log");
+    let (non_blocking_writer, guard) = tracing_appender::non_blocking(
+        file_appender
+    );
+    
+    let file_layer = fmt::layer()
+        .json()
+        .with_writer(non_blocking_writer)
+        .with_filter(LevelFilter::ERROR);
+
+    let console_level = if quiet {
+        LevelFilter::OFF
+    } else if verbose {
+        LevelFilter::DEBUG
+    } else {
+        LevelFilter::INFO
+    };
+
+    let console_layer = fmt::layer()
+        .with_writer(std::io::stdout)
+        .without_time()
+        .with_level(false)
+        .with_target(false)
+        .with_filter(console_level);
+
+    registry()
+        .with(file_layer)
+        .with(console_layer)
+        .try_init()?;
+
+    Ok(guard)
 }

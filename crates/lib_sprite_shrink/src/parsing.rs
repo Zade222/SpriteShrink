@@ -42,7 +42,7 @@ pub static MAGIC_NUMBER: [u8; 8] = *b"SSARCHV1";
 /// This constant is used during header parsing to ensure the library
 /// does not attempt to read files created by a newer, incompatible
 /// version of the software.
-pub const SUPPORTED_VERSION: u32 = 0x00010000;
+pub static SUPPORTED_VERSION: u32 = 0x00010000;
 
 /// The seed value used for deterministic chunking and hashing.
 ///
@@ -50,7 +50,7 @@ pub const SUPPORTED_VERSION: u32 = 0x00010000;
 /// xxHash hashing function. Using a fixed seed ensures that the same
 /// file will always produce the same set of chunks and hashes, which is
 /// critical for reliable deduplication.
-pub const SS_SEED: u64 = 0x4202803010192019;
+pub static SS_SEED: u64 = 0x4202803010192019;
 
 
 /// Parses the binary header data from a sprite-shrink archive.

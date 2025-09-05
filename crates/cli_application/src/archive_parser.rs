@@ -42,7 +42,11 @@ use crate::storage_io::read_file_data;
 pub fn get_file_header(file_path: &PathBuf) -> Result<FileHeader, CliError> {
     let header_size = mem::size_of::<FileHeader>();
     
-    let byte_header_data: Vec<u8> = read_file_data(file_path, &0, &header_size)?;
+    let byte_header_data: Vec<u8> = read_file_data(
+        file_path, 
+        &0, 
+        &header_size
+    )?;
     
     let header: FileHeader = parse_file_header(&byte_header_data)?;
 
@@ -78,7 +82,11 @@ where
         + for<'de> serde::Deserialize<'de>,
 {
     //Read file manifest from file.
-    let bin_vec_manifest = read_file_data(file_path, man_offset, man_length)?;
+    let bin_vec_manifest = read_file_data(
+        file_path, 
+        man_offset, 
+        man_length
+    )?;
 
     //Parse it into the required Vec<FileManifestParent> via the library.
     parse_file_metadata(&bin_vec_manifest).map_err(CliError::from)
@@ -108,7 +116,8 @@ pub fn get_max_rom_index(file_path: &PathBuf)
 
     header.file_count.try_into().map_err(|_| {
         CliError::InternalError(
-            "The number of files in the archive exceeds the supported limit of 255.".to_string(),
+            "The number of files in the archive exceeds the supported limit of\
+                255.".to_string(),
         )
     })
 }
@@ -152,6 +161,8 @@ where
     )?;
     
     //Parse the binary data into a chunk index HashMap and return the value.
-    parse_file_chunk_index(&bin_vec_chunk_index).map_err(CliError::from)
+    parse_file_chunk_index(
+        &bin_vec_chunk_index
+    ).map_err(CliError::from)
 }
 

@@ -10,6 +10,7 @@ use std::{
 };
 
 use redb::{Database, Key, TableDefinition, Value};
+use serde::{Serialize, Deserialize};
 
 use sprite_shrink::{
     Hashable, SSAChunkMeta
@@ -65,6 +66,61 @@ pub struct FileCompleteData<H: Hashable> {
     pub chunk_meta: Vec<SSAChunkMeta<H>>
 }
 
+pub struct ProjectIdentifier {
+    pub qualifier: &'static str,
+    pub organization: &'static str,
+    pub application: &'static str
+}
+
+pub static APPIDENTIFIER: ProjectIdentifier =  ProjectIdentifier {
+    qualifier: "",
+    organization: "Zade222",
+    application: "SpriteShrink"
+};
+
+/// Represents the user-configurable settings for the SpriteShrink application.
+///
+/// This struct is automatically serialized to and deserialized from a TOML 
+/// configuration file, allowing users to persist their preferred settings 
+/// across sessions. It holds all parameters related to compression, 
+/// performance, and output formatting.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct SpriteShrinkConfig {
+    pub compression_level: u8,
+    pub window_size: String,
+    pub dictionary_size: String,
+    pub hash_bit_length: u32,
+    pub auto_tune: bool,
+    pub autotune_timeout: u64,
+    pub optimize_dictionary: bool,
+    pub threads: usize,
+    pub low_memory: bool,
+    pub json_output: bool,
+    pub verbose: bool,
+    pub log_retention_days: u16,
+    pub quiet_output: bool
+}
+
+impl Default for SpriteShrinkConfig {
+    fn default() -> Self {
+        Self {
+            json_output: false,
+            compression_level: 19,
+            window_size: "2kb".to_string(),
+            dictionary_size: "16kb".to_string(),
+            hash_bit_length: 64,
+            auto_tune: false,
+            autotune_timeout: 15,
+            optimize_dictionary: false,
+            threads: 0,
+            low_memory: false,
+            verbose: false,
+            log_retention_days: 7,
+            quiet_output: false
+        }
+    }
+}
+
 /// A resource guard that ensures a temporary database is deleted on drop.
 ///
 /// This struct implements the **RAII** (Resource Acquisition Is 
@@ -86,8 +142,4 @@ impl Drop for TempDatabase {
         let _ = std::fs::remove_file(&self.path);
     }
 }
-
-
-
-
 

@@ -32,10 +32,17 @@ use serde::Serialize;
 use sha2::{Digest,Sha512};
 use sysinfo::System;
 use thread_priority::*;
+use tracing::{
+    debug,
+    info,
+    warn
+};
 
 use crate::{
     arg_handling::Args,
-    cli_types::{ChunkMessage, DBInfo, FileCompleteData, TempDatabase},
+    cli_types::{
+        ChunkMessage, DBInfo, FileCompleteData, TempDatabase, APPIDENTIFIER
+    },
     db_transactions::{batch_insert, get_chunks, get_keys, get_tot_data_size},
     error_handling::CliError,
     storage_io::{
@@ -152,9 +159,9 @@ where
         .to_string();
 
     let proj_dirs = ProjectDirs::from(
-        "", 
-        "Zade222", 
-        "SpriteShrink")
+        APPIDENTIFIER.qualifier, 
+        APPIDENTIFIER.organization, 
+        APPIDENTIFIER.application)
     .unwrap();
 
     let cache_dir = proj_dirs.cache_dir();
@@ -185,12 +192,11 @@ where
 
     /*Stores the chunk metadata for each file. 
     The key is the file name and the value is a FileManifestParent struct.*/
-    let mut _file_manifest: DashMap<String, FileManifestParent<H>> = DashMap::new();
+    let mut _file_manifest: DashMap<
+        String, 
+        FileManifestParent<H>
+    > = DashMap::new();
     
-    //let mut data_store: HashMap<H, Vec<u8>> = HashMap::new();
-
-    //let arc_map: Arc<HashMap<H, Vec<u8>> = Arc::new(HashMap::new());
-    //let data_store_arc: Arc<DashMap<H, Vec<u8>>> = Arc::new(DashMap::new());
     let data_store: Arc<DashMap<H, Vec<u8>>> = Arc::new(DashMap::new());
 
     /*Stores the SHA-512 hash for each file. 
@@ -297,9 +303,7 @@ where
         if args.window.is_none() {
 
             loop {
-                if args.verbose{
-                    println!("Testing window size: {current_window_size}");
-                }
+                debug!("Testing window size: {current_window_size}");
 
                 /*Set starting time for determining the compressed size 
                 using the current window size*/
@@ -353,8 +357,10 @@ where
                                 .or_insert(data.to_vec());
                         }
                     } else {
-                        batch_insert(&at_db_info_clone, chunk_batch)
-                            .unwrap();
+                        batch_insert(
+                            &at_db_info_clone, 
+                            chunk_batch
+                        ).unwrap();
                     }
                 };
 
@@ -436,22 +442,18 @@ where
 
                 if compressed_size > last_compressed_size {
                     //Process passed the optimal point, stop.
-                    if args.verbose{
-                        println!("Optimal window size found to be \
-                            {best_window_size} bytes.");
-                    }
+                    debug!("Optimal window size found to be \
+                        {best_window_size} bytes.");
                     break;
                 }
 
 
                 if let Some(timeout) = timeout_dur 
                     && elapsed > timeout
-                    && args.verbose
                 {
-                    println!(
-                        "Autotune for window size {current_window_size}\
-                            took too long (>{timeout:?}).Using best \
-                            result so far: {best_window_size}.",
+                    warn!("Autotune for window size {current_window_size}\
+                        took too long (>{timeout:?}).Using best \
+                        result so far: {best_window_size}."
                     );
                 }
                 
@@ -501,9 +503,7 @@ where
         //If dicionary size was not specified, find optimal dictionary size.
         if args.dictionary.is_none() {
             loop {
-                if args.verbose{
-                    println!("Testing dictionary size: {current_dict_size}");
-                }
+                debug!("Testing dictionary size: {current_dict_size}");
 
                 let get_chunk_data_for_test = {
                     //Clone the Arc, which is a cheap reference count bump
@@ -526,10 +526,9 @@ where
 
                 if compressed_size > last_compressed_size {
                     //Process passed the optimal point, stop.
-                    if args.verbose{
-                        println!("Optimal dictionary size found to be \
-                            {best_dictionary_size} bytes.");
-                    }
+                    debug!("Optimal dictionary size found to be \
+                        {best_dictionary_size} bytes."
+                    );
                     break;
                 }
 
@@ -566,9 +565,7 @@ where
         };
     }
 
-    if args.verbose{
-        println!("All files processed. Verifying data...");
-    }
+    debug!("All files processed. Verifying data...");
 
     /*Serialize and organize data. */
 
@@ -634,9 +631,7 @@ where
     //At this point, verification is complete. We can free all related data.
     drop(_veri_hashes);
     
-    if args.verbose{
-        println!("File verification passed!");
-    }
+    debug!("File verification passed!");
 
     /*chunk index was storing non compressed data_store locations and is no 
     longer needed.*/
@@ -648,7 +643,6 @@ where
     /*Make separate vars for storing quiet and verbose arguments due to 
     closure using move.*/
     let is_quiet = args.quiet;
-    let is_verbose = args.verbose;
     
     /*Creates a callback function that updates the progress as milestones are
     met and prints a progress bar.
@@ -662,11 +656,11 @@ where
         let mut bar_guard = progress_bar_clone.lock().unwrap();
         
         match progress {
-            Progress::GeneratingDictionary if is_verbose => {
-                println!("Generating compression dictionary...");
+            Progress::GeneratingDictionary => {
+                debug!("Generating compression dictionary...");
             }
-            Progress::DictionaryDone if is_verbose => {
-                println!("Dictionary created.");
+            Progress::DictionaryDone => {
+                debug!("Dictionary created.");
             }
             Progress::Compressing { total_chunks } => {
                 let new_bar = ProgressBar::new(total_chunks);
@@ -686,11 +680,8 @@ where
                     bar.inc(1);
                 }
             }
-            Progress::Finalizing if is_verbose => {
-                println!("Finalizing archive...");
-            }
-            _ =>{
-
+            Progress::Finalizing => {
+                debug!("Finalizing archive...");
             }
         }
     };
@@ -774,10 +765,10 @@ where
     //Write ssmc header to disk and append it with compressed data.
     write_final_archive(&final_output_path, &ssmc_data)?;
 
-    if !args.quiet {
-        println!("Successfully created sprite-shrink multicart archive at: \
-            {final_output_path:?}");
-    }
+    info!(
+        "Successfully created sprite-shrink multicart archive at: \
+            {final_output_path:?}"
+    );
 
     Ok(())
 }

@@ -14,6 +14,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use serde::{Deserialize, Serialize};
+use tracing::{
+    debug
+};
 
 use sprite_shrink::{Hashable, decompress_chunk};
 
@@ -73,15 +76,13 @@ pub fn run_extraction(
         1 => extract_data::<u64>(
             file_path, 
             out_dir, 
-            rom_indices, 
-            args, 
+            rom_indices,  
             &header
         ),
         2 => extract_data::<u128>(
             file_path, 
             out_dir, 
             rom_indices, 
-            args, 
             &header
         ),
         _ => //Handle other cases or return an error for unsupported hash types
@@ -101,7 +102,6 @@ fn extract_data<H>(
     file_path: &PathBuf,
     out_dir: &Path,
     rom_indices: &Vec<u8>,
-    args: &Args,
     header: &sprite_shrink::FileHeader,
 ) -> Result<(), CliError>
 where
@@ -205,9 +205,7 @@ where
             Ok(())
         })?;
 
-        if args.verbose{
-                println!("{} extracted successfully", &fmp.filename);
-            }
+        debug!("{} extracted successfully", &fmp.filename);
     }
 
     Ok(())

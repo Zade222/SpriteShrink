@@ -8,6 +8,10 @@
 //! other components of the CLI application.
 
 use clap::{CommandFactory, FromArgMatches};
+use tracing::{
+    debug,
+    error, 
+};
 
 mod modes;
 use modes::{run_compression, run_extraction, run_info};
@@ -23,11 +27,11 @@ mod cli_types;
 mod db_transactions;
 
 mod error_handling;
-use error_handling::CliError;
-    
+use error_handling::{CliError,
+    initiate_logging};
 mod storage_io;
 use crate::storage_io::{
-    load_config, files_from_dirs, organize_paths
+    cleanup_old_logs, load_config, files_from_dirs, organize_paths
 };
 
 #[cfg(feature = "dhat-heap")]
@@ -70,8 +74,12 @@ fn run(args: &Args) -> Result<(), CliError> {
                     "Only one file is supported for extraction.".to_string(),
                 ));
             }
-            let file_path = file_paths.first().ok_or_else(CliError::NoFilesError)?;
-            let indices: Vec<u8> = range_parser::parse::<u8>(extract_str)?;
+            let file_path = file_paths.first().ok_or_else(
+                CliError::NoFilesError
+            )?;
+            let indices: Vec<u8> = range_parser::parse::<u8>(
+                extract_str
+            )?;
             
             if let Some(max_arg_index) = indices.iter().max().cloned() {
                 let file_max_index: u8 = get_max_rom_index(file_path)?;
@@ -86,44 +94,59 @@ fn run(args: &Args) -> Result<(), CliError> {
             }
 
             let output_path = args.output.as_ref().ok_or_else(|| {
-            CliError::MissingFlag("Output path (-o, --output) is required for extraction.".to_string())
+                CliError::MissingFlag("Output path (-o, --output) is required \
+                    for extraction.".to_string())
             })?;
 
-            run_extraction(&file_paths[0], output_path, &indices, args)?;
+            debug!("Mode: Extract");
+            run_extraction(
+                &file_paths[0], 
+                output_path, 
+                &indices, 
+                args
+            )?;
         }
         
         (None, true) =>{
             match file_paths.len() {
-                1 => run_info(&file_paths[0], args.json)?,
+                1 => {
+                    debug!("Mode: Info");
+                    run_info(&file_paths[0], args.json)?
+                },
                 0 => return Err(CliError::NoFilesError()),
                 _ => {
                     if !dir_paths.is_empty() {
                         return Err(CliError::DirError(
-                            "Metadata flag does not support ingesting directories.".to_string(),
+                            "Metadata flag does not support ingesting \
+                            directories.".to_string(),
                         ));
                     }
                     return Err(CliError::MultiFileError(
-                        "Only one file is supported with metadata flag.".to_string(),
+                        "Only one file is supported with metadata flag."
+                            .to_string(),
                     ));
                 }
             }
         }
         (None, false) => {
+            debug!("Mode: Compress");
             let hash_bit_length = args.hash_bit_length.unwrap_or(64);
 
             match hash_bit_length{
                 64 => run_compression::<u64>(file_paths, args, &1)?,
                 128 => run_compression::<u128>(file_paths, args, &2)?,
-                _ => return Err(CliError::HashBitLengthError(
-                    "Invalid hash bit length. Must be 64 or 128.".to_string(),
+                _ => return Err(CliError::InvalidHashBitLength(
+                    "Must be 64 or 128.".to_string(),
                 )),
             }
         }
 
         (Some(_), true) => {
-            //This case is already handled by validate_args, but we can be explicit.
+            /*This case is already handled by validate_args, but we can be 
+            explicit.*/
             return Err(CliError::ConflictingFlagsError(
-                "Metadata and extraction modes cannot be used simultaneously.".to_string(),
+                "Metadata and extraction modes cannot be used simultaneously."
+                    .to_string(),
             ));
         }
     }
@@ -150,26 +173,65 @@ fn main() -> Result<(), CliError>{
     #[cfg(feature = "dhat-heap")]
     let _dhat = Profiler::new_heap();
 
-    //Initiate logging
-    /*Line for initiating logging needed. Must be started as early as possible
-    in application logic.*/
-
     //Load config from disk.
-    let file_cfg = load_config()?;
+    let file_cfg = match load_config() {
+        Ok(cfg) => {
+            cfg
+        },
+        Err(e) => {
+            error!(error = %e, "Failed to load application configuration.\
+                Exiting."
+            );
+
+            std::process::exit(1);
+        }
+    };
 
     //Receive and validate user specified arguments/flags where applicable.
     let matches = Args::command().get_matches();
     let args = Args::from_arg_matches(&matches)?;
 
-    /*Determine which options supercede others between the user provided 
+    /*Determine which options supersede others between the user provided 
     flags and the on disk config.*/
-    let final_args = merge_config_and_args(file_cfg, args, &matches);
+    let final_args = merge_config_and_args(&file_cfg, args, &matches);
+
+    //Cleanup old log files according to retention policy.
+    if let Err(e) = cleanup_old_logs(file_cfg.log_retention_days){
+        error!("Failed to clean up old log files. Error: {}", e);
+    }
+
+    //Initiate logging
+    let _guard = initiate_logging(
+        final_args.verbose, 
+        final_args.quiet
+    )?;
 
     //Further validate and check for conflicting options.
-    validate_args(&final_args, &matches)?;
+    match validate_args(&final_args, &matches) {
+        Ok(_) => {
+            debug!("Command-line arguments are valid.");
+        },
+        Err(e) => {
+            error!(error = %e, "Invalid command-line arguments. \
+                Please verify input."
+            );
+            eprintln!("\nError: {}", e);
+
+            std::process::exit(1);
+        }
+    }
     
     //Begin application logic.
-    run(&final_args)?;
+    match run(&final_args){
+        Ok(_) => {
+            debug!("Application completed task successfully.");
+        },
+        Err(e) => {
+            error!("Application encountered an error and has exited.\
+                Error: {}", e
+            );
+        }
+    };
 
     Ok(())
 }
