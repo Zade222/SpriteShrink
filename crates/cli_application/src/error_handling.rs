@@ -247,3 +247,40 @@ pub fn initiate_logging(
 
     
 }
+
+/// Converts a byte offset within a string slice to a 1-based line and column
+/// number.
+///
+/// This utility function is useful for creating human-readable error messages
+/// that point to a specific location in a text file, such as a configuration
+/// file. It iterates through the string's characters to calculate the line and
+/// column corresponding to the given byte offset.
+///
+/// # Arguments
+///
+/// * `contents`: A string slice representing the full content of the file or 
+///   text.
+/// * `offset`: The byte offset (`usize`) from the beginning of the string to
+///   find the location of.
+///
+/// # Returns
+///
+/// A tuple `(usize, usize)` containing the 1-based line number and column 
+/// number.
+pub fn offset_to_line_col(contents: &str, offset: usize) -> (usize, usize) {
+    let mut line = 1;
+    let mut col = 1;
+
+    for (i, char) in contents.char_indices() {
+        if i >= offset {
+            break;
+        }
+        if char == '\n' {
+            line += 1;
+            col = 1;
+        } else {
+            col += 1;
+        }
+    }
+    (line, col)
+}

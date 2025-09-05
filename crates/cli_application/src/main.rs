@@ -7,6 +7,8 @@
 //! metadata retrieval. It serves as the central hub that connects all
 //! other components of the CLI application.
 
+use std::fs;
+
 use clap::{CommandFactory, FromArgMatches};
 use tracing::{
     debug,
@@ -28,8 +30,8 @@ mod cli_types;
 mod db_transactions;
 
 mod error_handling;
-use error_handling::{CliError,
-    initiate_logging};
+use error_handling::{
+    CliError, initiate_logging, offset_to_line_col};
 mod storage_io;
 use crate::{cli_types::SpriteShrinkConfig, storage_io::{
     cleanup_old_logs, files_from_dirs, load_config, organize_paths
@@ -155,6 +157,8 @@ fn run(args: &Args) -> Result<(), CliError> {
     Ok(())
 }
 
+
+
 /// The main entry point for the command-line application.
 ///
 /// This function initializes the application by parsing and validating
@@ -184,10 +188,30 @@ fn main() -> Result<(), CliError>{
         SpriteShrinkConfig::default()
     } else {
         match load_config() {
-            Ok(cfg) => {
-                cfg
-            },
+            Ok(cfg) => cfg,
+            Err(CliError::ConfigError(confy::ConfyError::BadTomlData(e))) =>{
+                eprintln!("There's an issue with your configuration file.");
+
+                if let Ok(path) = confy::get_configuration_file_path("spriteshrink", "spriteshrink-config") {
+                    eprintln!("File: {}", path.display());
+
+                    if let Some(span) = e.span() &&
+                        let Ok(contents) = fs::read_to_string(&path) {
+                            let (line, col) = offset_to_line_col(&contents, span.start);
+
+                            eprintln!("Error is on line {}, column {}:", line, col);
+
+                            if let Some(line_content) = contents.lines().nth(line - 1) {
+                                eprint!("\n  \x1b[93m{}\x1b[0m\n", line_content);
+                                eprintln!("  \x1b[91;1m{}^\x1b[0m", " ".repeat(col.saturating_sub(1)));
+                            }
+                    }
+                }
+                std::process::exit(1);
+            }
             Err(e) => {
+                /*Due to the logger not being initialized yet, just return the
+                error.*/
                 return Err(e);
             }
         }
