@@ -144,7 +144,7 @@ fn print_info_table<H: Clone>(
     file_manifest: Vec<FileManifestParent<H>>
 ){
     println!("Index\t| Filesize\t| Filename");
-    println!("----------------------------");
+    println!("----------------------------------");
 
     /*For each FileManifestParent in the file manifest print the index
     + 1 to be easily understood by the user and the filename of that index.*/
