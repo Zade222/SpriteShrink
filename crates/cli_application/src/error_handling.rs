@@ -117,7 +117,42 @@ pub enum CliError {
     LoggingSubscriberError(#[from] tracing_subscriber::util::TryInitError),
 }
 
-
+/// This function sets up a dual-layered logging system using the `tracing`
+/// crate. It is responsible for:
+///
+/// 1.  **Console Logging**: A layer that writes formatted log messages to
+///     standard output. The verbosity of this layer is controlled by the
+///     `verbose` and `quiet` flags.
+/// 2.  **File Logging**: A layer that writes logs in JSON format to a
+///     rolling daily log file (`debug.log`). This file is stored in a
+///     platform-appropriate local data directory. This layer is configured
+///     to only capture messages at the `ERROR` level and above.
+///
+/// The file logger uses a non-blocking writer to minimize performance
+/// impact. The returned `WorkerGuard` must be kept in scope for the
+/// duration of the application's life to ensure that all log messages
+/// are flushed to disk before the program exits.
+///
+/// # Arguments
+///
+/// * `verbose`: If `true`, the console log level is set to `DEBUG` for
+///   detailed output.
+/// * `quiet`: If `true`, all console output is suppressed by setting the
+///   log level to `OFF`. If both `verbose` and `quiet` are false, the
+///   level defaults to `INFO`.
+///
+/// # Returns
+///
+/// A `Result` which is:
+/// - `Ok(WorkerGuard)` containing the guard for the non-blocking file
+///   writer. The caller is responsible for holding onto this guard.
+/// - `Err(CliError)` if the logging system cannot be initialized.
+///
+/// # Errors
+///
+/// This function will return an error if another global logging subscriber
+/// has already been set, or if there is an issue initializing the tracing
+/// dispatcher.
 pub fn initiate_logging(
     verbose: bool,
     quiet: bool

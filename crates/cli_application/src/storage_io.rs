@@ -455,7 +455,30 @@ pub fn append_data_to_file(path: &Path, data: &[u8]) -> Result<(), CliError> {
     Ok(())
 }
 
-
+/// Calculates the total combined size of all files from a list of paths.
+///
+/// This function iterates over a slice of `PathBuf`s, retrieves the metadata
+/// for each file, and sums their individual sizes to determine the total
+/// input data size in bytes. This is useful for making decisions about
+/// memory usage, such as whether to use an in-memory or on-disk database
+/// during the compression process.
+///
+/// # Arguments
+///
+/// * `file_paths`: A slice of `PathBuf`s, where each path points to a file
+///   whose size will be included in the total.
+///
+/// # Returns
+///
+/// A `Result` which is:
+/// - `Ok(u64)` containing the total combined size of all files in bytes.
+/// - `Err(CliError::Io)` if the metadata for any file cannot be read.
+///
+/// # Errors
+///
+/// This function will return an `Err` if `fs::metadata` fails for any of the
+/// provided paths, for example, if a file does not exist or the application
+/// lacks the necessary permissions to read it.
 pub fn calc_tot_input_size(
     file_paths: &[PathBuf],
 ) -> Result<u64, CliError> {
@@ -469,7 +492,36 @@ pub fn calc_tot_input_size(
     Ok(size_sum)
 }
 
-
+/// Manages log file retention by deleting old log files.
+///
+/// This function is responsible for cleaning up the application's log
+/// directory. It identifies the platform-specific local data directory,
+/// finds any log files matching the application's naming convention
+/// (e.g., `debug.log.<date>`), and compares their creation timestamps
+/// against the specified retention period. Any log file found to be older
+/// than the retention period is removed.
+///
+/// A special value of `0` for `retention_days` will disable the cleanup
+/// process, effectively keeping all log files indefinitely.
+///
+/// # Arguments
+///
+/// * `retention_days`: The maximum age of log files to keep, in days. Files
+///   older than this will be deleted. A value of 0 disables log cleanup.
+///
+/// # Returns
+///
+/// A `Result` which is:
+/// - `Ok(())` if the cleanup process completes successfully or if no logs
+///   need to be deleted.
+/// - `Err(CliError)` if an I/O error occurs while reading the log
+///   directory or removing a file.
+///
+/// # Errors
+///
+/// This function can return an error if it encounters issues with file
+/// system operations, such as a lack of permissions to read the log
+/// directory or delete files within it.
 pub fn cleanup_old_logs(
     retention_days: u16
 ) -> Result<(), CliError> {
