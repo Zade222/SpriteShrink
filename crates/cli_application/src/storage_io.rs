@@ -233,6 +233,8 @@ pub fn read_file_data(
     Ok(file_buffer)
 }
 
+/* Function no longer needed. Marked for removal.
+
 /// Writes a collection of byte slices to a single file.
 ///
 /// This function ensures the destination directory exists, creating it
@@ -272,7 +274,7 @@ pub fn write_file(
     }
 
     Ok(())
-}
+}*/
 
 /// Writes the final archive file by combining the header and compressed data.
 ///
