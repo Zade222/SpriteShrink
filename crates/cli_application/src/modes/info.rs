@@ -13,6 +13,7 @@ use crate::archive_parser::{
     get_file_header, get_file_manifest
 };
 
+use human_bytes::human_bytes;
 use serde_json::{self, json, Value, to_string_pretty};
 
 use sprite_shrink::{
@@ -142,13 +143,19 @@ fn dispatch_print_info<H: Clone>(
 fn print_info_table<H: Clone>(
     file_manifest: Vec<FileManifestParent<H>>
 ){
-    println!("Index\t| Filename");
-    println!("------------------");
+    println!("Index\t| Filesize\t| Filename");
+    println!("----------------------------");
 
     /*For each FileManifestParent in the file manifest print the index
     + 1 to be easily understood by the user and the filename of that index.*/
     file_manifest.iter().enumerate().for_each(|(index, fmp)|{
-        println!("{}\t| {}", index + 1, fmp.filename);
+        let file_size = fmp.chunk_metadata.last().map_or(0, |last_chunk| {
+            last_chunk.offset + last_chunk.length as u64
+        });
+        println!("{}\t| {}\t| {}", 
+        index + 1, 
+        human_bytes(file_size as f64), 
+        fmp.filename);
     });
     
 }
@@ -168,10 +175,17 @@ fn print_info_json<H: Clone>(
 ){
     let files_json: Vec<Value> = file_manifest.iter()
         .enumerate()
-        .map(|(index, fmp)| json!({
-            "index": index + 1,
-            "filename": &fmp.filename
-        }))
+        .map(|(index, fmp)| {
+            let file_size = fmp.chunk_metadata.last().map_or(0, |last_chunk| {
+                last_chunk.offset + last_chunk.length as u64
+            });
+            
+            json!({
+                "index": index + 1,
+                "filename": &fmp.filename,
+                "size(bytes)": file_size
+            })
+        })
         .collect();
 
     
