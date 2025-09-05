@@ -17,7 +17,9 @@ use range_parser::RangeError;
 use thiserror::Error;
 use tracing::{
     level_filters::LevelFilter,
+    debug,
     error,
+    warn
 };
 use tracing_appender::{
     rolling, non_blocking::WorkerGuard,
@@ -160,8 +162,9 @@ pub enum CliError {
 /// dispatcher.
 pub fn initiate_logging(
     verbose: bool,
-    quiet: bool
-) -> Result<WorkerGuard, CliError> {
+    quiet: bool,
+    file_log_level: &str
+) -> Result<Option<WorkerGuard>, CliError> {
     let proj_dirs = ProjectDirs::from(
         APPIDENTIFIER.qualifier, 
         APPIDENTIFIER.organization, 
@@ -171,18 +174,6 @@ pub fn initiate_logging(
     let mut log_dir = PathBuf::from(proj_dirs.data_local_dir());
     log_dir.push("logs");
 
-    let file_appender = rolling::daily(
-        log_dir, 
-        "debug.log");
-    let (non_blocking_writer, guard) = tracing_appender::non_blocking(
-        file_appender
-    );
-    
-    let file_layer = fmt::layer()
-        .json()
-        .with_writer(non_blocking_writer)
-        .with_filter(LevelFilter::ERROR);
-
     let console_level = if quiet {
         LevelFilter::OFF
     } else if verbose {
@@ -191,17 +182,68 @@ pub fn initiate_logging(
         LevelFilter::INFO
     };
 
-    let console_layer = fmt::layer()
+    if file_log_level != "off"{
+        let console_layer = fmt::layer()
         .with_writer(std::io::stdout)
         .without_time()
         .with_level(false)
         .with_target(false)
         .with_filter(console_level);
 
-    registry()
-        .with(file_layer)
-        .with(console_layer)
-        .try_init()?;
+            let file_appender = rolling::daily(
+                log_dir, 
+                "debug.log");
+            let (non_blocking_writer, guard) = tracing_appender::non_blocking(
+                file_appender
+            );
 
-    Ok(guard)
+        let mut warning_flag: bool = false;
+
+        let log_file_level = match file_log_level {
+            "error" => LevelFilter::ERROR,
+            "warning" => LevelFilter::WARN,
+            "info" => LevelFilter::INFO,
+            "debug" => LevelFilter::DEBUG,
+            "off" => LevelFilter::OFF,
+            _ => {
+                warning_flag = true;
+                LevelFilter::ERROR
+            }
+        };
+
+        let file_layer = fmt::layer()
+            .json()
+            .with_writer(non_blocking_writer)
+            .with_filter(log_file_level);
+
+        registry()
+            .with(file_layer)
+            .with(console_layer)
+            .try_init()?;
+
+        if warning_flag {
+            warn!("Invalid log level provided in config. \
+            Defaulting level to ERROR.");
+        } else{
+            debug!("Log file enabled.");
+        }
+
+        Ok(Some(guard))
+    } else {
+        let console_layer = fmt::layer()
+            .with_writer(std::io::stdout)
+            .without_time()
+            .with_level(false)
+            .with_target(false)
+            .with_filter(console_level);
+
+        registry()
+            .with(console_layer)
+            .try_init()?;
+
+        debug!("Log file disabled.");
+        Ok(None)
+    }
+
+    
 }

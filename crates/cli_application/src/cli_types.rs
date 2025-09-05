@@ -98,7 +98,8 @@ pub struct SpriteShrinkConfig {
     pub json_output: bool,
     pub verbose: bool,
     pub log_retention_days: u16,
-    pub quiet_output: bool
+    pub quiet_output: bool,
+    pub log_level: String
 }
 
 impl Default for SpriteShrinkConfig {
@@ -116,7 +117,8 @@ impl Default for SpriteShrinkConfig {
             low_memory: false,
             verbose: false,
             log_retention_days: 7,
-            quiet_output: false
+            quiet_output: false,
+            log_level: "error".to_string()
         }
     }
 }

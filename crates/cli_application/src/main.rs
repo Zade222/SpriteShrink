@@ -207,10 +207,18 @@ fn main() -> Result<(), CliError>{
         warn!("Failed to clean up old log files. Error: {}", e);
     }
 
+    let log_level = if final_args.disable_logging || file_cfg.log_level == "off"{
+        "off".to_string()
+    } else {
+        println!("Test print");
+        file_cfg.log_level.to_string()
+    };
+
     //Initiate logging
     let _guard = initiate_logging(
         final_args.verbose, 
-        final_args.quiet
+        final_args.quiet,
+        &log_level
     )?;
 
     //Further validate and check for conflicting options.

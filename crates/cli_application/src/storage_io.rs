@@ -82,16 +82,27 @@ json_output = false
 # Default = false
 verbose = false
 
+# Whether to print anything to console. True will disable printing to console
+# and false will enable.
+# Default = false
+quiet_output = false
+
 # Specifies the amount of days the application will retain log files. Any log
 # file found to be older than the retention period, upon the application being
 # run, will be removed. A value of 0 will keep logs forever.
 # Default = 7
 log_retention_days = 7
 
-# Whether to print anything to console. True will disable printing to console
-# and false will enable.
-# Default = false
-quiet_output = false
+# Sets the log file verbosity level when enabled.
+# - error will only log errors.
+# - warning includes warning messages and the above messages (errors)
+# - info includes info messages and the above messages (errrors and warnings)
+# - debug includes debug messages and the above messages 
+#   (errrors, warnings and info)
+# - off disables the creation of a log file and won't write any messages to one
+#   if one exists
+# Default = "error"
+log_level = "error"
 "#;
 
 /// Checks if a given path points to a regular file.

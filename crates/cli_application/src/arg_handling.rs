@@ -146,6 +146,10 @@ pub struct Args {
     #[arg(short, long, help_heading = "Behavior and Output Control", 
     default_value_t = false)]
     pub quiet: bool,
+
+    ///Disables logging messages to log file.
+    #[arg(long, help_heading = "Behavior and Output Control")]
+    pub disable_logging: bool,
 }
 
 /// Validates the command-line arguments provided by the user.
