@@ -185,15 +185,10 @@ fn main() -> Result<(), CliError>{
     } else {
         match load_config() {
             Ok(cfg) => {
-                debug!("Config loaded.");
                 cfg
             },
             Err(e) => {
-                error!(error = %e, "Failed to load application configuration.\
-                    Exiting."
-                );
-
-                std::process::exit(1);
+                return Err(e);
             }
         }
     };
@@ -202,15 +197,9 @@ fn main() -> Result<(), CliError>{
     flags and the on disk config.*/
     let final_args = merge_config_and_args(&file_cfg, args, &matches);
 
-    //Cleanup old log files according to retention policy.
-    if let Err(e) = cleanup_old_logs(file_cfg.log_retention_days){
-        warn!("Failed to clean up old log files. Error: {}", e);
-    }
-
     let log_level = if final_args.disable_logging || file_cfg.log_level == "off"{
         "off".to_string()
     } else {
-        println!("Test print");
         file_cfg.log_level.to_string()
     };
 
@@ -220,6 +209,11 @@ fn main() -> Result<(), CliError>{
         final_args.quiet,
         &log_level
     )?;
+
+    //Cleanup old log files according to retention policy.
+    if let Err(e) = cleanup_old_logs(file_cfg.log_retention_days){
+        warn!("Failed to clean up old log files. Error: {}", e);
+    }
 
     //Further validate and check for conflicting options.
     match validate_args(&final_args, &matches) {

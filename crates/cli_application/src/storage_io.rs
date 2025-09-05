@@ -47,7 +47,7 @@ dictionary_size = "16kb"
 # Default = 64
 hash_bit_length = 64
 
-# Enable (true) or disable (false) whether to auto tune the window and 
+# Enable (true) or disable (false) whether to auto tune the window and/or
 # dictionary size.
 # Default = false
 auto_tune = false
@@ -69,7 +69,9 @@ optimize_dictionary = false
 # 0 means use all available cores.
 threads = 0
 
-# Enable (true) or disable (false) low memory mode.
+# Enable (true) or disable (false) low memory mode. Forces the use of a
+# temporary cache instead of processing all files in memory even if the
+# application determines there is enough memory to do so.
 # Default = false
 low_memory = false
 
@@ -124,7 +126,6 @@ fn is_regular_file(path: &Path) -> bool {
     // Get file metadata without following symlinks from system storage.
     fs::symlink_metadata(path)
         .map(|m| {
-            warn!("Ignoring symbolic link: {}", path.display());
             m.file_type().is_file()
         }) 
         .unwrap_or(false) 
@@ -198,6 +199,8 @@ pub fn files_from_dirs(dir_paths: &[PathBuf]) -> Result<Vec<PathBuf>, CliError> 
             let path = entry.path();
             if is_regular_file(&path) {
                 file_paths.push(path);
+            } else {
+                warn!("Ignoring symbolic link: {}", path.display());
             }
         }
         //Return vector of file paths.

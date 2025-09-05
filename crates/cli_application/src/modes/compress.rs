@@ -156,7 +156,11 @@ where
 
     let input_data_size = calc_tot_input_size(&file_paths)?;
 
-    let process_in_memory = process_in_memory_check(input_data_size);
+    let process_in_memory = if args.low_memory {
+        false
+    } else {
+        process_in_memory_check(input_data_size)
+    };
 
     /*The following lines will likely eventually be moved to a function in 
     db_transactions.rs*/
@@ -265,21 +269,6 @@ where
             batch_insert(&db_info_ret_clone, chunk_batch).unwrap();
         }
     };
-
-    /*Deprecated, low_memory related functionality marked for removal.
-    If low memory is set limit reads to one worker else set to the user 
-    specified argument or let Rayon decide (which is the amount of threads the
-    host system supports) */
-    /*if args.low_memory {
-        _process_threads = 1;
-        if args.verbose{
-            println!("Low memory mode engaged.")
-        }
-    } else {
-        /*0 lets Rayon decide the optimal number when thread parameter isn't 
-        used, otherwise set to thread parameter.*/
-        _process_threads = args.threads.unwrap_or(0);
-    };*/
 
     /*Create read_pool to specify the amount of threads to be used by the 
     parallel process that follows it.*/
