@@ -14,6 +14,7 @@ use std::{
 };
 
 use directories::ProjectDirs;
+use tracing::warn;
 
 use crate::{
     cli_types::{APPIDENTIFIER, SpriteShrinkConfig},
@@ -111,7 +112,10 @@ quiet_output = false
 fn is_regular_file(path: &Path) -> bool {
     // Get file metadata without following symlinks from system storage.
     fs::symlink_metadata(path)
-        .map(|m| m.file_type().is_file()) 
+        .map(|m| {
+            warn!("Ignoring symbolic link: {}", path.display());
+            m.file_type().is_file()
+        }) 
         .unwrap_or(false) 
 }
 
