@@ -189,19 +189,6 @@ pub fn validate_args(
     matches: &ArgMatches
 ) -> Result<(), CliError> {
     let arg_was_provided = |name: &str| matches.contains_id(name);
-    /*Will need to come back and work on validation logic. Due to modular
-    intent of adding compression algorithms I want to assess how to best 
-    accomplish this with the validation.*/
-
-
-    /*A basic validation case is as follows:
-     match args.algorithm.as_str() {
-        "zip" => println!("Executing ZIP compression logic..."),
-        "gzip" => println!("Executing GZIP compression logic..."),
-        "brotli" => println!("Executing Brotli compression logic..."),
-        _ => unreachable!(),
-    }*/
-
     //Check if the output file already exists and if the force flag is set.
     if let Some(output_path) = &args.output
         && !args.force
@@ -209,16 +196,13 @@ pub fn validate_args(
         && args.extract.is_none()
         && output_path.exists()
     {
-        return Err(CliError::FileExistsError(format!(
-            "Output file already exists: {}. Use --force to overwrite.",
-            output_path.display()
-        )));
+        return Err(CliError::FileExistsError(output_path.to_path_buf()));
     }
 
     //Extraction Mode ROM Index Validation 
     if let Some(rom_range) = &args.extract {
         if args.input.len() > 1 {
-            return Err(CliError::MultiFileError(
+            return Err(CliError::TooManyFiles(
                 "Only one input file is allowed for extraction.".to_string(),
             ));
         }
@@ -268,7 +252,7 @@ pub fn validate_args(
         }
 
         if args.input.len() == 1 && args.input[0].is_file() {
-            return Err(CliError::SingleFileError());
+            return Err(CliError::NotEnoughFiles);
         }
     }
 
@@ -288,7 +272,7 @@ pub fn validate_args(
        arg_was_provided("window") &&
        arg_was_provided("dictionary")
     {
-        return Err(CliError::ConflictingFlagsError(
+        return Err(CliError::ConflictingArguments(
                 "When using auto-tune only one, window or dictionary, \
                     parameters can be used.".to_string(),
             ));
@@ -365,6 +349,9 @@ pub fn merge_config_and_args (
         args.quiet = config.quiet_output;
     }
 
+    //If auto-tune is enabled (from either CLI or config), and the user
+    //did NOT provide a window/dictionary flag, set them to None to ensure
+    //auto-tuning actually runs for that parameter.
     if args.auto_tune {
         if !arg_was_present("window") {
             args.window = None;

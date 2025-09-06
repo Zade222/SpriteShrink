@@ -9,7 +9,7 @@ use std::{
     collections::HashMap,
     fmt::Display,
     mem,
-    path::PathBuf,
+    path::Path,
 };
 
 use serde::Serialize;
@@ -39,7 +39,7 @@ use crate::storage_io::read_file_data;
 /// - `Ok(FileHeader)` containing the parsed file header data.
 /// - `Err(CliError)` if reading the file fails or if the header
 ///   data cannot be correctly parsed.
-pub fn get_file_header(file_path: &PathBuf) -> Result<FileHeader, CliError> {
+pub fn get_file_header(file_path: &Path) -> Result<FileHeader, CliError> {
     let header_size = mem::size_of::<FileHeader>();
     
     let byte_header_data: Vec<u8> = read_file_data(
@@ -62,7 +62,7 @@ pub fn get_file_header(file_path: &PathBuf) -> Result<FileHeader, CliError> {
 ///
 /// # Arguments
 ///
-/// * `file_path`: A `PathBuf` pointing to the archive file.
+/// * `file_path`: A `Path` pointing to the archive file.
 /// * `man_offset`: The starting byte offset of the manifest data.
 /// * `man_length`: The total length in bytes of the manifest data.
 ///
@@ -71,7 +71,8 @@ pub fn get_file_header(file_path: &PathBuf) -> Result<FileHeader, CliError> {
 /// A `Result` which is:
 /// - `Ok(Vec<FileManifestParent>)` containing the parsed file manifest.
 /// - `Err(CliError)` if reading or parsing the manifest fails.
-pub fn get_file_manifest<H>(file_path: &PathBuf, 
+pub fn get_file_manifest<H>(
+    file_path: &Path, 
     man_offset: &u64, 
     man_length: &usize) -> Result<Vec<FileManifestParent<H>>, CliError> 
 where
@@ -101,7 +102,7 @@ where
 ///
 /// # Arguments
 ///
-/// * `file_path`: A `PathBuf` pointing to the archive file.
+/// * `file_path`: A `Path` pointing to the archive file.
 ///
 /// # Returns
 ///
@@ -109,7 +110,7 @@ where
 /// - `Ok(u8)` containing the max ROM index, which is the file count.
 /// - `Err(CliError)` if the header cannot be read or if the file
 ///   count exceeds the supported limit of 255.
-pub fn get_max_rom_index(file_path: &PathBuf)
+pub fn get_max_rom_index(file_path: &Path)
     -> Result<u8, CliError>
 {
     let header = get_file_header(file_path)?;
@@ -132,7 +133,7 @@ pub fn get_max_rom_index(file_path: &PathBuf)
 ///
 /// # Arguments
 ///
-/// * `file_path`: A `PathBuf` pointing to the archive file.
+/// * `file_path`: A `Path` pointing to the archive file.
 /// * `chunk_index_offset`: The starting byte offset of the index.
 /// * `chunk_index_length`: The total length in bytes of the index.
 ///
@@ -142,7 +143,7 @@ pub fn get_max_rom_index(file_path: &PathBuf)
 /// - `Ok(HashMap<u64, ChunkLocation>)` containing the parsed index.
 /// - `Err(CliError)` if reading the file or parsing the data fails.
 pub fn get_chunk_index<H>(
-    file_path: &PathBuf, 
+    file_path: &Path, 
     chunk_index_offset: &u64,
     chunk_index_length: &usize
 ) -> Result<HashMap<H, ChunkLocation>, CliError>

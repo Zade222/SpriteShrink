@@ -110,7 +110,7 @@ where
 {
     /*Verify if the list of files paths is empty, throw error if true. */
     if file_paths.is_empty() {
-        return Err(CliError::NoFilesError());
+        return Err(CliError::NoFilesFound());
     }
 
     let out_dir = args.output
@@ -161,6 +161,8 @@ where
     } else {
         process_in_memory_check(input_data_size)
     };
+
+
 
     /*The following lines will likely eventually be moved to a function in 
     db_transactions.rs*/
@@ -1092,7 +1094,13 @@ fn process_in_memory_check (
 
     let free_mem = system_info.free_memory();
 
-    (0.8 * free_mem as f64) > (input_data_size + 
+    if (0.8 * free_mem as f64) > (input_data_size + 
         (u32::MAX as u64) + 
-        ((u32::MAX / 4) as u64)) as f64
+        ((u32::MAX / 4) as u64)) as f64 {
+            debug!("Processing in memory.");
+            true
+        } else {
+            debug!("Processing in disk cache.");
+            false
+        }
 }

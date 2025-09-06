@@ -6,7 +6,7 @@
 //! all contained files, to the console.
 
 use std::{
-    path::PathBuf,
+    path::Path,
 };
 
 use crate::archive_parser::{
@@ -32,7 +32,7 @@ use crate::error_handling::CliError;
 ///
 /// # Arguments
 ///
-/// * `file_path`: A `PathBuf` pointing to the archive file whose
+/// * `file_path`: A `Path` pointing to the archive file whose
 ///   metadata is to be displayed.
 ///
 /// # Returns
@@ -44,20 +44,8 @@ use crate::error_handling::CliError;
 /// # Panics
 ///
 /// This function does not panic but prints directly to standard output.
-///
-/// # Examples
-///
-/// An example of the output format printed to the console:
-///
-/// ```text
-/// Index   | Filename
-/// ------------------
-/// 1       | file_a.rom
-/// 2       | file_b.rom
-/// 3       | file_c.rom
-/// ```
 pub fn run_info(
-    file_path: &PathBuf,
+    file_path: &Path,
     json: bool
 ) -> Result<(), CliError> {
     /*Get and store the parsed header from the target archive file.*/
@@ -69,25 +57,23 @@ pub fn run_info(
     /*Get the identifier for the hash type stored in the archive.*/
     let hash_bit_length = header.hash_type;
 
+    macro_rules! process_and_print {
+        ($hash_type:ty) => {{
+            let file_manifest =
+                get_file_manifest::<$hash_type>(
+                    file_path, 
+                    &header.man_offset, 
+                    &man_length
+                )?;
+            dispatch_print_info(file_manifest, json)?
+        }};
+    }
+
     /*Read and store the file manifest from the target file in memory in 
     the file_manifest variable*/
     match hash_bit_length {
-        1 => {
-            let file_manifest = get_file_manifest::<u64>(
-                file_path, 
-                &header.man_offset, 
-                &man_length
-            )?;
-            dispatch_print_info::<u64>(file_manifest, json);
-        },
-        2 => {
-            let file_manifest = get_file_manifest::<u128>(
-                file_path, 
-                &header.man_offset, 
-                &man_length
-            )?;
-            dispatch_print_info::<u128>(file_manifest, json);
-        },
+        1 => process_and_print!(u64),
+        2 => process_and_print!(u128),
         _ => {
             //Handle other cases or return an error for unsupported hash types
             return Err(CliError::InternalError(
@@ -121,13 +107,14 @@ pub fn run_info(
 fn dispatch_print_info<H: Clone>(
     file_manifest: Vec<FileManifestParent<H>>,
     json: bool,
-)
-{
+) -> Result<(), CliError>{
     if json {
-        print_info_json::<H>(file_manifest); 
+        print_info_json::<H>(file_manifest)?; 
     } else {
         print_info_table::<H>(file_manifest);
     }
+
+    Ok(())
 }
 
 /// Prints a formatted table of the file manifest's contents.
@@ -140,6 +127,18 @@ fn dispatch_print_info<H: Clone>(
 ///
 /// * `H`: The hash type used in the file manifest, which must implement
 ///   the necessary traits for serialization and display.
+/// 
+/// # Examples
+///
+/// An example of the output format printed to the console:
+///
+/// ```text
+/// Index   | Filesize      | Filename
+/// ----------------------------------
+/// 1       | 4.00 MiB      | file_a.rom
+/// 2       | 8.00 MiB      | file_b.rom
+/// 3       | 8.00 MiB      | file_c.rom
+/// ```
 fn print_info_table<H: Clone>(
     file_manifest: Vec<FileManifestParent<H>>
 ){
@@ -153,9 +152,10 @@ fn print_info_table<H: Clone>(
             last_chunk.offset + last_chunk.length as u64
         });
         println!("{}\t| {}\t| {}", 
-        index + 1, 
-        human_bytes(file_size as f64), 
-        fmp.filename);
+            index + 1, 
+            human_bytes(file_size as f64), 
+            fmp.filename
+        );
     });
     
 }
@@ -172,7 +172,7 @@ fn print_info_table<H: Clone>(
 ///   the necessary traits for serialization and display.
 fn print_info_json<H: Clone>(
     file_manifest: Vec<FileManifestParent<H>>
-){
+) -> Result<(), CliError>{
     let files_json: Vec<Value> = file_manifest.iter()
         .enumerate()
         .map(|(index, fmp)| {
@@ -191,5 +191,12 @@ fn print_info_json<H: Clone>(
     
     let output = json!(files_json);
 
-    println!("{}", to_string_pretty(&output).unwrap());
+    let pretty_json = to_string_pretty(&output)
+        .map_err(
+            |e| CliError::InternalError(e.to_string())
+        )?;
+
+    println!("{}", pretty_json);
+
+    Ok(())
 }

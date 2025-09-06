@@ -73,12 +73,12 @@ fn run(args: &Args) -> Result<(), CliError> {
     match (args.extract.as_ref(), args.metadata){
         (Some(extract_str), false) => {
             if file_paths.len() > 1 {
-                return Err(CliError::MultiFileError(
+                return Err(CliError::TooManyFiles(
                     "Only one file is supported for extraction.".to_string(),
                 ));
             }
             let file_path = file_paths.first().ok_or_else(
-                CliError::NoFilesError
+                CliError::NoFilesFound
             )?;
             let indices: Vec<u8> = range_parser::parse::<u8>(
                 extract_str
@@ -116,15 +116,15 @@ fn run(args: &Args) -> Result<(), CliError> {
                     debug!("Mode: Info");
                     run_info(&file_paths[0], args.json)?
                 },
-                0 => return Err(CliError::NoFilesError()),
+                0 => return Err(CliError::NoFilesFound()),
                 _ => {
                     if !dir_paths.is_empty() {
-                        return Err(CliError::DirError(
+                        return Err(CliError::DirectoryNotSupported(
                             "Metadata flag does not support ingesting \
                             directories.".to_string(),
                         ));
                     }
-                    return Err(CliError::MultiFileError(
+                    return Err(CliError::TooManyFiles(
                         "Only one file is supported with metadata flag."
                             .to_string(),
                     ));
@@ -147,7 +147,7 @@ fn run(args: &Args) -> Result<(), CliError> {
         (Some(_), true) => {
             /*This case is already handled by validate_args, but we can be 
             explicit.*/
-            return Err(CliError::ConflictingFlagsError(
+            return Err(CliError::ConflictingArguments(
                 "Metadata and extraction modes cannot be used simultaneously."
                     .to_string(),
             ));
@@ -190,18 +190,30 @@ fn main() -> Result<(), CliError>{
         match load_config() {
             Ok(cfg) => cfg,
             Err(CliError::ConfigError(confy::ConfyError::BadTomlData(e))) =>{
+                /*Due to the logger not being initialized yet, just return the
+                error.*/
                 eprintln!("There's an issue with your configuration file.");
 
-                if let Ok(path) = confy::get_configuration_file_path("spriteshrink", "spriteshrink-config") {
+                if let Ok(path) = confy::get_configuration_file_path(
+                    "spriteshrink", 
+                    "spriteshrink-config"
+                ) {
                     eprintln!("File: {}", path.display());
 
                     if let Some(span) = e.span() &&
                         let Ok(contents) = fs::read_to_string(&path) {
-                            let (line, col) = offset_to_line_col(&contents, span.start);
+                            let (line, col) = offset_to_line_col(
+                                &contents, 
+                                span.start
+                            );
 
-                            eprintln!("Error is on line {}, column {}:", line, col);
+                            eprintln!("Error is on line {}, column {}:", 
+                                line, col
+                            );
 
-                            if let Some(line_content) = contents.lines().nth(line - 1) {
+                            if let Some(line_content) = contents
+                            .lines()
+                            .nth(line - 1) {
                                 eprint!("\n  \x1b[93m{}\x1b[0m\n", line_content);
                                 eprintln!("  \x1b[91;1m{}^\x1b[0m", " ".repeat(col.saturating_sub(1)));
                             }

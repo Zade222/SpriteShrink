@@ -25,6 +25,7 @@ use sprite_shrink::{
 ///
 /// * `chunk_hash`: The unique hash identifier of the data chunk.
 /// * `chunk_data`: The raw binary data of the chunk.
+#[derive(Debug)]
 pub struct ChunkMessage<H: Hashable> {
         pub chunk_hash: H,
         pub chunk_data: Vec<u8>
@@ -59,6 +60,7 @@ pub struct DBInfo<'a, K: Key + 'static, V: Value + 'static>{
 /// * `chunk_count`: The total number of chunks the file was divided into.
 /// * `chunk_meta`: A vector of metadata for each chunk, including its hash and
 ///   position.
+#[derive(Debug)]
 pub struct FileCompleteData<H: Hashable> {
     pub file_name: String,
     pub verification_hash: [u8; 64],
@@ -66,16 +68,25 @@ pub struct FileCompleteData<H: Hashable> {
     pub chunk_meta: Vec<SSAChunkMeta<H>>
 }
 
+/// Defines cross-platform identifiers for the application.
+///
+/// These fields are used by crates like `directories` to locate standard
+/// paths for configuration, cache, and data directories in a way that
+/// conforms to the conventions of each operating system.
+#[derive(Debug, PartialEq, Eq)]
 pub struct ProjectIdentifier {
     pub qualifier: &'static str,
     pub organization: &'static str,
-    pub application: &'static str
+    pub application: &'static str,
+    pub config_name: &'static str
 }
 
+/// Static instance of the application's project identifiers.
 pub static APPIDENTIFIER: ProjectIdentifier =  ProjectIdentifier {
     qualifier: "",
     organization: "Zade222",
-    application: "SpriteShrink"
+    application: "SpriteShrink",
+    config_name: "SpriteShrink-config"
 };
 
 /// Represents the user-configurable settings for the SpriteShrink application.

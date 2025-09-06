@@ -44,7 +44,7 @@ use crate::{
 #[derive(Error, Debug)]
 pub enum CliError {
     #[error("I/O Error")] 
-    Io(#[from] io::Error), 
+    IoError(#[from] io::Error), 
 
     #[error("Provided path does not exist. {0}")]
     InvalidPath(String),
@@ -63,35 +63,35 @@ pub enum CliError {
     #[error("Required flag missing. {0}")]
     MissingFlag(String),
 
-    #[error("Provided path contains no files.")]
-    NoFilesError(),
+    #[error("The provided input paths contain no files.")]
+    NoFilesFound(),
 
-    #[error("Only one file provided. More than one is required.")]
-    SingleFileError(),
+    #[error("This operation requires at least two input files.")]
+    NotEnoughFiles,
 
-    #[error("Too many files provided. Only one is required for flag. {0}")]
-    MultiFileError(String),
+    #[error("Too many input files: {0}")]
+    TooManyFiles(String),
 
-    #[error("File exists. {0}")]
-    FileExistsError(String),
+    #[error("File already exists: {0}. Use --force to overwrite.")]
+    FileExistsError(PathBuf),
 
-    #[error("Directory not supported by provided flags. {0}")]
-    DirError(String),
+    #[error("Directories are not supported for this operation: {0}")]
+    DirectoryNotSupported(String),
 
-    #[error("Conflicting flags. {0}")]
-    ConflictingFlagsError(String),
+    #[error("Conflicting arguments provided: {0}")]
+    ConflictingArguments(String),
 
     #[error("An internal logic error occurred: {0}")]
     InternalError(String),
 
     #[error("Library error: {0}")]
-    SpriteShrinkError(#[from] SpriteShrinkError),
+    SpriteShrink(#[from] SpriteShrinkError),
 
     #[error("Range parse error {0}")]
-    RangeParseError(#[from] RangeError),
+    RangeParse(#[from] RangeError),
 
-    #[error("OS priority error {0}")]
-    OSPriorityError(#[from] thread_priority::Error),
+    #[error("Failed to set thread priority: {0}")]
+    ThreadPriority(#[from] thread_priority::Error),
 
     #[error("Hash bit length error {0}")]
     InvalidHashBitLength(String),
@@ -99,29 +99,38 @@ pub enum CliError {
     #[error("Confy config error {0}")]
     ConfigError(#[from] confy::ConfyError),
 
-    #[error("Confy config error {0}")]
-    ClapError(#[from] clap::Error),
+    #[error("Argument parsing error: {0}")]
+    ArgumentParsing(#[from] clap::Error),
 
-    #[error("RedB Table error {0}")]
+    #[error("Database table error {0}")]
     RedbTableError(#[from] redb::TableError),
 
-    #[error("RedB Storage error {0}")]
+    #[error("Database storage error {0}")]
     RedbStorageError(#[from] redb::StorageError),
+
+    #[error("Database transaction error {0}")]
+    RedbTransactionError(#[from] redb::TransactionError),
+
+    #[error("Database commit error {0}")]
+    RedbCommitError(#[from] redb::CommitError),
 
     #[error("Key not found {0}")]
     KeyNotFound(String),
     
-    #[error("Chunking Error {0}")]
-    FileChunkingError(#[from] fastcdc::v2020::Error),
+    #[error("File chunking error {0}")]
+    FileChunking(#[from] fastcdc::v2020::Error),
 
     #[error("Data integrity check failed: {0}. The archive file may be corrupt.")]
-    DataIntegrityError(String),
+    DataIntegrity(String),
 
     #[error("Logging Error {0}")]
     LoggingError(#[from] tracing::dispatcher::SetGlobalDefaultError),
 
     #[error("Logging Subscriber Error {0}")]
     LoggingSubscriberError(#[from] tracing_subscriber::util::TryInitError),
+
+    #[error("Serde json error {0}")]
+    SerdeJsonError(#[from] serde_json::Error),
 }
 
 /// This function sets up a dual-layered logging system using the `tracing`
@@ -267,7 +276,10 @@ pub fn initiate_logging(
 ///
 /// A tuple `(usize, usize)` containing the 1-based line number and column 
 /// number.
-pub fn offset_to_line_col(contents: &str, offset: usize) -> (usize, usize) {
+pub fn offset_to_line_col(
+    contents: &str, 
+    offset: usize
+) -> (usize, usize) {
     let mut line = 1;
     let mut col = 1;
 

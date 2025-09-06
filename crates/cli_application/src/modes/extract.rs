@@ -11,7 +11,7 @@ use std::{
     fs::{File, create_dir_all}, 
     hash::Hash, 
     io::{BufWriter, Write}, 
-    path::{Path, PathBuf},
+    path::Path,
 };
 use serde::{Deserialize, Serialize};
 use tracing::{
@@ -31,13 +31,14 @@ use crate::{
 /// This is the main entry point for the extraction operation. It reads an
 /// archive's metadata, including the header, manifest, and chunk index.
 /// It then extracts the specific files requested by the user, identified
-/// by their ROM indices. The process is parallelized using a thread pool
-/// to decompress and write multiple files concurrently.
+/// by their ROM indices. The extraction process is then performed sequentially
+/// to avoid IO contention with multiple threads reading and writing to disk at
+/// once.
 ///
 /// # Arguments
 ///
-/// * `file_path`: A `PathBuf` pointing to the source archive file.
-/// * `out_dir`: A `PathBuf` for the directory where extracted files will
+/// * `file_path`: A `Path` pointing to the source archive file.
+/// * `out_dir`: A `Path` for the directory where extracted files will
 ///   be written.
 /// * `rom_indices`: A vector of `u8` indices specifying which files to
 ///   extract from the archive.
@@ -61,7 +62,7 @@ use crate::{
 ///   in the archive.
 /// - Any error propagated from the decompression or file writing stages.
 pub fn run_extraction(
-    file_path: &PathBuf, 
+    file_path: &Path, 
     out_dir: &Path, 
     rom_indices: &Vec<u8>,
     args: &Args,
@@ -101,7 +102,7 @@ pub fn run_extraction(
 /// core logic for reading the manifest and chunk index, decompressing chunks,
 /// and writing the final files to disk.
 fn extract_data<H>(
-    file_path: &PathBuf,
+    file_path: &Path,
     out_dir: &Path,
     rom_indices: &Vec<u8>,
     header: &sprite_shrink::FileHeader,
@@ -204,7 +205,7 @@ where
             );
 
             if scm.hash != decomp_chunk_hash {
-                return Err(CliError::DataIntegrityError(format!(
+                return Err(CliError::DataIntegrity(format!(
                     "chunk hash mismatch (expected: {}, calculated: {})",
                     scm.hash, decomp_chunk_hash
                 )));

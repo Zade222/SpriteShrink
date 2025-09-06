@@ -55,7 +55,7 @@ where
     H: Hashable + redb::Key,
     for<'a> H: Borrow<<H as Value>::SelfType<'a>>,
 {
-    let write_txn = db_info.db.begin_write().unwrap();
+    let write_txn = db_info.db.begin_write()?;
     {
         let mut table = write_txn.open_table(db_info.db_def)?;
         for (key, data) in items {
@@ -65,7 +65,7 @@ where
             }
         }
     }
-    write_txn.commit().unwrap();
+    write_txn.commit()?;
     Ok(())
 }
 
@@ -106,8 +106,8 @@ where
     for<'a> H: From<<H as Value>::SelfType<'a>>,
 {
     //Prepare database for read transaction
-    let read_txn = db_info.db.begin_read().unwrap();
-    let table = read_txn.open_table(db_info.db_def).unwrap();
+    let read_txn = db_info.db.begin_read()?;
+    let table = read_txn.open_table(db_info.db_def)?;
 
     let mut ret_chunks: Vec<Vec<u8>> = Vec::with_capacity(hashes.len());
 
@@ -161,8 +161,8 @@ where
     for<'a> H: From<<H as Value>::SelfType<'a>>,
 {
     //Prepare database for read transaction
-    let read_txn = db_info.db.begin_read().unwrap();
-    let table = read_txn.open_table(db_info.db_def).unwrap();
+    let read_txn = db_info.db.begin_read()?;
+    let table = read_txn.open_table(db_info.db_def)?;
 
     let all_keys: Result<Vec<H>, CliError> = table
         .iter()?
@@ -210,14 +210,14 @@ where
     for<'a> H: Borrow<<H as Value>::SelfType<'a>>,
 {
     //Prepare database for read transaction
-    let read_txn = db_info.db.begin_read().unwrap();
+    let read_txn = db_info.db.begin_read()?;
     let table = read_txn.open_table(db_info.db_def)?;
 
     //Prepare variable for storing total size.
     let mut total_size: u64 = 0;
 
     //The range call with .. creates an iterator over all key-value pairs.
-    for result in table.range::<H>(..).unwrap() {
+    for result in table.range::<H>(..)? {
         let (_key, value) = result?;
         //.value() returns a byte slice, .len() gives its size in bytes.
         total_size += value.value().len() as u64;

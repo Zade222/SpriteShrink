@@ -217,7 +217,7 @@ pub fn files_from_dirs(dir_paths: &[PathBuf]) -> Result<Vec<PathBuf>, CliError> 
 ///
 /// # Arguments
 ///
-/// * `filepath`: A `PathBuf` pointing to the file to be read.
+/// * `filepath`: A `Path` pointing to the file to be read.
 /// * `data_index`: A `u64` reference for the starting offset.
 /// * `data_length`: A `usize` reference for the number of bytes to read.
 ///
@@ -227,7 +227,7 @@ pub fn files_from_dirs(dir_paths: &[PathBuf]) -> Result<Vec<PathBuf>, CliError> 
 /// - `Ok(Vec<u8>)` containing the bytes read from the file segment.
 /// - `Err(CliError::Io)` if the file cannot be opened or read.
 pub fn read_file_data(
-    filepath: &PathBuf, 
+    filepath: &Path, 
     data_index: &u64, 
     data_length: &usize
 ) -> Result<Vec<u8>, CliError> {
@@ -246,49 +246,6 @@ pub fn read_file_data(
     //Return read data from file.
     Ok(file_buffer)
 }
-
-/* Function no longer needed. Marked for removal.
-
-/// Writes a collection of byte slices to a single file.
-///
-/// This function ensures the destination directory exists, creating it
-/// recursively if needed. It then creates a new file at the specified
-/// path, overwriting any existing file. The provided data slices are
-/// written sequentially using a `BufWriter` for efficiency.
-///
-/// # Arguments
-///
-/// * `final_output_path`: A `Path` reference to the target file.
-/// * `file_data`: A vector of byte slices (`&[u8]`) to be written.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(())` if the file is written successfully.
-/// - `Err(CliError::Io)` if creating the directory or file fails.
-pub fn write_file(
-    final_output_path: &Path,
-    file_data: Vec<&[u8]>
-) -> Result<(), CliError> {
-    /*Check if the parent directory of the target output exists, 
-    if not create it.*/
-    if let Some(dir) = final_output_path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-
-    /*Create file as specified by the final output path. */
-    let file = File::create(final_output_path)?;
-
-    //Initiate the file writer that will write the data to disk.
-    let mut writer = BufWriter::new(file);
-
-    //Write data to disk.
-    for data in file_data{
-        writer.write_all(data)?;
-    }
-
-    Ok(())
-}*/
 
 /// Writes the final archive file by combining the header and compressed data.
 ///
@@ -324,7 +281,7 @@ pub fn write_final_archive(
         fs::create_dir_all(dir)?;
     }
     //Write header data to disk
-    fs::write(output_path, data).map_err(CliError::Io)?;
+    fs::write(output_path, data).map_err(CliError::IoError)?;
 
     //Derive tmp file from output path
     let tmp_file_path = output_path.with_extension(".tmp");
@@ -376,12 +333,12 @@ pub fn write_final_archive(
 /// - A general I/O error occurs during file reading or writing.
 pub fn load_config() -> Result<SpriteShrinkConfig, CliError> {
     //Set app name to be reused.
-    let app_name = "spriteshrink";
+    let app_name = &APPIDENTIFIER.application;
 
     //Get the confy config_path for where the config will be stored.
     let config_path = confy::get_configuration_file_path(
         app_name, 
-        "spriteshrink-config")?;
+        APPIDENTIFIER.config_name)?;
     
     /*Check if the config exists. 
     If it does not create and fill that config with a default commented
@@ -395,7 +352,7 @@ pub fn load_config() -> Result<SpriteShrinkConfig, CliError> {
     }
 
     //Load config from disk.
-    match confy::load(app_name, "spriteshrink-config"){
+    match confy::load(app_name, APPIDENTIFIER.config_name){
         Ok(cfg) => Ok(cfg),
         Err(e) => Err(CliError::from(e)),
     }
@@ -508,7 +465,7 @@ pub fn cleanup_old_logs(
     retention_days: u16
 ) -> Result<(), CliError> {
     if retention_days == 0 {
-        //A value of 0 will "keep logs forever"
+        //A value of 0 means logs are retained indefinitely.
         return Ok(());
     }
 
