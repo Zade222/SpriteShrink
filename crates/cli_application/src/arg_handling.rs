@@ -134,7 +134,7 @@ pub struct Args {
         value_name = "LENGTH",
         help_heading = "Tuning Parameters",
         help = "Sets the hashing algorithm bit length. \nDefault value is 64.\n\
-        If the hash verification stage fails set to 128."
+        If the hash verification stage fails set to\n128."
     )]
     pub hash_bit_length: Option<u32>,
     
@@ -204,8 +204,8 @@ pub struct Args {
         long, 
         help_heading = "Behavior and Output Control", 
         default_value_t = false,
-        help = "Forces the application to overwrite the output file \nif it\
-        exists and if the output directory doesn't exist, creates it."
+        help = "Forces the application to overwrite the output file \nif it \
+        exists and if the output directory doesn't\nexist, creates it."
     )]
     pub force: bool,
 
@@ -214,7 +214,7 @@ pub struct Args {
         long, 
         help_heading = "Behavior and Output Control", 
         default_value_t = false,
-        help = "Activates verbose output for detailed diagnostic information."
+        help = "Activates verbose output for detailed diagnostic\ninformation."
     )]
     pub verbose: bool,
 
@@ -223,7 +223,7 @@ pub struct Args {
         long, 
         help_heading = "Behavior and Output Control", 
         default_value_t = false,
-        help = "Activates quiet mode, suppressing all non-essential output."
+        help = "Activates quiet mode, suppressing all non-essential\noutput."
     )]
     pub quiet: bool,
 
