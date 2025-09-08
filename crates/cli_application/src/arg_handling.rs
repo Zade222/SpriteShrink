@@ -32,123 +32,206 @@ const CUSTOM_HELP_TEMPLATE: &str = "\
 /// primary operations, tuning, and behavior control to provide a clear
 /// and user-friendly command-line interface.
 #[derive(Clone, Parser, Debug)]
-#[command(version, about, long_about = None, 
-    help_template = CUSTOM_HELP_TEMPLATE)]
+#[command(
+    version, 
+    about, 
+    long_about = None, 
+    help_template = CUSTOM_HELP_TEMPLATE,
+    //term_width = 80
+)]
 pub struct Args {
     //Primary group of arguments.
-    
-    ///Path to single ROM file or directory of ROMs for input. 
-    ///Can be specified more than once.
-    #[arg(short, long, help_heading = "Primary Options", 
-    required = true)]
+    #[arg(
+        short, 
+        long, 
+        help_heading = "Primary Options", 
+        required = true,
+        help = "Path to single ROM file or directory of ROMs for \ninput. Can \
+        be specified more than once."
+    )]
     pub input: Vec<PathBuf>,
 
-    ///Path for the output archive or extracted files.
-    #[arg(short, long, help_heading = "Primary Options")]
+    #[arg(
+        short, 
+        long, 
+        help_heading = "Primary Options",
+        help = "Path for the output archive or extracted files."
+    )]
     pub output: Option<PathBuf>,
 
-    ///Activates metadata retrieval mode, used in combination with -i.
-    #[arg(short, long, help_heading = "Primary Options", 
-    conflicts_with = "extract")]
+    #[arg(
+        short, 
+        long, 
+        help_heading = "Primary Options", 
+        conflicts_with = "extract",
+        help = "Activates metadata retrieval mode, used in \ncombination with \
+        -i."
+    )]
     pub metadata: bool,
 
-    ///Activates json metadata mode. The metadata output will be printed in 
-    /// json format.
-    #[arg(short, long, help_heading = "Primary Options", 
-    conflicts_with = "extract")]
+    #[arg(
+        short, 
+        long, 
+        help_heading = "Primary Options", 
+        conflicts_with = "extract",
+        help = "Activates json metadata mode. The metadata output \nwill be \
+        printed in json format."
+    )]
     pub json: bool,
 
-    ///Specifies the index number(s) of the ROM(s) to be extracted,
-    ///as listed by the -m flag.
-    #[arg(short, long, help_heading = "Primary Options")]
+    #[arg(
+        short, 
+        long, help_heading = "Primary Options",
+        help = "Specifies the index number(s) of the ROM(s) to be \nextracted, \
+        as listed by the -m flag."
+    )]
     pub extract: Option<String>,
 
     //Tuning paramters
 
-    ///Sets the compression algorithm.
-    ///Choices: zstd, lzma, deflate. Defaults to zstd.
-    #[arg(short, long, help_heading = "Tuning Parameters", default_value_t = 
-    String::from("zstd"))]
-    pub compression: String,
+    /*#[arg(
+        short, 
+        long, 
+        help_heading = "Tuning Parameters", 
+        default_value_t = String::from("zstd"),
+        help = "Sets the compression algorithm.\n
+        Choices: zstd, lzma, deflate. Defaults to zstd."
+    )]
+    pub compression: String,*/
 
-    ///Sets the numerical compression level for the chosen algorithm.
-    #[arg(long, help_heading = "Tuning Parameters", default_value_t = 19)]
+    #[arg(
+        short = 'l', 
+        long = "compression-level", 
+        value_name = "LEVEL",
+        help_heading = "Tuning Parameters",
+        default_value_t = 19,
+        help = "Sets the numerical compression level for the\nchosen \
+        algorithm."
+    )]
     pub compression_level: u8,
 
-    ///Determines the window size for the hashing algorithm.
-    ///(e.g., "256K", "4KB", "64KiB")
-    ///Recommended value is 2kb.
-    #[arg(short, long, help_heading = "Tuning Parameters")]
+    #[arg(
+        short, 
+        long, 
+        help_heading = "Tuning Parameters",
+        help = "Determines the window size for the hashing \nalgorithm. \
+        (e.g., '256K', '4KB', '64KiB')\nRecommended value is 2kb."
+    )]
     pub window: Option<ByteSize>,
 
-    ///Sets the hashing algorithm bit length.
-    /// Default value is 64.
-    /// If the hash verification stage fails set to 128.
-    #[arg(long, help_heading = "Tuning Parameters")]
-    pub hash_bit_length: Option<u32>,
-
-    ///Determines the dictionary size for the compression algorithm.
-    ///(e.g., "256K", "4KB", "64KiB")
-    ///Recommended value is 16kb.
-    #[arg(short, long, help_heading = "Tuning Parameters")]
+    #[arg(
+        short, 
+        long, 
+        help_heading = "Tuning Parameters",
+        help = "Determines the dictionary size for the \ncompression \
+        algorithm. \n(e.g., '256K', '4KB', '64KiB')\nRecommended value is 16kb."
+    )]
     pub dictionary: Option<ByteSize>,
 
-    ///Autotune both the window size and dictionary size. Will find the 
-    /// reasonably optimal size for each. This uses a somewhat inefficient 
-    /// algorithm and can take time but will lead to a smaller file size
-    /// more easily. If values for either the window or dictionary are 
-    /// provided they will be used instead of autotuning.
-    #[arg(long, help_heading = "Tuning Parameters", 
-    default_value_t = false)]
+    #[arg(
+        short = 'b', 
+        long = "hash-bit-length", 
+        value_name = "LENGTH",
+        help_heading = "Tuning Parameters",
+        help = "Sets the hashing algorithm bit length. \nDefault value is 64.\n\
+        If the hash verification stage fails set to 128."
+    )]
+    pub hash_bit_length: Option<u32>,
+    
+    #[arg(
+        long, 
+        help_heading = "Tuning Parameters", 
+        default_value_t = false,
+        help = "Autotune both the window size and dictionary\nsize. Will find \
+        the reasonably optimal size\nfor each. This uses a somewhat \
+        inefficient\nalgorithm and can take time but will result\nin a smaller \
+        file size. If values for either\nthe window or dictionary are provided \
+        either\nwill be used instead of autotuning."
+    )]
     pub auto_tune: bool,
 
-    ///Sets the maximum time in seconds for each autotune iteration.
-    ///If an iteration exceeds this time, the latest result is used.
-    #[arg(long, help_heading = "Tuning Parameters")]
+    #[arg(
+        long, 
+        help_heading = "Tuning Parameters",
+        value_name = "TIMEOUT",
+        help = "Sets the maximum time in seconds for each \nautotune iteration. \
+        If an iteration exceeds\nthis time, the latest result is used."
+    )]
     pub autotune_timeout: Option<u64>,
 
-    ///When finalizing the archive, optimize the dictionary for better compression.
-    /// NOT recommended for large files as it can be very slow. 
-    #[arg(long, help_heading = "Tuning Parameters", 
-    default_value_t = false)]
+    #[arg(
+        long, 
+        help_heading = "Tuning Parameters", 
+        default_value_t = false,
+        help = "When generating dictionary for compression,\noptimize the \
+        dictionary for better\ncompression. NOT recommended for large files\n\
+        as it can be very slow."
+    )]
     pub optimize_dictionary: bool,
 
     //Behavior and Output Control
 
-    ///Sets the maximum number of worker threads to use.
-    ///Defaults to all available logical cores.
-    #[arg(short, long, help_heading = "Behavior and Output Control")]
+    #[arg(
+        short, 
+        long, 
+        help_heading = "Behavior and Output Control",
+        help = "Sets the maximum number of worker threads to use. \nDefaults to \
+        all available logical cores."
+    )]
     pub threads: Option<usize>,
 
-    ///Forces SpriteShrink to not read it's config and won't create one if it
-    ///doesn't already exist. For an flags not specified, each will use 
-    ///default values.
-    #[arg(long, help_heading = "Behavior and Output Control")]
+    #[arg(
+        long, 
+        help_heading = "Behavior and Output Control",
+        help = "Forces SpriteShrink to not read it's config and won't\ncreate \
+        one if it doesn't already exist. For flags not\nspecified, each will\
+        use default values."
+    )]
     pub ignore_config: bool,
 
-    ///Forces low-memory mode by processing files sequentially and
-    ///limiting worker threads to 4 for compression.
-    #[arg(long, help_heading = "Behavior and Output Control", 
-    default_value_t = false)]
+    #[arg(
+        long, 
+        help_heading = "Behavior and Output Control", 
+        default_value_t = false,
+        help = "Forces low-memory mode by using an on disk cache for \n\
+        temporarily storing data. Can adversely effect \napplication \
+        performance."
+    )]
     pub low_memory: bool,
 
-    ///Forces the system to overwrite the output file if it exists.
-    #[arg(short, long, help_heading = "Behavior and Output Control", 
-    default_value_t = false)]
+    #[arg(
+        short, 
+        long, 
+        help_heading = "Behavior and Output Control", 
+        default_value_t = false,
+        help = "Forces the application to overwrite the output file \nif it\
+        exists and if the output directory doesn't exist, creates it."
+    )]
     pub force: bool,
 
-    ///Activates verbose output for detailed diagnostic information.
-    #[arg(short, long, help_heading = "Behavior and Output Control", 
-    default_value_t = false)]
+    #[arg(
+        short, 
+        long, 
+        help_heading = "Behavior and Output Control", 
+        default_value_t = false,
+        help = "Activates verbose output for detailed diagnostic information."
+    )]
     pub verbose: bool,
 
-    ///Activates quiet mode, suppressing all non-essential output.
-    #[arg(short, long, help_heading = "Behavior and Output Control", 
-    default_value_t = false)]
+    #[arg(
+        short, 
+        long, 
+        help_heading = "Behavior and Output Control", 
+        default_value_t = false,
+        help = "Activates quiet mode, suppressing all non-essential output."
+    )]
     pub quiet: bool,
 
-    ///Disables logging messages to log file.
-    #[arg(long, help_heading = "Behavior and Output Control")]
+    #[arg(
+        long, 
+        help_heading = "Behavior and Output Control",
+        help = "Disables logging messages to log file."
+    )]
     pub disable_logging: bool,
 }
 
