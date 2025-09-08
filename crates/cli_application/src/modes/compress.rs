@@ -7,7 +7,8 @@
 //! verify, and compress the unique data into a final archive file.
 
 use std::{
-    borrow::Borrow, 
+    borrow::Borrow,
+    cmp::min,
     fmt::Display, 
     fs::{create_dir_all, File},
     path::PathBuf, 
@@ -222,7 +223,7 @@ where
     let mut _veri_hashes: DashMap<String, [u8; 64]> = DashMap::new();
     
     //Used for storing overall file size.
-    let total_size: u64;
+    let chunk_sum: u64;
 
     /*Numerical compression level pulled from the args.*/
     let level: i32 = args.compression_level as i32;
@@ -300,10 +301,30 @@ where
 
         //Value used for testing each auto-tune step
         let mut last_compressed_size = usize::MAX;
-        
+
         //If window size was not specified, find optimal window size.
         if args.window.is_none() {
-
+            let window_bar = if args.progress {
+                let bar = ProgressBar::new_spinner();
+                bar.enable_steady_tick(Duration::from_millis(500));
+                bar.set_style(
+                    ProgressStyle::with_template("{msg} {spinner}")
+                        .unwrap()
+                        .tick_strings(&[
+                            "   ",
+                            ".  ",
+                            ".. ",
+                            "...",
+                            " ..",
+                            "  .",
+                            "   ",
+                        ]),
+                );
+                bar.set_message("Tuning window size");
+                Some(bar)
+            } else {
+                None
+            };
             loop {
                 debug!("Testing window size: {current_window_size}");
 
@@ -367,11 +388,11 @@ where
                 };
 
                 //Process files with the current window size
-                let (_fm,
-                    _vh) =
-                        process_files(
+                let (_fm, _vh) = process_files(
                             &file_paths, 
-                            current_window_size, 
+                            current_window_size,
+                            &input_data_size,
+                            false,
                             at_insert_batch_cb
                         )?;
 
@@ -466,15 +487,20 @@ where
                 //Double value for next loop
                 current_window_size *= 2;
             }
+            if let Some(bar) = &window_bar {
+                bar.finish_with_message("Optimal window size found.");
+            }
         }
 
         /*Using either the autotune best window size or the user set value,
         process all files.*/
-        (_file_manifest, _veri_hashes) =
-            process_files(&file_paths, 
-                best_window_size,
-                insert_batch_cb
-            )?;
+        (_file_manifest, _veri_hashes) = process_files(
+            &file_paths, 
+            best_window_size,
+            &input_data_size,
+            args.progress,
+            insert_batch_cb
+        )?;
         
         /*Serialize the data for later using it for verifying the files. */
         let (_ser_fm, 
@@ -486,8 +512,8 @@ where
                 chunk_ret_cb.as_ref()
             )?;
         
-        //Calc the sum of all chunks in databse
-        total_size = if process_in_memory {
+        //Calc the sum of all chunks in database
+        chunk_sum = if process_in_memory {
             data_store
                 .iter()
                 .map(|entry| entry.value().len() as u64)
@@ -504,6 +530,27 @@ where
 
         //If dicionary size was not specified, find optimal dictionary size.
         if args.dictionary.is_none() {
+            let dictionary_bar = if args.progress {
+                let bar = ProgressBar::new_spinner();
+                bar.enable_steady_tick(Duration::from_millis(500));
+                bar.set_style(
+                    ProgressStyle::with_template("{msg} {spinner}")
+                        .unwrap()
+                        .tick_strings(&[
+                            "   ",
+                            ".  ",
+                            ".. ",
+                            "...",
+                            " ..",
+                            "  .",
+                            "   ",
+                        ]),
+                );
+                bar.set_message("Tuning dictionary size");
+                Some(bar)
+            } else {
+                None
+            };
             loop {
                 debug!("Testing dictionary size: {current_dict_size}");
 
@@ -519,7 +566,7 @@ where
                 data*/
                 let compressed_size = test_compression(
                     &sorted_hashes,
-                    total_size,
+                    chunk_sum,
                     _process_threads,
                     current_dict_size,
                     get_chunk_data_for_test
@@ -547,17 +594,22 @@ where
                     break;
                 }
             }
+            if let Some(bar) = &dictionary_bar {
+                bar.finish_with_message("Optimal dictionary size found.");
+            }
         }
     } else {
         /*If not autotuning window or dictionary size, just process files.*/
         (_file_manifest, _veri_hashes) = process_files(
             &file_paths, 
             best_window_size, 
+            &input_data_size,
+            args.progress,
             insert_batch_cb
         )?;
 
         //Calc the sum of all chunks in databse
-        total_size = if process_in_memory {
+        chunk_sum = if process_in_memory {
             data_store
                 .iter()
                 .map(|entry| entry.value().len() as u64)
@@ -595,6 +647,22 @@ where
     /*Drop file_manifest since it is no longer needed and was only used for 
     verifying files.*/
     drop(_file_manifest);
+
+    let verification_pb = if args.progress {
+        let bar = ProgressBar::new(input_data_size);
+        bar.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bytes}/{total_bytes} ({eta}) {msg}\n[{bar:40}]")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        bar.set_message("Verifying files...");
+        Some(bar)
+    } else {
+        None
+    };
+
+    let verification_pb_arc = Arc::new(verification_pb);
     
     //Clone ser_file_manifest for use in verification loop
     let sfm_clone = ser_file_manifest.clone();
@@ -613,10 +681,19 @@ where
             move |hashes: &[H]| cb(hashes)
         };
 
+        let pb_clone = Arc::clone(&verification_pb_arc);
+        
+        let progress_closure = move |bytes_processed: u64| {
+            if let Some(bar) = &*pb_clone {
+                bar.inc(bytes_processed as u64);
+            }
+        };
+
         let handle = thread::spawn(move ||{
             verify_single_file(&fmp, 
                 &veri_hash, 
-                get_chunk_data_for_verify
+                get_chunk_data_for_verify,
+                progress_closure
             )
         });
         thread_handles.push(handle);
@@ -630,6 +707,11 @@ where
         }
     }
 
+    if let Some(bar) = &*verification_pb_arc {
+        bar.set_position(input_data_size);
+
+        bar.finish_with_message("File verification passed!");
+    }
     //At this point, verification is complete. We can free all related data.
     drop(_veri_hashes);
     
@@ -645,40 +727,66 @@ where
     /*Make separate vars for storing quiet and verbose arguments due to 
     closure using move.*/
     let is_quiet = args.quiet;
+    let is_progress = args.progress;
     
     /*Creates a callback function that updates the progress as milestones are
     met and prints a progress bar.
     If statement enables or disables callback messages depending on mode.*/
     let progress_bar_clone = Arc::clone(&progress_bar);
     let progress_callback = move |progress| {
-        if is_quiet {
+        if is_quiet || !is_progress{
             return; //Do nothing in quiet mode
         }
 
-        let mut bar_guard = progress_bar_clone.lock().unwrap();
+        let mut guard = progress_bar_clone.lock().unwrap();
         
         match progress {
             Progress::GeneratingDictionary => {
                 debug!("Generating compression dictionary...");
+
+                let dict_spin = ProgressBar::new_spinner();
+                dict_spin.enable_steady_tick(Duration::from_millis(500));
+                dict_spin.set_style(
+                    ProgressStyle::with_template("{msg} {spinner}")
+                        .unwrap()
+                        .tick_strings(&[
+                            "   ",
+                            ".  ",
+                            ".. ",
+                            "...",
+                            " ..",
+                            "  .",
+                            "   ",
+                        ]),
+                );
+                dict_spin.set_message("Generating compression dictionary");
+
+                *guard = Some(dict_spin);
             }
             Progress::DictionaryDone => {
-                debug!("Dictionary created.");
+                if let Some(dict_spin) = guard.as_ref() {
+                    dict_spin.finish_with_message("Dictionary created.");
+                }
+
+                *guard = None;
+
+                debug!("Dictionary created.");  
             }
             Progress::Compressing { total_chunks } => {
                 let new_bar = ProgressBar::new(total_chunks);
                 new_bar.set_style(ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] [{bar:40}] {pos}/{len} ({eta})")
+                    .template("[{elapsed_precise}] {pos}/{len} (eta {eta}) {msg}\n[{bar:40}]")
                     .unwrap()
                     .progress_chars("#>-"));
                 new_bar.set_message("Compressing chunks...");
                 
                 //Lock the mutex and place the new bar inside the Option.
-                *bar_guard = Some(new_bar);
+                *guard = Some(new_bar);
                 
             }
             Progress::ChunkCompressed => {
                 //Verify if the progress bar exists, if yes increment it.
-                if let Some(bar) = bar_guard.as_ref() {
+                if let Some(bar) = guard.as_ref() {
                     bar.inc(1);
                 }
             }
@@ -705,7 +813,7 @@ where
     let tmp_output_path = args.output
         .as_ref()
         .unwrap()
-        .with_extension(".tmp");
+        .with_extension("tmp");
 
     let get_chunk_data_for_lib = {
             let cb = Arc::clone(&chunk_ret_cb);
@@ -734,7 +842,7 @@ where
         &sorted_hashes, 
         file_paths.len() as u32,
         *hash_type_id,
-        total_size,
+        chunk_sum,
         get_chunk_data_for_lib,
         tmp_chunk_write_cb
     );
@@ -823,7 +931,8 @@ where
 fn process_files<H, W>(
     file_paths: &[PathBuf],
     window_size: u64,
-    //db_info: &DBInfo<H, Vec<u8>>,
+    total_input_size: &u64,
+    print_progress: bool,
     mut insert_batch_cb: W
 ) -> Result<(
         DashMap<String, FileManifestParent<H>>, //file_manifest
@@ -841,6 +950,20 @@ where
     for<'a> H: Borrow<<H as Value>::SelfType<'a>>,
     W: FnMut(&Vec<(H, Vec<u8>)>) + Send + 'static,
 {
+    let progress_bar = if print_progress {
+        let bar = ProgressBar::new(*total_input_size);
+        bar.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bytes}/{total_bytes} ({eta}) {msg}\n[{bar:40}]")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+        bar.set_message("Chunking files...");
+        Some(bar)
+    } else {
+        None
+    };
+
     //Initialize flume channels for inter thread communication
     let (sender, receiver) = bounded(1000);
 
@@ -923,6 +1046,8 @@ where
     
     //While workers are processing files, loop until done.
     while let Ok(message) = receiver.recv() {
+        
+
         //For every message received, store in chunk batch.
         chunk_batch.push((message.chunk_hash, message.chunk_data));
 
@@ -930,6 +1055,11 @@ where
             //When the batch is full, write it to the database or data_store
             batch_sender.send(std::mem::take(&mut chunk_batch)).unwrap();
             chunk_batch.reserve(BATCH_SIZE);
+        }
+
+        //For every received chunk, increment progress bar.
+        if let Some(bar) = &progress_bar {
+            bar.inc(message.chunk_size as u64);
         }
     };
 
@@ -948,6 +1078,11 @@ where
             "File processing worker thread panicked.".to_string()
         )
     })?;
+
+    //Finish the progress bar
+    if let Some(bar) = progress_bar {
+        bar.finish_with_message("File chunking complete.");
+    }
 
     //Pull manifest and hashes from their Arcs.
     let final_manifest = Arc::try_unwrap(shared_file_manifest)
@@ -1040,7 +1175,8 @@ where
 
         let message = ChunkMessage::<H>{
             chunk_hash,
-            chunk_data: chunk.data
+            chunk_data: chunk.data,
+            chunk_size: chunk.length,
         };
 
         send_channel.send(message).unwrap();
@@ -1095,12 +1231,12 @@ fn process_in_memory_check (
     let free_mem = system_info.free_memory();
 
     if (0.8 * free_mem as f64) > (input_data_size + 
-        (u32::MAX as u64) + 
+        min(input_data_size, u32::MAX as u64) + 
         ((u32::MAX / 4) as u64)) as f64 {
             debug!("Processing in memory.");
             true
         } else {
-            debug!("Processing in disk cache.");
+            debug!("Processing via disk cache.");
             false
         }
 }

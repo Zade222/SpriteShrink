@@ -120,7 +120,8 @@ pub enum CliError {
     #[error("File chunking error {0}")]
     FileChunking(#[from] fastcdc::v2020::Error),
 
-    #[error("Data integrity check failed: {0}. The archive file may be corrupt.")]
+    #[error("Data integrity check failed: {0}. \
+    The archive file may be corrupt.")]
     DataIntegrity(String),
 
     #[error("Logging Error {0}")]
@@ -170,7 +171,6 @@ pub enum CliError {
 /// has already been set, or if there is an issue initializing the tracing
 /// dispatcher.
 pub fn initiate_logging(
-    verbose: bool,
     quiet: bool,
     file_log_level: &str
 ) -> Result<Option<WorkerGuard>, CliError> {
@@ -185,8 +185,6 @@ pub fn initiate_logging(
 
     let console_level = if quiet {
         LevelFilter::OFF
-    } else if verbose {
-        LevelFilter::DEBUG
     } else {
         LevelFilter::INFO
     };

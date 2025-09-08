@@ -241,7 +241,6 @@ fn main() -> Result<(), CliError>{
 
     //Initiate logging
     let _guard = initiate_logging(
-        final_args.verbose, 
         final_args.quiet,
         &log_level
     )?;

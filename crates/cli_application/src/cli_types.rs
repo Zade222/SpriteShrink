@@ -28,7 +28,8 @@ use sprite_shrink::{
 #[derive(Debug)]
 pub struct ChunkMessage<H: Hashable> {
         pub chunk_hash: H,
-        pub chunk_data: Vec<u8>
+        pub chunk_data: Vec<u8>,
+        pub chunk_size: usize
 }
 
 /// A handle for accessing the application's temporary database.
@@ -107,7 +108,6 @@ pub struct SpriteShrinkConfig {
     pub threads: usize,
     pub low_memory: bool,
     pub json_output: bool,
-    pub verbose: bool,
     pub log_retention_days: u16,
     pub quiet_output: bool,
     pub log_level: String
@@ -126,7 +126,6 @@ impl Default for SpriteShrinkConfig {
             optimize_dictionary: false,
             threads: 0,
             low_memory: false,
-            verbose: false,
             log_retention_days: 7,
             quiet_output: false,
             log_level: "error".to_string()

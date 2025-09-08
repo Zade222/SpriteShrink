@@ -254,14 +254,16 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 ///   that is `Send`, `Sync`, and has a `'static` lifetime.
 /// * `H`: The generic hash type, which must be `Eq`, `Hash`, `Display`,
 ///   `Clone`, `Send`, `Sync`, and have a `'static` lifetime.
-pub fn verify_single_file<F, H>(
+pub fn verify_single_file<D, H, P>(
     fmp: &FileManifestParent<H>,
     veri_hash: &[u8; 64],
-    get_chunk_data: F,
+    get_chunk_data: D,
+    mut progress_cb: P
 ) -> Result<(), SpriteShrinkError>
 where
-    F: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
+    D: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
     H: Eq + std::hash::Hash + std::fmt::Display + Clone + Send + Sync + 'static,
+    P: FnMut(u64) + Sync + Send + 'static,
 {
     //Maximum batch size for a single file verification task.
     const BATCH_SIZE: usize = 64;
@@ -298,6 +300,7 @@ where
     chunk data and feed it to the hasher.*/
     while let Ok(chunk_batch) = to_hash_rx.recv() {
         for chunk_data in chunk_batch {
+            progress_cb(chunk_data.len() as u64);
             hasher.update(&chunk_data);
         }
     }

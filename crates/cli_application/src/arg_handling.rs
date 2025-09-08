@@ -165,7 +165,9 @@ pub struct Args {
         default_value_t = false,
         help = "When generating dictionary for compression,\noptimize the \
         dictionary for better\ncompression. NOT recommended for large files\n\
-        as it can be very slow."
+        as it can be very slow.\n\
+        Can cause the application to consume \nsignificant amount of memory \
+        even with the \nlow-memory flag."
     )]
     pub optimize_dictionary: bool,
 
@@ -214,9 +216,18 @@ pub struct Args {
         long, 
         help_heading = "Behavior and Output Control", 
         default_value_t = false,
+        help = "Activates printing progress to console."
+    )]
+    pub progress: bool,
+
+    /*#[arg(
+        short, 
+        long, 
+        help_heading = "Behavior and Output Control", 
+        default_value_t = false,
         help = "Activates verbose output for detailed diagnostic\ninformation."
     )]
-    pub verbose: bool,
+    pub verbose: bool,*/
 
     #[arg(
         short, 
@@ -421,9 +432,6 @@ pub fn merge_config_and_args (
     }
     if !arg_was_present("low_memory") {
         args.low_memory = config.low_memory;
-    }
-    if !arg_was_present("verbose") {
-        args.verbose = config.verbose;
     }
     if !arg_was_present("json") {
         args.json = config.json_output;

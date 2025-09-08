@@ -30,8 +30,7 @@ use crate::{
 /// Its primary purpose is to provide a user-friendly template, with each 
 /// option explained, so that users can easily understand and customize their
 /// settings.
-const DEFAULT_CONFIG_WITH_COMMENTS: &str = r#"
-# Sets the numerical compression level.
+const DEFAULT_CONFIG_WITH_COMMENTS: &str = r#"# Sets the numerical compression level.
 # Default = 19
 compression_level = 19
 
@@ -79,10 +78,6 @@ low_memory = false
 # json format.
 # Default = false
 json_output = false
-
-# Activates verbose output for detailed diagnostic information.
-# Default = false
-verbose = false
 
 # Whether to print anything to console. True will disable printing to console
 # and false will enable.
@@ -280,11 +275,12 @@ pub fn write_final_archive(
     if let Some(dir) = output_path.parent() {
         fs::create_dir_all(dir)?;
     }
+
     //Write header data to disk
     fs::write(output_path, data).map_err(CliError::IoError)?;
 
     //Derive tmp file from output path
-    let tmp_file_path = output_path.with_extension(".tmp");
+    let tmp_file_path = output_path.with_extension("tmp");
 
     //Open the tmp file
     let mut tmp_file = File::open(&tmp_file_path)?;

@@ -408,6 +408,10 @@ macro_rules! verify_single_file_ffi_setter {
                 hashes: *const $hash_type, 
                 hashes_len: usize
             ) -> FFIChunkDataArray,
+            progress_cb: unsafe extern "C" fn(
+                user_data: *mut c_void,
+                bytes_processed: u64
+            ),
         ) -> FFIStatus {
             //Immediately check for null pointers to fail early.
             if file_manifest_parent.is_null()
@@ -488,8 +492,14 @@ macro_rules! verify_single_file_ffi_setter {
                 chunks
             };
 
+            let progress_closure = move |bytes_processed: u64| {
+                unsafe {
+                    progress_cb(user_data_addr as *mut c_void, bytes_processed);
+                }
+            };
+
             match verify_single_file(
-                &fmp, &veri_hash, get_chunks_closure
+                &fmp, &veri_hash, get_chunks_closure, progress_closure
             ){
                 Ok(()) => FFIStatus::Ok,
                 Err(e) => match e {
