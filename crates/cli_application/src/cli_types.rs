@@ -97,6 +97,7 @@ pub static APPIDENTIFIER: ProjectIdentifier =  ProjectIdentifier {
 /// across sessions. It holds all parameters related to compression, 
 /// performance, and output formatting.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SpriteShrinkConfig {
     pub compression_level: u8,
     pub window_size: String,
