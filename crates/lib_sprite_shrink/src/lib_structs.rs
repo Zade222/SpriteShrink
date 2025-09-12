@@ -180,7 +180,7 @@ pub enum Progress {
 /// * `offset`: The starting position of this chunk in bytes within the
 ///   original, uncompressed file.
 /// * `length`: The size of the chunk in bytes.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 pub struct SSAChunkMeta<H>{
     pub hash:   H,
     pub offset: u64,

@@ -1097,7 +1097,6 @@ dependencies = [
  "bincode",
  "bytemuck",
  "cbindgen",
- "crossbeam-deque",
  "dashmap",
  "fastcdc",
  "flume",

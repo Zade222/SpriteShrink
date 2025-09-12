@@ -262,7 +262,7 @@ pub fn verify_single_file<D, H, P>(
 ) -> Result<(), SpriteShrinkError>
 where
     D: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
-    H: Eq + std::hash::Hash + std::fmt::Display + Clone + Send + Sync + 'static,
+    H: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
     P: FnMut(u64) + Sync + Send + 'static,
 {
     //Maximum batch size for a single file verification task.

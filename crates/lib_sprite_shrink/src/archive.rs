@@ -24,7 +24,7 @@ use serde::Serialize;
 use zerocopy::IntoBytes;
 
 
-use crate::{ffi::ffi_structs::{
+use crate::{ffi::ffi_types::{
     FFIProgress, FFIProgressType, FFIUserData
 }, SpriteShrinkError};
 use crate::lib_structs::{

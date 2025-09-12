@@ -6,12 +6,11 @@ publish = true
 
 [lib]
 name = "sprite_shrink"
-crate-type = ["rlib", "staticlib"]
+crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
 bincode = { version = "2.0.1", features = ["serde"] }
 bytemuck = { version = "1.23.1", features = ["derive"] }
-crossbeam-deque = "0.8"
 dashmap = "6.1.0"
 fastcdc = "3.2.1"
 flume = "0.11.1"
