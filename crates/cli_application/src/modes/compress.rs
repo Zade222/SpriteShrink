@@ -685,7 +685,7 @@ where
         
         let progress_closure = move |bytes_processed: u64| {
             if let Some(bar) = &*pb_clone {
-                bar.inc(bytes_processed as u64);
+                bar.inc(bytes_processed);
             }
         };
 
