@@ -1206,7 +1206,7 @@ where
 /// than the available memory.
 ///
 /// The decision is made based on a heuristic: it checks if 80% of the
-/// system's currently free memory is greater than the total size of the
+/// system's currently available memory is greater than the total size of the
 /// input data plus a conservative buffer. This buffer accounts for the
 /// overhead of other data structures used during the compression pipeline,
 /// such as the file manifest and various temporary collections.
@@ -1228,7 +1228,7 @@ fn process_in_memory_check (
     let mut system_info = System::new_all();
     system_info.refresh_all();
 
-    let free_mem = system_info.free_memory();
+    let free_mem = system_info.available_memory();
 
     if (0.8 * free_mem as f64) > (input_data_size + 
         min(input_data_size, u32::MAX as u64) + 
