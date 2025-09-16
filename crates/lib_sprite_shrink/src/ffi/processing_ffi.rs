@@ -730,6 +730,8 @@ pub unsafe extern "C" fn verify_single_file_ffi_u128(
 /// * `worker_count`: The number of threads to use for the parallel compression
 ///   test.
 /// * `dictionary_size`: The target size in bytes for the temporary dictionary.
+/// * `compression_level`: The Zstandard compression level to be used by the
+///   worker threads. When testing a maximum value of 7 is used.
 /// * `out_size`: A pointer to a `u64` where the estimated compressed size in
 ///   bytes will be written on success.
 /// * `user_data`: An opaque `void` pointer that will be passed back to the
@@ -759,6 +761,7 @@ fn test_compression_ffi_internal<H>(
     sorted_hashes_len: usize,
     worker_count: usize,
     dictionary_size: usize,
+    compression_level: i32,
     out_size: *mut u64,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
@@ -813,6 +816,7 @@ where
         total_data_size,
         worker_count, 
         dictionary_size,
+        compression_level,
         get_chunks_closure
     ) {
         Ok(compressed_size) => {
@@ -843,6 +847,7 @@ pub unsafe extern "C" fn test_compression_ffi_u64(
     sorted_hashes_len: usize,
     worker_count: usize,
     dictionary_size: usize,
+    compression_level: i32,
     out_size: *mut u64,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
@@ -861,6 +866,7 @@ pub unsafe extern "C" fn test_compression_ffi_u64(
         sorted_hashes_len,
         worker_count,
         dictionary_size,
+        compression_level,
         out_size,
         user_data,
         get_chunks_cb
@@ -883,6 +889,7 @@ pub unsafe extern "C" fn test_compression_ffi_u128(
     sorted_hashes_len: usize,
     worker_count: usize,
     dictionary_size: usize,
+    compression_level: i32,
     out_size: *mut u64,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
@@ -901,6 +908,7 @@ pub unsafe extern "C" fn test_compression_ffi_u128(
         sorted_hashes_len,
         worker_count,
         dictionary_size,
+        compression_level,
         out_size,
         user_data,
         get_chunks_cb

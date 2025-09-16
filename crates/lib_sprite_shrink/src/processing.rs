@@ -579,6 +579,8 @@ where
 /// * `total_data_size`: The total combined size in bytes of all unique chunks.
 /// * `worker_count`: The number of threads to use for parallel compression.
 /// * `dictionary_size`: The target size for the temporary dictionary.
+/// * `compression_level`: The Zstandard compression level to be used by the
+///   worker threads. When testing a maximum value of 7 is used.
 /// * `get_chunk_data`: A callback function for retrieving a chunk's data by 
 ///   its hash.
 ///
@@ -592,6 +594,7 @@ pub fn test_compression<F, H>(
     total_data_size: u64,
     worker_count: usize,
     dictionary_size: usize,
+    compression_level: i32,
     get_chunk_data: F,
 ) -> Result<usize, SpriteShrinkError>
 where
@@ -644,7 +647,7 @@ where
         worker_count, 
         &dictionary, 
         sorted_hashes, 
-        7, 
+        compression_level.max(7),
         get_chunk_data_wrapper,
         write_chunk_data_cb
     );

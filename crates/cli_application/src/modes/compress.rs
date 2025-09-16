@@ -456,6 +456,7 @@ where
                     total_data_size,
                     _process_threads,
                     8192,
+                    level,
                     at_chunk_ret_cb,
                 )?;
                 
@@ -569,6 +570,7 @@ where
                     chunk_sum,
                     _process_threads,
                     current_dict_size,
+                    level,
                     get_chunk_data_for_test
                 )?;
                 
