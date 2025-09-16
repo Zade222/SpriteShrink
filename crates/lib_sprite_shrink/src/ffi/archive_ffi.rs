@@ -19,8 +19,10 @@ use crate::ffi::ffi_types::{
     FFIFileManifestParentU64, FFIFileManifestParentU128,
     FFIProgress
 };
-use crate::lib_error_handling::SpriteShrinkError;
-use crate::{FileManifestParent};
+use crate::lib_error_handling::{
+    IsCancelled, SpriteShrinkError
+};
+use crate::lib_structs::{FileManifestParent};
 
 //Type alias for clarity in other functions
 trait FFIBuilderHandle {
@@ -47,11 +49,12 @@ trait ArchiveBuilderTrait<H> {
         fn build(self: Box<Self>) -> Result<Vec<u8>, SpriteShrinkError>;
 }
 
-impl<'a, H, R, W> ArchiveBuilderTrait<H> for ArchiveBuilder<'a, H, R, W>
+impl<'a, E, H, R, W> ArchiveBuilderTrait<H> for ArchiveBuilder<'a, E, H, R, W>
 where
+    E: std::error::Error + IsCancelled + Send + Sync + 'static,
     H: Copy + std::fmt::Debug + Eq + std::hash::Hash + serde::Serialize + Send + Sync + 'static + std::fmt::Display + Ord,
-    R: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
-    W: FnMut(&[u8], bool) + Send + Sync + 'static,
+    R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
+    W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
 {
     fn set_compression_algorithm(&mut self, algorithm: u16) {
         self.compression_algorithm(algorithm);
@@ -114,7 +117,7 @@ where
 ///   `ArchiveBuilder`.
 /// - The `get_chunks_cb` and `write_comp_data_cb` function pointers are valid
 ///   and point to functions with the correct signatures.
-fn setup_builder_closures<H: 'static>(
+fn setup_builder_closures<E, H: 'static>(
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void, 
@@ -128,12 +131,12 @@ fn setup_builder_closures<H: 'static>(
         is_flush: bool
     ),
 ) -> (
-    impl Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
-    impl FnMut(&[u8], bool) + Send + Sync + 'static,
+    impl Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
+    impl FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
 ) {
     let user_data_addr = user_data as usize;
 
-    let get_chunks_closure = move |hashes: &[H]| {
+    let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, E> {
         let ffi_chunks_array = unsafe {
             get_chunks_cb(
                 user_data_addr as *mut c_void,
@@ -154,10 +157,10 @@ fn setup_builder_closures<H: 'static>(
             ffi_chunks_array.ptr, 
             ffi_chunks_array.len, 
             ffi_chunks_array.len)};
-        chunks
+        Ok(chunks)
     };
 
-    let write_data_closure = move |data: &[u8], flush: bool| {
+    let write_data_closure = move |data: &[u8], flush: bool| -> Result<(), E> {
         unsafe {
             write_comp_data_cb(
                 user_data_addr as *mut c_void,
@@ -165,6 +168,8 @@ fn setup_builder_closures<H: 'static>(
                 data.len(),
                 flush,
             );
+
+        Ok(())
         }
     };
 
@@ -276,7 +281,7 @@ pub unsafe extern "C" fn archive_builder_new_u64(
     .collect();
 
     let (get_chunks_closure, write_data_closure) = 
-    setup_builder_closures::<u64>(
+    setup_builder_closures::<SpriteShrinkError, u64>(
         user_data,
         get_chunks_cb,
         write_comp_data_cb
@@ -408,7 +413,7 @@ pub unsafe extern "C" fn archive_builder_new_u128(
     .collect();
 
     let (get_chunks_closure, write_data_closure) = 
-    setup_builder_closures::<u128>(
+    setup_builder_closures::<SpriteShrinkError, u128>(
         user_data,
         get_chunks_cb,
         write_comp_data_cb

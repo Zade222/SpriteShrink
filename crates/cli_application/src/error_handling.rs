@@ -11,7 +11,9 @@ use std::{
     path::PathBuf
 };
 
-use sprite_shrink::SpriteShrinkError;
+use sprite_shrink::{
+    IsCancelled, SpriteShrinkError
+};
 use directories::ProjectDirs;
 use range_parser::RangeError;
 use thiserror::Error;
@@ -85,7 +87,7 @@ pub enum CliError {
     InternalError(String),
 
     #[error("Library error: {0}")]
-    SpriteShrink(#[from] SpriteShrinkError),
+    SpriteShrinkError(SpriteShrinkError),
 
     #[error("Range parse error {0}")]
     RangeParse(#[from] RangeError),
@@ -132,6 +134,46 @@ pub enum CliError {
 
     #[error("Serde json error {0}")]
     SerdeJsonError(#[from] serde_json::Error),
+
+    #[error("Operation cancelled by user.")]
+    Cancelled,
+}
+
+/// Converts a library-level `SpriteShrinkError` into a `CliError`.
+///
+/// This implementation allows for the ergonomic propagation of errors from the
+/// core `sprite_shrink` library up to the command-line application layer. It
+/// ensures that library-specific errors are wrapped in a `CliError` variant,
+/// making them easy to handle within the application's main error-handling
+/// logic.
+///
+/// A special case is handled for `SpriteShrinkError::Cancelled` to ensure that
+/// user-initiated cancellations are correctly propagated as 
+/// `CliError::Cancelled`.
+impl From<SpriteShrinkError> for CliError {
+    fn from(err: SpriteShrinkError) -> Self {
+        match err {
+            SpriteShrinkError::Cancelled => CliError::Cancelled,
+            _ => CliError::SpriteShrinkError(err),
+        }
+    }
+}
+
+/// Checks if the error represents a user-initiated cancellation.
+///
+/// This implementation of the `IsCancelled` trait allows the application to
+/// distinguish between regular errors and a cancellation event (e.g., the user
+/// pressing Ctrl+C). It is used to ensure that the application can shut down
+/// gracefully without treating a cancellation as a critical failure.
+///
+/// # Returns
+///
+/// * `true` if the error is `CliError::Cancelled`.
+/// * `false` for all other `CliError` variants.
+impl IsCancelled for CliError {
+    fn is_cancelled(&self) -> bool {
+        matches!(self, CliError::Cancelled)
+    }
 }
 
 /// This function sets up a dual-layered logging system using the `tracing`

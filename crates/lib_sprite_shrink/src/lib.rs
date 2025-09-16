@@ -6,7 +6,9 @@ pub use archive::{
 pub mod ffi;
 
 mod lib_error_handling;
-pub use lib_error_handling::SpriteShrinkError;
+pub use lib_error_handling::{
+    IsCancelled, SpriteShrinkError, 
+};
 
 mod lib_structs;
 pub use lib_structs::{

@@ -21,7 +21,9 @@ use xxhash_rust::xxh3::{xxh3_64_with_seed, xxh3_128_with_seed};
 use zstd_sys::{self, ZDICT_params_t};
 
 use crate::archive::{compress_chunks};
-use crate::lib_error_handling::SpriteShrinkError;
+use crate::lib_error_handling::{
+    IsCancelled, SpriteShrinkError
+};
 use crate::lib_structs::{
     FileData, FileManifestParent, ProcessedFileData, SSAChunkMeta
 };
@@ -49,6 +51,12 @@ pub enum ProcessingError {
 
     #[error("A thread panic occurred: {0}")]
     ThreadPanic(String),
+
+    #[error("An error occurred in an external callback: {0}")]
+    External(String),
+
+    #[error("Operation cancelled by user.")]
+    Cancelled,
 }
 
 pub trait Hashable:
@@ -254,18 +262,21 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 ///   that is `Send`, `Sync`, and has a `'static` lifetime.
 /// * `H`: The generic hash type, which must be `Eq`, `Hash`, `Display`,
 ///   `Clone`, `Send`, `Sync`, and have a `'static` lifetime.
-pub fn verify_single_file<D, H, P>(
+pub fn verify_single_file<D, E, H, P>(
     fmp: &FileManifestParent<H>,
     veri_hash: &[u8; 64],
     get_chunk_data: D,
     mut progress_cb: P
 ) -> Result<(), SpriteShrinkError>
 where
-    D: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
+    D: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
+    E: std::error::Error + IsCancelled + Send + Sync + 'static,
     H: Eq + std::hash::Hash + Clone + Send + Sync + 'static,
     P: FnMut(u64) + Sync + Send + 'static,
 {
-    //Maximum batch size for a single file verification task.
+    /*A batch size of 64 provides a good balance between reducing the overhead
+    of the get_chunk_data callback and keeping memory usage low per 
+    verification task.*/
     const BATCH_SIZE: usize = 64;
 
     //flume tx and rx channels, limited\bounded to 4 messages.
@@ -284,12 +295,31 @@ where
         let hashes_clone = Arc::clone(&all_hashes);
         thread::spawn(move || {
             for batch in hashes_clone.chunks(BATCH_SIZE) {
-                let chunk_data_batch = (get_chunk_data_arc)(batch);
-
-                if to_hash_tx.send(chunk_data_batch).is_err() {
+            match (get_chunk_data_arc)(batch) {
+                Ok(chunk_data_batch) => {
+                    /*If sending fails, the receiver has hung up, so we can 
+                    stop.*/
+                    if to_hash_tx.send(Ok(chunk_data_batch)).is_err() {
+                        break;
+                    }
+                }
+                Err(e) => {
+                    /*Check if the error from the callback indicates
+                    cancellation.*/
+                    if e.is_cancelled() {
+                            let _ = to_hash_tx.send(
+                                Err(SpriteShrinkError::Cancelled)
+                            );
+                    } else {
+                        //Otherwise, treat it as a generic external error.
+                        let _ = to_hash_tx.send(Err(
+                            SpriteShrinkError::External(Box::new(e))
+                        ));
+                    }
                     break;
                 }
             }
+        }
         })
     };
 
@@ -298,10 +328,18 @@ where
 
     /*Until all chunks have been fed to the hasher, while loop will receive
     chunk data and feed it to the hasher.*/
-    while let Ok(chunk_batch) = to_hash_rx.recv() {
-        for chunk_data in chunk_batch {
-            progress_cb(chunk_data.len() as u64);
-            hasher.update(&chunk_data);
+    while let Ok(result) = to_hash_rx.recv() {
+        match result {
+            Ok(chunk_batch) => {
+                for chunk_data in chunk_batch {
+                    progress_cb(chunk_data.len() as u64);
+                    hasher.update(&chunk_data);
+                }
+            }
+            Err(e) => {
+                // If we receive an error, we stop processing and return it.
+                return Err(e);
+            }
         }
     }
 
@@ -458,14 +496,15 @@ pub fn gen_zstd_opt_dict(
 ///
 /// A `Result` containing a `Vec<Vec<u8>>`, where each inner vector is the byte
 /// data of a selected sample chunk.
-pub fn build_train_samples<F, H>(
+pub fn build_train_samples<E, F, H>(
     sorted_hashes: &[H],
     total_data_size: u64,
     target_dictionary_size: usize,
     get_chunk_data: &F,
 ) -> Result<(Vec<u8>, Vec<usize>), ProcessingError>
 where
-    F: Fn(&[H]) -> Vec<Vec<u8>> + ?Sized,
+    E: std::error::Error + IsCancelled + Send + Sync + 'static,
+    F: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + ?Sized,
     H: Copy + Eq + Hash + Send + Sync + 'static,
 {
     /*Max samples is 4.0 gigabytes. This is delibrately set to prevent an
@@ -486,15 +525,19 @@ where
             number_of_chunks
         );
         for hash in sorted_hashes {
-            let sample = &get_chunk_data(&[*hash])[0];
+            let sample = &get_chunk_data(&[*hash])
+            .map_err(|e| {
+                if e.is_cancelled() {
+                    ProcessingError::Cancelled
+                } else {
+                    ProcessingError::External(e.to_string())
+                }
+            })?
+            .remove(0);
             
             sample_sizes.push(sample.len());
             samples_buffer.extend_from_slice(sample);
         }
-
-        //println!("Final sample size, in bytes, is: {}", samples_buffer.len());
-
-        //println!("{} recorded samples sizes", sample_sizes.len());
 
         let mut total_sizes: usize = 0;
         
@@ -502,7 +545,6 @@ where
             total_sizes += size ;
         });
 
-        //println!("Total calculated size is: {total_sizes} bytes");
         return Ok((samples_buffer, sample_sizes));
     }
 
@@ -529,7 +571,15 @@ where
     for i in (0..number_of_chunks).step_by(step) {
         if let Some(hash) = sorted_hashes.get(i) {
             //Get a sample using the callback.
-            let sample = &get_chunk_data(&[*hash])[0];
+            let sample = &get_chunk_data(&[*hash])
+            .map_err(|e| {
+                if e.is_cancelled() {
+                    ProcessingError::Cancelled
+                } else {
+                    ProcessingError::External(e.to_string())
+                }
+            })?
+            .remove(0);
             let sample_size = sample.len();
 
             //Check if adding the next sample would exceed the limit.
@@ -546,18 +596,6 @@ where
             samples_buffer.extend_from_slice(sample);
         }
     }
-
-    /*println!("Final sample size, in bytes, is: {}", samples_buffer.len());
-
-    println!("{} recorded samples sizes", sample_sizes.len());
-
-    let mut total_sizes: usize = 0;
-    
-    sample_sizes.iter().for_each(|size|{
-        total_sizes += size ;
-    });
-
-    println!("Total calculated size is: {total_sizes} bytes");*/
 
     Ok((samples_buffer, sample_sizes))
 }
@@ -589,7 +627,7 @@ where
 /// A `Result` which is:
 /// - `Ok(usize)` containing the total estimated compressed size in bytes.
 /// - `Err(SpriteShrinkError)` if dictionary creation or compression fails.
-pub fn test_compression<F, H>(
+pub fn test_compression<E, F, H>(
     sorted_hashes: &[H],
     total_data_size: u64,
     worker_count: usize,
@@ -598,7 +636,8 @@ pub fn test_compression<F, H>(
     get_chunk_data: F,
 ) -> Result<usize, SpriteShrinkError>
 where
-    F: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
+    E: std::error::Error + IsCancelled + Send + Sync + 'static,
+    F: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
     H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
 {
     //Prepare the samples for dictionary generation.
@@ -617,16 +656,17 @@ where
         ).map_err(|e| ProcessingError::DictionaryError(e.to_string()))?;
 
     //Callback wrapper for getting chunk data from host application.
-    let get_chunk_data_wrapper = move |hashes: &[H]| -> Vec<(H, Vec<u8>)> {
-        let ret_chunks = get_chunk_data(hashes);
-        let mut chunk_pairs: Vec<(H, Vec<u8>)> = 
-            Vec::with_capacity(ret_chunks.len());
+    let get_chunk_data_wrapper = move |hashes: &[H]| -> 
+        Result<Vec<(H, Vec<u8>)>, E> {
+            let ret_chunks = get_chunk_data(hashes)?;
+            let mut chunk_pairs: Vec<(H, Vec<u8>)> = 
+                Vec::with_capacity(ret_chunks.len());
 
-        for (index, chunk) in ret_chunks.iter().enumerate(){
-            chunk_pairs.push((hashes[index], chunk.clone()));
-        };
+            for (index, chunk) in ret_chunks.iter().enumerate(){
+                chunk_pairs.push((hashes[index], chunk.clone()));
+            };
 
-        chunk_pairs
+            Ok(chunk_pairs)
     };
 
     //Arc(Mutex) for storing the total data size.
@@ -636,9 +676,10 @@ where
     final_size.*/
     let write_chunk_data_cb = {
         let final_size_clone = Arc::clone(&final_size);
-        move |chunk: &[u8]| {
+        move |chunk: &[u8]| -> Result<(), E> {
             let mut size = final_size_clone.lock().unwrap();
             *size += chunk.len();
+            Ok(())
         }
     };
 
@@ -650,7 +691,7 @@ where
         compression_level.max(7),
         get_chunk_data_wrapper,
         write_chunk_data_cb
-    );
+    )?;
 
     //Pull the finalize size from the Arc(Mutex)
     let final_size_val = *final_size.lock().unwrap();

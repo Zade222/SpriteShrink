@@ -25,6 +25,9 @@ use crate::ffi::ffi_types::{
     FFIHashedChunkData, FFIProcessedFileData,
     FFISeekChunkInfo, FFISeekInfoArray, FFISSAChunkMeta, 
 };
+use crate::lib_error_handling::{
+    IsCancelled, SpriteShrinkError
+};
 use crate::processing::{
     create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory, 
     verify_single_file, test_compression, Hashable};
@@ -552,7 +555,7 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
 ///   duration of this call.
 /// - The C callback function pointers (`get_chunks_cb`, `progress_cb`) are
 ///   valid and point to functions with the correct signatures.
-fn verify_single_file_ffi_internal<H>(
+fn verify_single_file_ffi_internal<E, H>(
     file_manifest_parent: *const FFIFileManifestParent<H>,
     veri_hash_array_ptr: *const u8,
     user_data: *mut c_void,
@@ -567,6 +570,7 @@ fn verify_single_file_ffi_internal<H>(
     ),
 ) -> FFIResult
 where
+    E: std::error::Error + IsCancelled + Send + Sync + 'static,
     H: Eq + std::cmp::Eq+ std::hash::Hash + Copy + Clone + Send + Sync + 'static,
 {
     let(fmp, veri_hash) = unsafe {
@@ -588,7 +592,7 @@ where
 
     let user_data_addr = user_data as usize;
 
-    let get_chunks_closure = move |hashes: &[H]| {
+    let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, E> {
         let ffi_chunks_array = unsafe {
             get_chunks_cb(
                 user_data_addr as *mut c_void, 
@@ -609,7 +613,7 @@ where
             ffi_chunks_array.ptr, 
             ffi_chunks_array.len, 
             ffi_chunks_array.len)};
-        chunks
+        Ok(chunks)
     };
 
     let progress_closure = move |bytes_processed: u64| {
@@ -654,7 +658,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u64(
         return FFIResult::NullArgument;
     }
 
-    verify_single_file_ffi_internal::<u64>(
+    verify_single_file_ffi_internal::<SpriteShrinkError, u64>(
         file_manifest_parent,
         veri_hash_array_ptr,
         user_data,
@@ -691,7 +695,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u128(
         return FFIResult::NullArgument;
     }
 
-    verify_single_file_ffi_internal::<u128>(
+    verify_single_file_ffi_internal::<SpriteShrinkError, u128>(
         file_manifest_parent,
         veri_hash_array_ptr,
         user_data,
@@ -755,7 +759,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u128(
 ///   array.
 /// - The `get_chunks_cb` function pointer is valid and points to a function
 ///   with the correct signature.
-fn test_compression_ffi_internal<H>(
+fn test_compression_ffi_internal<E, H>(
     total_data_size: u64,
     sorted_hashes_array_ptr: *const H,
     sorted_hashes_len: usize,
@@ -771,6 +775,7 @@ fn test_compression_ffi_internal<H>(
     ) -> FFIChunkDataArray,
 ) -> FFIResult 
 where 
+    E: std::error::Error + IsCancelled + Send + Sync + 'static,
     H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
 {
     let sorted_hashes = unsafe {
@@ -786,7 +791,7 @@ where
 
     let user_data_addr = user_data as usize;
 
-    let get_chunks_closure = move |hashes: &[H]| {
+    let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, E> {
         let ffi_chunks_array = unsafe {
             get_chunks_cb(
                 user_data_addr as *mut c_void, 
@@ -807,7 +812,7 @@ where
             ffi_chunks_array.ptr, 
             ffi_chunks_array.len, 
             ffi_chunks_array.len)};
-        chunks
+        Ok(chunks)
     };
 
     //Run test compression with received and converted data.
@@ -860,7 +865,7 @@ pub unsafe extern "C" fn test_compression_ffi_u64(
         return FFIResult::NullArgument;
     };
 
-    test_compression_ffi_internal(
+    test_compression_ffi_internal::<SpriteShrinkError, u64>(
         total_data_size,
         sorted_hashes_array_ptr,
         sorted_hashes_len,
@@ -902,7 +907,7 @@ pub unsafe extern "C" fn test_compression_ffi_u128(
         return FFIResult::NullArgument;
     };
 
-    test_compression_ffi_internal(
+    test_compression_ffi_internal::<SpriteShrinkError, u128>(
         total_data_size,
         sorted_hashes_array_ptr,
         sorted_hashes_len,

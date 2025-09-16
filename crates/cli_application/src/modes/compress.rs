@@ -12,7 +12,10 @@ use std::{
     fmt::Display, 
     fs::{create_dir_all, File},
     path::PathBuf, 
-    sync::{Arc, Mutex}, 
+    process::id,
+    sync::{Arc, Mutex, atomic::{
+        AtomicBool, Ordering
+    }}, 
     thread, 
     time::{Duration, Instant}
 };
@@ -42,12 +45,13 @@ use tracing::{
 use crate::{
     arg_handling::Args,
     cli_types::{
-        ChunkMessage, DBInfo, FileCompleteData, TempDatabase, APPIDENTIFIER
+        ChunkMessage, DBInfo, FileCompleteData, TempFileGuard, APPIDENTIFIER
     },
     db_transactions::{batch_insert, get_chunks, get_keys, get_tot_data_size},
     error_handling::CliError,
     storage_io::{
-        append_data_to_file, calc_tot_input_size, write_final_archive
+        append_data_to_file, calc_tot_input_size, 
+        write_final_archive
     }
 };
 
@@ -99,6 +103,7 @@ pub fn run_compression<H>(
     file_paths: Vec<PathBuf>,
     args: &Args,
     hash_type_id: &u8,
+    running: Arc<AtomicBool>
 ) -> Result<(), CliError> 
 where
     H: Hashable
@@ -167,14 +172,6 @@ where
 
     /*The following lines will likely eventually be moved to a function in 
     db_transactions.rs*/
-    
-    let file_stem = args.output
-        .as_ref()
-        .unwrap()
-        .file_stem()
-        .unwrap()
-        .to_string_lossy()
-        .to_string();
 
     let proj_dirs = ProjectDirs::from(
         APPIDENTIFIER.qualifier, 
@@ -184,10 +181,12 @@ where
 
     let cache_dir = proj_dirs.cache_dir();
     create_dir_all(cache_dir).unwrap();
-    let db_path = cache_dir.join(file_stem.clone()).with_extension("redb");
 
-    //When the guard falls out of scope the scope will be deleted.
-    let _temp_db_guard = TempDatabase { path: db_path.clone() };
+    //Set db_paths
+    let (db_path, at_db_path, pid) = get_db_paths();
+
+    //When the guard falls out of scope the file will be deleted.
+    let _temp_db_guard = TempFileGuard::new(&db_path);
     
     let db_data_store: TableDefinition<
         'static, 
@@ -237,7 +236,6 @@ where
     let key_ret_cb = 
         || -> Vec<H> {
         if process_in_memory {
-            //let data_store = data_store_arc.clone();
             data_store_for_key_ret.iter().map(|entry| *entry.key()).collect()
         } else {
             //Get keys from db
@@ -249,27 +247,44 @@ where
     let chunk_ret_cb = Arc::new({
         let db_info_clone = Arc::clone(&db_info);
         let data_store_for_chunk_ret = Arc::clone(&data_store);
-        move |hashes: &[H]| -> Vec<Vec<u8>> {
+        move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
             if process_in_memory {
-                hashes.iter().map(|hash| {
+                let chunks = hashes.iter().map(|hash| {
                     data_store_for_chunk_ret.get(hash).unwrap().clone()
-                }).collect()
+                }).collect();
+
+                Ok(chunks)
             } else {
                 //Get chunk data from db
-                get_chunks(hashes, &db_info_clone).unwrap()
+                Ok(get_chunks(hashes, &db_info_clone).unwrap())
             }
         }
     });
 
     let db_info_ins_clone = Arc::clone(&data_store);
     let db_info_ret_clone = Arc::clone(&db_info);
-    let insert_batch_cb = move | chunk_batch: &Vec<(H, Vec<u8>)> | {
-        if process_in_memory {
-            for (hash, data) in chunk_batch{
-                db_info_ins_clone.entry(*hash).or_insert(data.to_vec());
+    let insert_batch_cb = {
+        let batch_running_clone = Arc::clone(&running);
+        move |
+            chunk_batch: &Vec<(H, Vec<u8>)> 
+        | -> Result<(), CliError> {
+            if process_in_memory {
+                if !batch_running_clone.load(Ordering::SeqCst) {
+                    return Err(CliError::Cancelled);
+                }
+
+                for (hash, data) in chunk_batch{
+                    db_info_ins_clone.entry(*hash).or_insert(data.to_vec());
+                };
+                Ok(())
+            } else {
+                if !batch_running_clone.load(Ordering::SeqCst) {
+                    return Err(CliError::Cancelled);
+                }
+                
+                batch_insert(&db_info_ret_clone, chunk_batch).unwrap();
+                Ok(())
             }
-        } else {
-            batch_insert(&db_info_ret_clone, chunk_batch).unwrap();
         }
     };
 
@@ -333,14 +348,9 @@ where
                 let start_time = Instant::now();
 
                 /*Set temporary db path using task output file name.*/
-                let at_stem = format!("auto_tune_{}", file_stem);
-                let db_path = cache_dir.join(at_stem)
-                    .with_extension("redb");
 
                 //When the guard falls out of scope the scope will be deleted.
-                let _auto_tune_db_guard = TempDatabase {
-                    path: db_path.clone()
-                };
+                let _auto_tune_db_guard = TempFileGuard::new(&at_db_path);
                 
                 //Make database definition
                 let db_at_data_store: TableDefinition<
@@ -354,7 +364,7 @@ where
                         InMemoryBackend::new()
                     ).unwrap()
                 } else {
-                    Database::create(&db_path).unwrap()
+                    Database::create(&at_db_path).unwrap()
                 };
 
                 //Create database and encapsulate it in an Arc
@@ -370,20 +380,33 @@ where
                 let tmp_data_store_clone = Arc::clone(&tmp_data_store);
                 let at_db_info_clone = Arc::clone(&at_db_info);
 
-                let at_insert_batch_cb = move | 
-                    chunk_batch: &Vec<(H, Vec<u8>)> 
-                | {
-                    if process_in_memory {
-                        for (hash, data) in chunk_batch{
-                            tmp_data_store_clone
-                                .entry(*hash)
-                                .or_insert(data.to_vec());
+                let at_insert_batch_cb = {
+                    let at_running_clone = Arc::clone(&running);
+                    move | 
+                        chunk_batch: &Vec<(H, Vec<u8>)> 
+                    | -> Result<(), CliError> {
+                        if process_in_memory {
+                            if !at_running_clone.load(Ordering::SeqCst) {
+                                return Err(CliError::Cancelled);
+                            }
+
+                            for (hash, data) in chunk_batch{
+                                tmp_data_store_clone
+                                    .entry(*hash)
+                                    .or_insert(data.to_vec());
+                            };
+                            Ok(())
+                        } else {
+                            if !at_running_clone.load(Ordering::SeqCst) {
+                                return Err(CliError::Cancelled);
+                            }
+                            batch_insert(
+                                &at_db_info_clone, 
+                                chunk_batch
+                            ).unwrap();
+
+                            Ok(())
                         }
-                    } else {
-                        batch_insert(
-                            &at_db_info_clone, 
-                            chunk_batch
-                        ).unwrap();
                     }
                 };
 
@@ -393,7 +416,8 @@ where
                             current_window_size,
                             &input_data_size,
                             false,
-                            at_insert_batch_cb
+                            at_insert_batch_cb,
+                            &running
                         )?;
 
                 /*Callback for getting all keys(hashes) from temporary 
@@ -414,17 +438,19 @@ where
                 let at_chunk_ret_cb = {
                     let at_db_info_clone = Arc::clone(&at_db_info);
                     let data_store_for_chunk_ret = Arc::clone(&tmp_data_store);
-                    move |hashes: &[H]| -> Vec<Vec<u8>> {
+                    move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
                         if process_in_memory {
-                            hashes.iter().map(|hash| {
+                            let chunks = hashes.iter().map(|hash| {
                                 data_store_for_chunk_ret
                                     .get(hash)
                                     .unwrap()
                                     .clone()
-                            }).collect()
+                            }).collect();
+
+                            Ok(chunks)
                         } else {
                             //Get chunk data from db
-                            get_chunks(hashes, &at_db_info_clone).unwrap()
+                            Ok(get_chunks(hashes, &at_db_info_clone).unwrap())
                         }
                     }
                 };
@@ -500,7 +526,8 @@ where
             best_window_size,
             &input_data_size,
             args.progress,
-            insert_batch_cb
+            insert_batch_cb,
+            &running
         )?;
         
         /*Serialize the data for later using it for verifying the files. */
@@ -607,7 +634,8 @@ where
             best_window_size, 
             &input_data_size,
             args.progress,
-            insert_batch_cb
+            insert_batch_cb,
+            &running,
         )?;
 
         //Calc the sum of all chunks in databse
@@ -680,7 +708,13 @@ where
 
         let get_chunk_data_for_verify = {
             let cb = Arc::clone(&chunk_ret_cb);
-            move |hashes: &[H]| cb(hashes)
+            let verify_running_clone = Arc::clone(&running);
+            move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
+                if !verify_running_clone.load(Ordering::SeqCst) {
+                    return Err(CliError::Cancelled);
+                }
+                cb(hashes)
+            }
         };
 
         let pb_clone = Arc::clone(&verification_pb_arc);
@@ -732,8 +766,7 @@ where
     let is_progress = args.progress;
     
     /*Creates a callback function that updates the progress as milestones are
-    met and prints a progress bar.
-    If statement enables or disables callback messages depending on mode.*/
+    met and prints a progress bar.*/
     let progress_bar_clone = Arc::clone(&progress_bar);
     let progress_callback = move |progress| {
         if is_quiet || !is_progress{
@@ -798,7 +831,7 @@ where
         }
     };
 
-    //Const for the max amount of chunks before writing to disk.
+    //Const for the max amount of chunks to cache before writing to disk.
     const BUFFER_SIZE: usize = 1000;
 
     /*Write buffer holds chunk byte data prior to being written.
@@ -812,27 +845,49 @@ where
     let mut chunk_count = 0usize;
 
     //Set the temproary file path that will hold the compressed data.
-    let tmp_output_path = args.output
+    let tmp_file_path = Arc::new(
+        args.output
         .as_ref()
         .unwrap()
-        .with_extension("tmp");
+        .parent()
+        .unwrap()
+        .join(format!("{pid}"))
+        .with_extension("tmp")
+    );
 
     let get_chunk_data_for_lib = {
-            let cb = Arc::clone(&chunk_ret_cb);
-            move |hashes: &[H]| cb(hashes)
-        };
+        let cb = Arc::clone(&chunk_ret_cb);
+        let lib_running_clone = Arc::clone(&running);
+        move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
+            if !lib_running_clone.load(Ordering::SeqCst) {
+                return Err(CliError::Cancelled);
+            }
+
+            let ret_chunks = cb(hashes)?;
+
+            Ok(ret_chunks)
+        }
+    };
+
+    /*Set file guard to clean up tmp files on error. */
+    let _tmp_guard = TempFileGuard::new(&tmp_file_path);
 
     /*Callback for storing and writing chunk data.
     Flush flag can be used to force the data to be written if the buffer has
     not reached the BUFFER_SIZE.*/
-    let tmp_chunk_write_cb = move |chunk: &[u8], flush_flag: bool|{
-        write_buffer.extend_from_slice(chunk);
-        chunk_count += 1;
+    let tmp_chunk_write_cb = {
+        let tfp_clone = Arc::clone(&tmp_file_path);
+        move |chunk: &[u8], flush_flag: bool| -> Result<(), CliError>{
+            write_buffer.extend_from_slice(chunk);
+            chunk_count += 1;
 
-        if (chunk_count >= BUFFER_SIZE) || flush_flag {
-            append_data_to_file(&tmp_output_path, &write_buffer).unwrap();
-            write_buffer.clear();
-            chunk_count = 0;
+            if (chunk_count >= BUFFER_SIZE) || flush_flag {
+                append_data_to_file(&tfp_clone, &write_buffer).unwrap();
+                write_buffer.clear();
+                chunk_count = 0;
+            };
+            
+            Ok(())
         }
     };
 
@@ -875,7 +930,11 @@ where
         .with_extension("ssmc");
 
     //Write ssmc header to disk and append it with compressed data.
-    write_final_archive(&final_output_path, &ssmc_data)?;
+    write_final_archive(
+        &final_output_path, 
+        &tmp_file_path,
+        &ssmc_data
+    )?;
 
     info!(
         "Successfully created sprite-shrink multicart archive at: \
@@ -935,7 +994,8 @@ fn process_files<H, W>(
     window_size: u64,
     total_input_size: &u64,
     print_progress: bool,
-    mut insert_batch_cb: W
+    mut insert_batch_cb: W,
+    running: &Arc<AtomicBool>,
 ) -> Result<(
         DashMap<String, FileManifestParent<H>>, //file_manifest
         DashMap<String, [u8; 64]> //veri_hashes
@@ -947,10 +1007,10 @@ where
         + Serialize
         + for<'de> serde::Deserialize<'de>
         + redb::Key
-        + Send // Ensure H is Send
+        + Send
         + 'static,
     for<'a> H: Borrow<<H as Value>::SelfType<'a>>,
-    W: FnMut(&Vec<(H, Vec<u8>)>) + Send + 'static,
+    W: FnMut(&Vec<(H, Vec<u8>)>) -> Result<(), CliError> + Send + 'static,
 {
     let progress_bar = if print_progress {
         let bar = ProgressBar::new(*total_input_size);
@@ -971,21 +1031,23 @@ where
 
     let (batch_sender, batch_receiver) = bounded::<Vec<(H, Vec<u8>)>>(100);
 
-    let writer_handle = thread::spawn(move || {
+    let writer_handle = thread::spawn(move || -> Result<(), CliError> {
         while let Ok(batch) = batch_receiver.recv() {
-            insert_batch_cb(&batch);
-        }
+            insert_batch_cb(&batch)?;
+        };
+
+        Ok(())
     });
 
     let shared_file_manifest: Arc<DashMap<
         String,
-        FileManifestParent<H>>
-    > = Arc::new(DashMap::new());
+        FileManifestParent<H>
+    >> = Arc::new(DashMap::new());
 
     let shared_veri_hashes: Arc<
         DashMap<String, 
-        [u8; 64]>
-    > = Arc::new(DashMap::new());
+        [u8; 64]
+    >> = Arc::new(DashMap::new());
 
     let thread_count = thread::available_parallelism().unwrap().get();
 
@@ -1048,7 +1110,10 @@ where
     
     //While workers are processing files, loop until done.
     while let Ok(message) = receiver.recv() {
-        
+        if !running.load(Ordering::SeqCst) {
+            //Early exit on cancellation
+            return Err(CliError::Cancelled);
+        }
 
         //For every message received, store in chunk batch.
         chunk_batch.push((message.chunk_hash, message.chunk_data));
@@ -1072,7 +1137,7 @@ where
 
     //Batch sender is done so drop it and clean up any related threads.
     drop(batch_sender);
-    writer_handle.join().unwrap();
+    writer_handle.join().unwrap()?;
 
     //Check for any worker errors.
     worker_handle.join().map_err(|_| {
@@ -1181,7 +1246,10 @@ where
             chunk_size: chunk.length,
         };
 
-        send_channel.send(message).unwrap();
+        if send_channel.send(message).is_err() {
+            break;
+        }
+
         chunk_count += 1;
         chunk_meta.push(SSAChunkMeta{
             hash: chunk_hash,
@@ -1241,4 +1309,41 @@ fn process_in_memory_check (
             debug!("Processing via disk cache.");
             false
         }
+}
+
+/// Generates unique paths for temporary databases.
+///
+/// This function creates platform-specific paths for two temporary database
+/// files: one for the main compression process and another for auto-tuning. 
+/// The paths are constructed using the application's cache directory and the
+/// current process ID (PID) to ensure uniqueness and avoid conflicts between
+/// multiple concurrent instances of the application.
+///
+/// # Returns
+///
+/// A tuple `(PathBuf, PathBuf, u32)` containing:
+/// - The path for the main temporary database (e.g., `.../cache/12345.redb`).
+/// - The path for the auto-tuning temporary database (e.g.,
+///   `.../cache/auto_tune_12345.redb`).
+/// - The process ID (PID) used to generate the unique filenames.
+fn get_db_paths() -> (PathBuf, PathBuf, u32) {
+    let pid = id();
+
+    let cache_dir = ProjectDirs::from(
+        APPIDENTIFIER.qualifier, 
+        APPIDENTIFIER.organization, 
+        APPIDENTIFIER.application)
+    .unwrap()
+    .cache_dir()
+    .to_path_buf();
+
+    let db_path = cache_dir.clone()
+        .join(format!("{pid}"))
+        .with_extension("redb");
+
+    let at_db_path = cache_dir.clone()
+        .join(format!("auto_tune_{pid}"))
+        .with_extension("redb");
+
+    (db_path, at_db_path, pid)
 }

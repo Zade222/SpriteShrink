@@ -14,7 +14,9 @@ use std::{
 };
 
 use directories::ProjectDirs;
-use tracing::warn;
+use tracing::{
+    warn
+};
 
 use crate::{
     cli_types::{APPIDENTIFIER, SpriteShrinkConfig},
@@ -158,8 +160,6 @@ pub fn organize_paths(
             dir_paths.push(path.clone());
         } else if path.is_file() {
             file_paths.push(path.clone());
-        } else {
-            // println!("WARN: Ignoring unsupported path type: {}", path.display());
         }
     }
 
@@ -242,32 +242,42 @@ pub fn read_file_data(
     Ok(file_buffer)
 }
 
-/// Writes the final archive file by combining the header and compressed data.
+/// Assembles the final archive file by combining metadata and compressed data.
 ///
-/// This function orchestrates the final step of the archive creation process.
-/// It performs a two-stage write to ensure atomicity and handle large data
-/// sets efficiently. First, it writes the metadata portion (header, manifest,
-/// etc.) to the final destination file. Second, it appends the compressed
-/// chunk data, which is read from a temporary file (`.tmp`) created during
-/// the compression stage.
+/// This function completes the archive creation process by writing all 
+/// necessary components to the final output file. It operates in two stages to
+/// ensure data integrity and efficient handling of large files:
 ///
-/// After successfully appending the data, the temporary file is deleted, 
-/// leaving a complete and valid `.ssmc` archive.
+/// 1. It first writes the initial data block, which contains the archive 
+///    header and all serialized metadata (file manifest, chunk index, etc.),
+///    to the final destination file.
+/// 2. It then appends the compressed data, which is streamed from a temporary
+///    file where it was stored during the compression phase.
+///
+/// After the contents of the temporary file have been successfully appended, 
+/// the temporary file is deleted, leaving a complete and valid `.ssmc` 
+/// archive.
 ///
 /// # Arguments
 ///
-/// * `output_path`: A `Path` reference to the destination file.
-/// * `data`: A byte slice (`&[u8]`) containing the archive's header and
-///   metadata.
+/// * `output_path`: A `Path` reference to the final destination file for the
+///   archive.
+/// * `tmp_file_path`: A `Path` reference to the temporary file containing the
+///   compressed data blob.
+/// * `data`: A byte slice (`&[u8]`) containing the archive's header and all
+///   other serialized metadata.
 ///
 /// # Returns
 ///
 /// A `Result` which is:
-/// - `Ok(())` on a successful write operation.
-/// - `Err(CliError::Io)` if creating directories, writing the header,
-///   reading the temporary file, or cleaning up fails.
+/// - `Ok(())` if the final archive is successfully written and the temporary
+///   file is cleaned up.
+/// - `Err(CliError::Io)` if any file system operation fails, such as creating
+///   the output directory, writing the header, reading the temporary file, or
+///   deleting it.
 pub fn write_final_archive(
-    output_path: &Path, 
+    output_path: &Path,
+    tmp_file_path: &Path,
     data: &[u8]
 ) -> Result<(), CliError> {
     /*Check if the parent directory of the target output exists, 
@@ -279,11 +289,8 @@ pub fn write_final_archive(
     //Write header data to disk
     fs::write(output_path, data).map_err(CliError::IoError)?;
 
-    //Derive tmp file from output path
-    let tmp_file_path = output_path.with_extension("tmp");
-
     //Open the tmp file
-    let mut tmp_file = File::open(&tmp_file_path)?;
+    let mut tmp_file = File::open(tmp_file_path)?;
 
     //Set the file open options to append data to the written header
     let mut final_file = OpenOptions::new()
@@ -294,7 +301,7 @@ pub fn write_final_archive(
     copy(&mut tmp_file, &mut final_file)?;
 
     //Remove the tmp file as it is no longer needed.
-    remove_file(&tmp_file_path)?;
+    remove_file(tmp_file_path)?;
 
     Ok(())
 }

@@ -13,6 +13,7 @@ sprite_shrink = {path = "../lib_sprite_shrink"}
 bytesize = "2.0"
 clap = { version = "4.5", features = ["derive"] }
 confy = "1.0"
+ctrlc = "3.5"
 dashmap = "6.1"
 dhat = { version = "0.3.3", optional = true }
 directories = "6.0"

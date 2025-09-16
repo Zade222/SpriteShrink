@@ -18,6 +18,9 @@ use crate::lib_structs::{ChunkLocation, FileManifestParent};
 pub enum SerializationError {
     #[error("Chunk missing: {0}")]
     MissingChunk(String),
+
+    #[error("An error occurred in an external callback: {0}")]
+    External(String),
 }
 
 /// Extracts all values from a DashMap into a vector.
@@ -88,12 +91,13 @@ where
 /// * `H`: The generic hash type used for identifying chunks. It must be 
 ///   `Copy`,
 ///   `Eq`, `Hash`, and `Display`.
-pub fn serialize_store<D, H>(
+pub fn serialize_store<D, E, H>(
     sorted_hashes: &[H],
     data_store_get_chunk_cb: &D
 ) -> Result<HashMap<H, ChunkLocation>, SerializationError>
 where
-    D: Fn(&[H]) -> Vec<Vec<u8>>,
+    D: Fn(&[H]) -> Result<Vec<Vec<u8>>, E>,
+    E: std::error::Error + Send + Sync + 'static,
     H: Copy + Eq + std::hash::Hash + std::fmt::Display,
 {
     
@@ -103,7 +107,9 @@ where
             0u64, //Current_offset
         ),
         |(mut index_map, mut offset), hash| {
-            let data_entry = &data_store_get_chunk_cb(&[*hash])[0];
+            let data_entry = &data_store_get_chunk_cb(&[*hash])
+            .map_err(|e| SerializationError::External(e.to_string()))?
+            .remove(0);
             
             if !data_entry.is_empty() {
                 let data = data_entry;
@@ -180,7 +186,7 @@ where
 /// * `H`: The generic hash type, which must be `Copy`, `Ord`, `Eq`, `Hash`,
 ///   and `Display`.
 /// * `K`: The type of the `data_store_key_cb` callback.
-pub fn serialize_uncompressed_data<D, H, K>(
+pub fn serialize_uncompressed_data<D, E, H, K>(
     file_manifest: &DashMap<String, FileManifestParent<H>>,
     data_store_key_cb: &K,
     data_store_get_chunk_cb: &D
@@ -190,7 +196,8 @@ pub fn serialize_uncompressed_data<D, H, K>(
     Vec<H> /*sorted_hashes */
 ), SpriteShrinkError>
 where
-    D: Fn(&[H]) -> Vec<Vec<u8>>,
+    D: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
+    E: std::error::Error + Send + Sync + 'static,
     H: Copy + Ord + Eq + std::hash::Hash + std::fmt::Display,
     K: Fn() -> Vec<H>
 {

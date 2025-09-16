@@ -8,10 +8,13 @@
 
 use std::{
     fmt::Display, 
-    fs::{File, create_dir_all}, 
+    fs::{File, create_dir_all, rename}, 
     hash::Hash, 
     io::{BufWriter, Write}, 
     path::Path,
+    sync::{
+        Arc, atomic::{AtomicBool, Ordering},
+    },
 };
 use serde::{Deserialize, Serialize};
 use tracing::{
@@ -23,7 +26,11 @@ use sprite_shrink::{Hashable, decompress_chunk};
 use crate::{
     archive_parser::{
     get_chunk_index, get_file_header, get_file_manifest, 
-    }, arg_handling::Args, error_handling::CliError, storage_io::read_file_data
+    }, 
+    arg_handling::Args, 
+    cli_types::TempFileGuard,
+    error_handling::CliError, 
+    storage_io::read_file_data,
 };
 
 /// Executes the file extraction process from an archive.
@@ -66,6 +73,7 @@ pub fn run_extraction(
     out_dir: &Path, 
     rom_indices: &Vec<u8>,
     args: &Args,
+    running: Arc<AtomicBool>,
 ) -> Result<(), CliError> {
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
@@ -79,14 +87,16 @@ pub fn run_extraction(
             out_dir, 
             rom_indices,  
             &header,
-            args
+            args,
+            running,
         ),
         2 => extract_data::<u128>(
             file_path, 
             out_dir, 
             rom_indices, 
             &header,
-            args
+            args,
+            running,
         ),
         _ => //Handle other cases or return an error for unsupported hash types
             Err(CliError::InternalError(
@@ -107,6 +117,7 @@ fn extract_data<H>(
     rom_indices: &Vec<u8>,
     header: &sprite_shrink::FileHeader,
     args: &Args,
+    running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
 where
     H: Hashable + 
@@ -166,8 +177,11 @@ where
         let final_output_path = out_dir.join(
             &fmp.filename);
 
-        let file = File::create(&final_output_path)?;
+        let tmp_output_path = final_output_path.with_extension("tmp");
 
+        let _guard = TempFileGuard::new(&tmp_output_path);
+
+        let file = File::create(&tmp_output_path)?;
         let mut writer = BufWriter::new(file);
 
         fmp.chunk_metadata
@@ -211,10 +225,18 @@ where
                 )));
             };
 
+            //Check if the user has cancelled the operation
+            if !running.load(Ordering::SeqCst) {
+                return Err(CliError::Cancelled);
+            }
+
             writer.write_all(&decomp_chunk_data)?;
 
             Ok(())
         })?;
+
+        //The file is fully written, rename it to final name.
+        rename(&tmp_output_path, final_output_path)?;
 
         debug!("{} extracted successfully", &fmp.filename);
     }

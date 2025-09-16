@@ -6,11 +6,16 @@
 //! ensuring a clean and organized architecture.
 
 use std::{
-    path::PathBuf,
+    fs::remove_file,
+    path::Path,
 };
 
 use redb::{Database, Key, TableDefinition, Value};
 use serde::{Serialize, Deserialize};
+use tracing::{
+    debug,
+    error
+};
 
 use sprite_shrink::{
     Hashable, SSAChunkMeta
@@ -134,25 +139,71 @@ impl Default for SpriteShrinkConfig {
     }
 }
 
-/// A resource guard that ensures a temporary database is deleted on drop.
+/// A resource guard that ensures a temporary file is deleted when it goes out
+/// of scope.
 ///
 /// This struct implements the **RAII** (Resource Acquisition Is 
-/// Initialization) pattern. When an instance of `TempDatabase` is created,
-/// it holds the path to a temporary file. When the instance goes out of scope,
-/// its `drop` implementation is automatically called, ensuring the file is 
-/// cleaned up.
+/// Initialization) pattern. When an instance of `TempFileGuard` is created, it
+/// holds a reference to a temporary file's path. When the guard is dropped 
+/// (i.e., it goes out of scope), its `drop` implementation is automatically 
+/// called, ensuring the temporary file is cleaned up from the filesystem.
+///
+/// This is particularly useful for handling temporary data that should not
+/// persist if an operation is interrupted, cancelled, or fails.
 ///
 /// # Fields
 ///
-/// * `path`: The path to the temporary database file to be deleted on drop.
-pub struct TempDatabase {
-    pub path: PathBuf,
+/// * `path`: A reference to the `Path` of the temporary file to be managed.
+pub struct TempFileGuard<'a> {
+    path: &'a Path,
 }
-impl Drop for TempDatabase {
-    fn drop(&mut self) {
-        /*Attempt to remove the file, ignoring any errors (e.g., if the file
-        was already removed or never created).*/
-        let _ = std::fs::remove_file(&self.path);
+
+/// Creates a new `TempFileGuard` for the specified file path.
+///
+/// This function does not create the file itself, but rather establishes
+/// the guard that will be responsible for deleting the file at `path` when
+/// the guard is dropped.
+///
+/// # Arguments
+///
+/// * `path`: A reference to the `Path` of the temporary file to manage.
+impl<'a> TempFileGuard<'a> {
+    pub fn new(path: &'a Path) -> Self {
+        Self { path }
     }
 }
 
+/// The drop implementation for `TempFileGuard`.
+///
+/// This method is called automatically when the `TempFileGuard` instance
+/// goes out of scope. It attempts to remove the temporary file at the
+/// stored path.
+/// 
+/// /// # Arguments
+///
+/// * `path`: A reference to the `Path` of the temporary file being managed.
+///
+/// If the file has already been removed or was renamed (e.g., after a
+/// successful operation), this method does nothing. If an error occurs
+/// during file removal, it is logged, but the program will not panic.
+impl<'a> Drop for TempFileGuard<'a> {
+    fn drop(&mut self) {
+        /*Only remove the file if it still exists. If the operation
+        succeeded, it will have been renamed, and this will do nothing.*/
+        if self.path.exists() {
+            if let Err(e) = remove_file(self.path) {
+                error!(
+                    "Failed to remove temporary file at {:?}: {}", 
+                    self.path, 
+                    e
+                );
+            } else {
+                debug!(
+                    "Successfully removed temporary file: {:?}", 
+                    self.path
+                );
+            }
+            
+        }
+    }
+}

@@ -13,6 +13,7 @@ use std::{
     fmt::{Debug, Display},
     hash::Hash,
     io::{self, Read, Write},
+    marker::PhantomData,
     mem,
     os::raw::c_void,
     sync::{Arc, Mutex},
@@ -26,7 +27,7 @@ use zerocopy::IntoBytes;
 
 use crate::{ffi::ffi_types::{
     FFIProgress, FFIProgressType, FFIUserData
-}, SpriteShrinkError};
+}, IsCancelled, SpriteShrinkError};
 use crate::lib_structs::{
     ChunkLocation, FileHeader, FileManifestParent, Progress
 };  
@@ -68,6 +69,12 @@ pub enum ArchiveError {
 
     #[error("Thread pool creation failed: {0}")]
     ThreadPoolError(String),
+
+    #[error("An error occurred in an external callback: {0}")]
+    External(String),
+
+    #[error("Operation cancelled by user.")]
+    Cancelled,
 }
 
 unsafe impl Send for FFIUserData {}
@@ -76,7 +83,7 @@ unsafe impl Sync for FFIUserData {}
 //C style progress callback function pointer
 type CProgressCallback = extern "C" fn(FFIProgress, *mut c_void);
 
-pub struct ArchiveBuilder<'a, H, R, W> {
+pub struct ArchiveBuilder<'a, E, H, R, W> {
     //Required parameters
     ser_file_manifest: Vec<FileManifestParent<H>>,
     sorted_hashes: &'a [H],
@@ -94,6 +101,9 @@ pub struct ArchiveBuilder<'a, H, R, W> {
     opt_dict: bool,
     progress_callback: Option<Box<dyn Fn(Progress) + Sync + Send>>,
     c_progress_callback: Option<(CProgressCallback, FFIUserData)>,
+
+    //Add this field
+    _error_type: PhantomData<E>,
 }
 
 /// Constructs the file header for a new archive.
@@ -256,7 +266,7 @@ pub fn compress_with_dict(
 /// - `ArchiveError::WorkerError` if a worker thread pool terminates
 ///   unexpectedly or if not all chunks are processed correctly.
 /// - Any error propagated from the compression logic within a worker thread.
-pub fn compress_chunks<H, R, W>(
+pub fn compress_chunks<ERead, EWrite, H, R, W>(
     worker_count: usize,
     dictionary: &[u8],
     sorted_hashes: &[H],
@@ -265,9 +275,11 @@ pub fn compress_chunks<H, R, W>(
     chunk_write_cb: W,
 ) -> Result<Vec<(H, ChunkLocation)>, ArchiveError>
 where
+    ERead: std::error::Error + IsCancelled + Send + Sync + 'static,
+    EWrite: std::error::Error + IsCancelled + Send + Sync + 'static,
     H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
-    R: Fn(&[H]) -> Vec<(H, Vec<u8>)> + Send + Sync + 'static,
-    W: Fn(&[u8]) + Send + Sync + 'static,
+    R: Fn(&[H]) -> Result<Vec<(H, Vec<u8>)>, ERead> + Send + Sync + 'static,
+    W: Fn(&[u8]) -> Result<(), EWrite> + Send + Sync + 'static,
 {
     //Set lower and upper thresholds for prefetcher.
     const PREFETCH_LOW_THRESHOLD: usize = 100;
@@ -393,9 +405,19 @@ where
                         .min(total_chunks);
                     //Generate list of hashes to retrieve.
                     let hashes_to_read = &sha_clone[read_cursor..end];
-                    
+
+                    let chunks = match chunk_list_read_cb(hashes_to_read) {
+                        Ok(chunks) => chunks,
+                        Err(e) => {
+                            if e.is_cancelled() {
+                                return Err(ArchiveError::Cancelled);
+                            }
+                            return Err(ArchiveError::External(e.to_string()));
+                        }
+                    };
+
                     //Use callback to receive chunk data.
-                    for chunk in chunk_list_read_cb(hashes_to_read) {
+                    for chunk in chunks {
                         if to_compress_tx.send(chunk).is_err() {
                             //State if error occurred.
                             return Err(ArchiveError::WorkerError(
@@ -446,7 +468,8 @@ where
 
                         /*Send the compressed data to be written by the host 
                         application*/
-                        chunk_write_cb(&data_to_write);
+                        chunk_write_cb(&data_to_write)
+                            .map_err(|e| ArchiveError::External(e.to_string()))?;
 
                         //Incrment write cursor.
                         write_cursor += 1;
@@ -495,16 +518,15 @@ where
         .into_inner()
         .expect("Mutex should not be poisoned");
 
-    //println!("reordering_buffer reached {max_buffer_size} key-value pairs.");
-
     Ok(final_chunk_index)
 }
 
-impl<'a, H, R, W> ArchiveBuilder<'a, H, R, W>
+impl<'a, E, H, R, W> ArchiveBuilder<'a, E, H, R, W>
 where
+    E: std::error::Error + IsCancelled + Send + Sync + 'static,
     H: Copy + Debug + Eq + Hash + Serialize + Send + Sync + 'static + Display + Ord,
-    R: Fn(&[H]) -> Vec<Vec<u8>> + Send + Sync + 'static,
-    W: FnMut(&[u8], bool) + Send + Sync + 'static,
+    R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
+    W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
 {
     pub fn new(
         ser_file_manifest: Vec<FileManifestParent<H>>,
@@ -531,6 +553,7 @@ where
             opt_dict: false,
             progress_callback: None,
             c_progress_callback: None,
+            _error_type: PhantomData,
         }
     }
 
@@ -631,6 +654,7 @@ where
             opt_dict,
             progress_callback,
             c_progress_callback,
+            _error_type
         } = self;
 
         let get_chunk_data_arc = Arc::new(get_chunk_data);
@@ -672,7 +696,8 @@ where
             }
         };
 
-        //println!("Chunked data total size is: {}", self.total_size);
+        //Report progress before starting a dictionary generation
+        report_progress(Progress::GeneratingDictionary);
         
         let (samples_for_dict, sample_sizes) = build_train_samples(
             sorted_hashes, 
@@ -683,12 +708,8 @@ where
 
         //Make dictionary from sorted data.
         let mut _dictionary: Vec<u8> = Vec::new();
-
-        //Report progress before starting a dictionary generation
-        report_progress(Progress::GeneratingDictionary);
         
         if opt_dict{
-            //println!("Generating optimized dictionary.");
             _dictionary = gen_zstd_opt_dict(
             &samples_for_dict, 
             &sample_sizes,
@@ -696,7 +717,6 @@ where
             worker_threads, 
             compression_level)?;
         } else {
-            //println!("Generating regular dictionary.");
             _dictionary = zstd::dict::from_continuous(
             &samples_for_dict,
             &sample_sizes,
@@ -708,14 +728,13 @@ where
         drop(samples_for_dict);
         drop(sample_sizes);
 
-        //println!("Dictionary generated. Now compressing.");
-
         //Report progress after dictionary generation is done.
         report_progress(Progress::DictionaryDone);
 
         let get_chunk_data_cb = {
-            move |hashes: &[H]| -> Vec<(H, Vec<u8>)> {
-                let ret_chunks = (get_chunk_data_arc)(hashes);
+            let get_chunk_data_arc = Arc::new(get_chunk_data_arc);
+            move |hashes: &[H]| -> Result<Vec<(H, Vec<u8>)>, E> {
+                let ret_chunks = (get_chunk_data_arc)(hashes)?;
                 let mut chunk_pairs: Vec<(H, Vec<u8>)> = 
                     Vec::with_capacity(ret_chunks.len());
 
@@ -723,20 +742,22 @@ where
                     chunk_pairs.push((hashes[index], chunk.clone()));
                 };
 
-                chunk_pairs
+                Ok(chunk_pairs)
             }
         };
 
         let write_chunk_data_cb = {
             let progress_callback_clone = progress_callback_arc.clone();
             let write_comp_data_arc_clone = Arc::clone(&write_comp_data_arc);
-            move |chunk: &[u8]| {
+            move |chunk: &[u8]| -> Result<(), E> {
                 let mut writer = write_comp_data_arc_clone.lock().unwrap();
-                (*writer)(chunk, false);
+                (*writer)(chunk, false)?;
 
                 if let Some(callback) = &progress_callback_clone {
                     callback(Progress::ChunkCompressed);
-                }
+                };
+
+                Ok(())
             }
             
         };
@@ -756,10 +777,16 @@ where
             write_chunk_data_cb
         )?;
 
-        //Flush buffer to disk
+        //Flush remaining buffer to disk
         let empty_data: [u8; 0] = [];
         let mut writer = write_comp_data_arc.lock().unwrap();
-        (*writer)(&empty_data, true);
+        (*writer)(&empty_data, true).map_err(|e| {
+            if e.is_cancelled() {
+                ArchiveError::Cancelled
+            } else {
+                ArchiveError::External(e.to_string())
+            }
+        })?;
 
         /*The following are now prepared:
         compressed_data store
@@ -768,21 +795,18 @@ where
 
         let config = bincode::config::standard();
 
-        //println!("Converting ser_file_manifest.");
         let bin_file_manifest = bincode::serde::encode_to_vec(
         &ser_file_manifest, config
         ).map_err(|e| ArchiveError::ManifestEncodeError(e.to_string()))?;
         
         drop(ser_file_manifest);
 
-        //println!("Converting chunk_index.");
         let bin_chunk_index = bincode::serde::encode_to_vec(
         &chunk_index, config
         ).map_err(|e| ArchiveError::IndexEncodeError(e.to_string()))?;
 
         drop(chunk_index);
 
-        //println!("Building file header.");
         //Build the file header
         let file_header = build_file_header(
             file_count,
@@ -793,14 +817,6 @@ where
             bin_chunk_index.len() as u64,
         );
 
-        //let data_store_size = compressed_data_store.len();
-
-        //let total_file_size = file_header.data_offset as usize + 
-        //    data_store_size;
-        
-        //println!("Compressed data store is {} bytes.", data_store_size);
-
-        //println!("Preparing to return final_data.");
         let mut final_data = Vec::with_capacity(
             file_header.data_offset as usize + bin_file_manifest.len() as usize + 
             _dictionary.len() + bin_chunk_index.len() as usize
@@ -810,7 +826,6 @@ where
         final_data.extend_from_slice(&bin_file_manifest);
         final_data.extend_from_slice(&_dictionary);
         final_data.extend_from_slice(&bin_chunk_index);
-        //final_data.extend_from_slice(&compressed_data_store);
 
         Ok(final_data)
     }

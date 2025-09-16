@@ -20,6 +20,7 @@ use crate::ffi::ffi_types::{
     FFISSAChunkMeta,
 };
 use crate::ffi::{FFIResult};
+use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{
     ChunkLocation, FileManifestParent
 };
@@ -101,8 +102,8 @@ fn serialize_uncompressed_data_ffi_internal<H>(
     ) -> FFIChunkDataArray,
     out_ptr: *mut *mut FFISerializedOutput<H>
 ) -> FFIResult 
-where 
-    H: std::fmt::Display + std::cmp::Ord + std::marker::Copy + std::hash::Hash,
+where
+    H: std::fmt::Display + std::cmp::Ord + std::marker::Copy + std::hash::Hash + 'static,
 {
     let file_manifest = unsafe {
         //Convert C inputs to Rust types
@@ -132,17 +133,19 @@ where
         file_manifest
     };
 
+    let user_data_addr = user_data as usize;
+
     let get_keys_closure = || {
         let mut len = 0;
-        let ptr = unsafe {get_keys_cb(user_data, &mut len)};
+        let ptr = unsafe {get_keys_cb(user_data_addr as *mut c_void, &mut len)};
         //Take ownership of the C-allocated array
         unsafe {Vec::from_raw_parts(ptr, len, len)}
     };
 
-    let get_chunks_closure = |hashes: &[H]| {
+    let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
         let ffi_chunks_array = unsafe {
             get_chunks_cb(
-                user_data, 
+                user_data_addr as *mut c_void, 
                 hashes.as_ptr(), 
                 hashes.len()
             )};
@@ -160,14 +163,14 @@ where
             ffi_chunks_array.ptr, 
             ffi_chunks_array.len, 
             ffi_chunks_array.len)};
-        chunks
+        Ok(chunks)
     };
         
     let (
-        ser_file_manifest,
+        ser_file_manifest,  
         chunk_index,
         sorted_hashes
-    ) = match serialize_uncompressed_data::<_, H, _>(
+    ) = match serialize_uncompressed_data::<_, SpriteShrinkError, H, _>(
         &file_manifest,
         &get_keys_closure,
         &get_chunks_closure

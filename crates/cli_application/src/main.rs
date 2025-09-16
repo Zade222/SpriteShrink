@@ -7,9 +7,15 @@
 //! metadata retrieval. It serves as the central hub that connects all
 //! other components of the CLI application.
 
-use std::fs;
+use std::{
+    fs,
+    sync::{
+        Arc, atomic::{AtomicBool, Ordering}
+    },
+};
 
 use clap::{CommandFactory, FromArgMatches};
+use ctrlc::set_handler;
 use tracing::{
     debug,
     error,
@@ -33,9 +39,13 @@ mod error_handling;
 use error_handling::{
     CliError, initiate_logging, offset_to_line_col};
 mod storage_io;
-use crate::{cli_types::SpriteShrinkConfig, storage_io::{
+use crate::{cli_types::{
+    SpriteShrinkConfig
+    }, 
+    storage_io::{
     cleanup_old_logs, files_from_dirs, load_config, organize_paths
-}};
+    },
+};
 
 #[cfg(feature = "dhat-heap")]
 use dhat::Profiler;
@@ -44,26 +54,45 @@ use dhat::Profiler;
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
 
-/// Executes the main application logic based on parsed arguments.
+/// Dispatches the primary application logic based on parsed arguments.
 ///
-/// This function acts as the central dispatcher for the application.
-/// It takes the validated command-line arguments and determines which
-/// primary operation to perform: compression, extraction, or metadata
-/// retrieval. It also handles the initial organization of input paths,
-/// distinguishing between files and directories.
+/// This function serves as the central controller for the application. It 
+/// takes the validated command-line arguments and determines which
+/// operational mode to execute: compression, extraction, or metadata
+/// retrieval. It is also responsible for the initial processing of input 
+/// paths, expanding directories into a list of files to be processed.
 ///
 /// # Arguments
 ///
 /// * `args`: A reference to the `Args` struct, which contains all the
-///   user-provided settings and flags.
+///   user-provided settings and flags that dictate the application's behavior.
+/// * `running`: An `Arc<AtomicBool>` that is used as a cancellation token.
+///   Long-running operations, like compression, will monitor this flag to
+///   allow for a graceful shutdown if the user issues a termination signal 
+///   (e.g., Ctrl+C).
 ///
 /// # Returns
 ///
 /// A `Result` which is:
 /// - `Ok(())` if the selected operation completes successfully.
-/// - `Err(CliError)` if any part of the process fails, such as
-///   invalid path handling or an error within a specific run mode.
-fn run(args: &Args) -> Result<(), CliError> {
+/// - `Err(CliError)` if any part of the process fails, such as invalid path
+///   handling, an error within a specific run mode, or invalid argument
+///   combinations.
+///
+/// # Errors
+///
+/// This function can return an error in several cases, including:
+/// - An invalid combination of arguments is provided (e.g., requesting
+///   extraction on more than one archive).
+/// - An I/O error occurs while collecting files from input directories.
+/// - A required argument for a specific mode is missing (e.g., no output
+///   path for extraction).a
+/// - Any error propagated from the underlying `run_compression`,
+///   `run_extraction`, or `run_info` functions.
+fn run(
+    args: &Args,
+    running: Arc<AtomicBool>
+) -> Result<(), CliError> {
     let (mut file_paths, dir_paths) = organize_paths(&args.input)?;
     
     if !dir_paths.is_empty() {
@@ -106,7 +135,8 @@ fn run(args: &Args) -> Result<(), CliError> {
                 &file_paths[0], 
                 output_path, 
                 &indices, 
-                args
+                args,
+                running,
             )?;
         }
         
@@ -136,8 +166,18 @@ fn run(args: &Args) -> Result<(), CliError> {
             let hash_bit_length = args.hash_bit_length.unwrap_or(64);
 
             match hash_bit_length{
-                64 => run_compression::<u64>(file_paths, args, &1)?,
-                128 => run_compression::<u128>(file_paths, args, &2)?,
+                64 => run_compression::<u64>(
+                    file_paths,
+                    args,
+                    &1,
+                    running,
+                )?,
+                128 => run_compression::<u128>(
+                    file_paths, 
+                    args, 
+                    &2,
+                    running,
+                )?,
                 _ => return Err(CliError::InvalidHashBitLength(
                     "Must be 64 or 128.".to_string(),
                 )),
@@ -157,7 +197,28 @@ fn run(args: &Args) -> Result<(), CliError> {
     Ok(())
 }
 
+/// Sets up a handler to gracefully shut down the application on Ctrl+C.
+///
+/// This function registers a handler that listens for the Ctrl+C signal. When
+/// the signal is received, it flips a shared atomic boolean flag from `true` 
+/// to `false`. This flag can be passed to long-running tasks, allowing them to
+/// check for a cancellation request and terminate gracefully instead of 
+/// abruptly exiting.
+///
+/// # Returns
+///
+/// An `Arc<AtomicBool>` that serves as a shared "running" flag. It is 
+/// initially `true` and will be set to `false` when the user presses Ctrl+C.
+fn setup_ctrlc_handler() -> Arc<AtomicBool> {
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
 
+    set_handler(move || {
+        r.store(false, Ordering::SeqCst);
+    }).expect("Error setting Ctrl-C handler");
+
+    running
+}
 
 /// The main entry point for the command-line application.
 ///
@@ -177,6 +238,9 @@ fn run(args: &Args) -> Result<(), CliError> {
 fn main() -> Result<(), CliError>{
     #[cfg(feature = "dhat-heap")]
     let _dhat = Profiler::new_heap();
+
+
+    let running = setup_ctrlc_handler();
 
     //Receive and validate user specified arguments/flags where applicable.
     let matches = Args::command().get_matches();
@@ -233,8 +297,9 @@ fn main() -> Result<(), CliError>{
     flags and the on disk config.*/
     let final_args = merge_config_and_args(&file_cfg, args, &matches);
 
-    let log_level = if final_args.disable_logging || file_cfg.log_level == "off"{
-        "off".to_string()
+    let log_level = if final_args.disable_logging || 
+        file_cfg.log_level == "off" {
+            "off".to_string()
     } else {
         file_cfg.log_level.to_string()
     };
@@ -266,10 +331,15 @@ fn main() -> Result<(), CliError>{
     }
     
     //Begin application logic.
-    match run(&final_args){
+    match run(&final_args, running){
         Ok(_) => {
             debug!("Application completed task successfully.");
         },
+        Err(CliError::Cancelled) => {
+            warn!(
+                "Operation cancelled by user."
+            );
+        }
         Err(e) => {
             error!("Application encountered an error and has exited.\
                 Error: {}", e
