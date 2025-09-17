@@ -207,7 +207,7 @@ pub struct Args {
         help_heading = "Behavior and Output Control", 
         default_value_t = false,
         help = "Forces the application to overwrite the output file \nif it \
-        exists and if the output directory doesn't\nexist, creates it."
+        exists and/or if the output directory doesn't\nexist, creates it."
     )]
     pub force: bool,
 
@@ -219,15 +219,6 @@ pub struct Args {
         help = "Activates printing progress to console."
     )]
     pub progress: bool,
-
-    /*#[arg(
-        short, 
-        long, 
-        help_heading = "Behavior and Output Control", 
-        default_value_t = false,
-        help = "Activates verbose output for detailed diagnostic\ninformation."
-    )]
-    pub verbose: bool,*/
 
     #[arg(
         short, 
