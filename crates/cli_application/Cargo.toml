@@ -2,6 +2,7 @@
 name = "sprite_shrink_application"
 version = "0.9.1"
 edition = "2024"
+license = "GPL-3.0-only"
 
 [[bin]]
 name = "sprite-shrink"
@@ -34,7 +35,7 @@ thread-priority = "2.1"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
-xxhash-rust = {version = "0.8.12", features = ["xxh3"] }
+xxhash-rust = {version = "0.8", features = ["xxh3"] }
 
 [features]
 dhat-heap = ["dhat"]
