@@ -182,7 +182,7 @@ impl<H> From<(H, ChunkLocation)> for FFIChunkIndexEntry<H> {
             hash,
             data: FFIChunkLocation {
                 offset: location.offset,
-                length: location.length,
+                length: location.compressed_length,
             },
         }
     }
@@ -244,7 +244,7 @@ impl From<ChunkLocation> for FFIChunkLocation {
     fn from(location: ChunkLocation) -> Self {
         Self {
             offset: location.offset,
-            length: location.length,
+            length: location.compressed_length,
         }
     }
 }

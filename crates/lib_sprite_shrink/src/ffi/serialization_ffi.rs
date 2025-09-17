@@ -250,7 +250,7 @@ where
                 hash,
                 ChunkLocation {
                     offset: location.offset,
-                    length: location.length,
+                    compressed_length: location.compressed_length,
                 },
             ))
         })

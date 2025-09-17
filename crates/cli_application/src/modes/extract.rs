@@ -206,7 +206,7 @@ where
             let comp_chunk_data = read_file_data(
                 file_path, 
                 &absolute_offset, 
-                &(chunk_location.length as usize)
+                &(chunk_location.compressed_length as usize)
             )?;
 
             let decomp_chunk_data = decompress_chunk(

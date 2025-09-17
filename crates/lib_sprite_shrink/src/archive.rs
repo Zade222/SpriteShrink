@@ -481,7 +481,7 @@ where
                             next_hash_to_write, 
                             ChunkLocation {
                                 offset,
-                                length: data_len as u32,
+                                compressed_length: data_len as u32,
                             }
                         ));
                         //Increment offset

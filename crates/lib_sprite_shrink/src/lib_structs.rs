@@ -23,11 +23,11 @@ use zerocopy::{IntoBytes, FromBytes};
 ///
 /// * `offset`: The starting position of the chunk in bytes, relative
 ///   to the beginning of the archive's data section.
-/// * `length`: The size of the compressed chunk in bytes.
+/// * `compressed_length`: The size of the compressed chunk in bytes.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ChunkLocation {
     pub offset: u64,
-    pub length: u32,
+    pub compressed_length: u32,
 }
 
 /// Defines the header structure for an archive file.
