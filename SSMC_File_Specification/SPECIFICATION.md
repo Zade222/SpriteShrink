@@ -36,11 +36,11 @@ The header provides a quick summary of the archive's contents and the location o
 
 | Offset (Bytes) | Length (Bytes) | Data Type | Description |
 | :--- | :--- | :--- | :--- |
-| 0 | 8 | `[u8; 8]` | **Magic Number:** A constant value to identify the file type. Recommended: `b"SSMC_V1_"` |
+| 0 | 8 | `[u8; 8]` | **Magic Number:** A constant value to identify the file type. Recommended: `b"SSARCHV1` |
 | 8 | 4 | `u32` | **Format Version:** The version of the file format (e.g., `0x00010000` for v1.0). |
 | 12 | 4 | `u32` | **File Count:** The total number of files stored in the archive. |
 | 16 | 2 | `u16` | **Compression Algorithm:** An enum representing the algorithm used. E.g., `98=Zstd`. |
-| 18 | 1 | `u16` | **Hash Type:** A numerical id representing the hash type used. E.g., 1 = xxhash3_64, 2 = xxhash3_128. |
+| 18 | 1 | `u8` | **Hash Type:** A numerical id representing the hash type used. E.g., 1 = xxhash3_64, 2 = xxhash3_128. |
 | 19 | 5 | `[u8; 5]` | **Padding:** Reserved for alignment or future information. Must be all zeros. |
 | 24 | 8 | `u64` | **Manifest Offset:** The absolute byte offset where the File Manifest section begins. |
 | 32 | 8 | `u64` | **Manifest Length:** The total length of the File Manifest section in bytes. |
@@ -80,9 +80,9 @@ This section contains the raw binary data of the compression dictionary (e.g., g
 
 ### 2.4. Chunk Index (Variable Size)
 
-This section acts as the master lookup table for finding the data of any given chunk. It is a single data block created by serializing a `HashMap<u64, ChunkLocation>` using Bincode.
+This section acts as the master lookup table for finding the data of any given chunk. It is a single data block created by serializing a `Vec<H, ChunkLocation>` using Bincode.
 
-* **Key (`u64 or u128`):** The `xxhash3_64` or `xxhash3_128` hash of a unique data chunk.
+* **Key (`H (u64 or u128)`):** The hash of a unique data chunk. The type H is determined by the Hash Type field in the header (e.g., `u64` for `xxhash3_64`, `u128` for `xxhash3_128`).
 * **Value (`ChunkLocation`):** A struct containing the location and compressed size of the chunk.
 
 The `ChunkLocation` struct:
