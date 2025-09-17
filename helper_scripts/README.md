@@ -83,7 +83,7 @@ This script is for use in a PowerShell terminal on Windows.
 
 * `-InputRoot <path_to_roms>`: (Required) The full path to the root of your ROM library (e.g., `D:\ROMs`).
 * `-OutputRoot <path_to_archives>`: (Required) The path where the compressed `.ssmc` files will be saved. The script will replicate the `Manufacturer/System` folder structure here.
-* `-ExtraFlags "<flags>"`: (Optional) A string containing any additional flags you want to pass to the `sprite_shrink.exe` command. For example, `--force` to overwrite existing archives or `--verbose` for detailed logs.
+* `-ExtraFlags "<flags>"`: (Optional) A string containing any additional flags you want to pass to the `sprite_shrink.exe` command. For example, `--force` to overwrite existing archives or `--progress` for a progress bar.
 
 #### **Example Usage:**
 
@@ -136,7 +136,7 @@ This script is for use in a Bash-compatible shell on Linux or macOS.
     To force overwriting existing archives:
 
     ```bash
-    ./shrink_library.sh /home/user/roms /home/user/compressed_roms '---auto-tune --force'
+    ./shrink_library.sh /home/user/roms /home/user/compressed_roms '--auto-tune --force'
     ```
 
 ***
