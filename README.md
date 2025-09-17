@@ -11,11 +11,11 @@ It also includes `lib_sprite_shrink`, a Rust library for integration into applic
 ## Features
 
 * **Intelligent Deduplication**: Analyzes multiple files to identify and eliminate shared byte data, storing only unique copies. This is achieved using the **FastCDC** content-defined chunking algorithm.
-* **High Compression Ratios**: Achieves superior space savings by leveraging shared dictionary compression with **Zstandard**.
+* **High Compression Ratios**: Achieves superior space savings by leveraging shared dictionary compression with **Zstandard** in addition tot he deduplication.
 * **Flexible Archiving**: Consolidates deduplicated data into a single, highly compressed `.ssmc` archive file.
 * **Parameter Auto-Tuning**: Automatically tunes chunking and compression parameters to find an optimal balance between compression speed and file size.
-* **Data Integrity**: Uses **SHA-512** hashing to verify that every extracted file is a byte-for-byte perfect copy of the original.
-* **Metadata Inspection**: View a list of all files contained within an `.ssmc` archive, along with their original filenames and indices.
+* **Data Integrity**: Internally uses **SHA-512** hashing to verify that every extracted file is a byte-for-byte perfect copy of the original. Upon decompression it will also verify each chunk of data to ensure no corruption occurred since the creation of the archive.
+* **Metadata Inspection**: View a list of all files contained within an `.ssmc` archive, along with their original filenames, sizes and indices.
 * **Precise Extraction**: Extract one or more specific files from an `.ssmc` archive by index.
 * **Developer-Friendly Library**: A dedicated Rust library (`lib_sprite_shrink`) exposes core functionalities for easy integration into third-party applications.
 * **Cross-Platform Compatibility**: Fully operational on 64-bit Linux, macOS, and Windows on x86-64 and AArch64 architectures.
@@ -25,30 +25,15 @@ It also includes `lib_sprite_shrink`, a Rust library for integration into applic
 
 ## Intended Use Cases and Limitations
 
-SpriteShrink is specifically designed for collections of files that are relatively small and share portions of data. The ideal use case is managing entire libraries of retro game ROMs from cartridge-based systems.
+SpriteShrink is specifically designed for collections of files that are relatively small and share portions of data. The ideal use case is managing variant versions of a single game in your library or multi-disc games that contain duplicate data.
 
 While it is technically capable of processing any file type, it is **not recommended** for:
-* **Large Modern Game Files**: Compressing games from systems that use optical media (like CDs, DVDs, or Blu-rays) or high-capacity cartridges (2GB or more).
 * **Files with Little Redundancy**: Collections of files that do not share common data (e.g., a directory of unrelated documents or videos).
+* **Files with Little Redundancy**: Games that internally use their own compression or contain a large amount of compressed video data.
 
 The tool's content-defined chunking and deduplication algorithms provide the most benefit when byte-level similarities exist across multiple files, which is common in ROM sets with different regional versions and revisions.
 
-**However**, given the aforementioned limitations there are circumstances where it can work well. Systems that have games that span multiple discs being one of them. I have tested it specifically on my copy of Final Fantasy 7 which is three discs. Despite being one contiguous game across the three discs, there is a fair amount of assets used across all the discs that are duplicated should the player return to earlier parts of the game. Despite each disk technically overall different this still lead to an approximate compressed:original size ratio of 1:2 when I compressed my disc images using SpriteShrink. So in the end the SpriteShrink size is smaller than what CHD with cdzs or a tar file using zstd at compression level 19 could manage.
-
-Should emulation software integrate the associated library for it's extraction capabilities I would only use SpriteShrink for larger ROMs or disc based media **IF** you configure your emulation software of choice to load the image into memory post extraction. That way the disc is extracted and then run from RAM. If the software needs to repeatedly extract the whole disc to get a small piece of data from storage that will likely cause performance problems or even instability.
-
-I hope to work on another application that uses what I learned from this project and uses much of what SpriteShrink does but specifically for larger modern or optical media based games so that it can seek specific chunks and extract the data instead of the whole file. I recently came across zstd-seekable which may be the answer but I need to look into it more.
-
----
-
-## Notes from the Developer and Future Goals
-
-Currently, the SpriteShrink application has reached a point of what I would consider a minimum viable application/product of what I set out to do from the start. Things I hope or are considering adding are as follows:
-
-- [ ] - Add more compression algorithms. However, these algorithms must support generating a dictionary prior to compression. Currently not sure about this since zstd has performed so well thus far.
-- [ ] - Add config support so that the user can set default flags to be used each time the application is run to make repeated runs easier and faster.
-- [ ] - Rework the error enum for both the application and potentially the library to not be a mega/single big enum.
-- [ ] - Add flag for formatting the output of the metadata flag to be in json format.
+**However**, given the aforementioned limitations there are circumstances where it can work well. Systems that have games that span multiple discs being one of them. I have tested it specifically on my copy of Final Fantasy 7 which is three discs. Despite being one contiguous game across the three discs, there is a fair amount of assets used across all the discs that are duplicated should the player return to earlier parts of the game. Despite each disk technically being overall different this still leads to an approximate compressed:original size ratio of 1:2 when I compressed my disc images using SpriteShrink. So in the end the SpriteShrink size is smaller than what CHD with cdzs or a tar file using zstd at compression level 19 could manage.
 
 ---
 
@@ -140,10 +125,12 @@ To build SpriteShrink from source, you will need the [Rust toolchain](https://ww
 
     For a 64-bit ARM target for Linux:
 
-    ```rustup target add aarch64-unknown-linux-gnu```
+    ```bash
+    rustup target add aarch64-unknown-linux-gnu
+    ```
 
 5.  **Build the project:**
-    The linker rust flag will depend on where you have the linker stored. Specify the path to the gcc binary. For example for the RG35XX Plus/H/2024 Toolchain that will be as follows:
+    The linker rust flag will depend on where you have the linker stored. Specify the path to the gcc binary. Normally this will not need to be explicitly set expect for unique targets. For example for the RG35XX Plus/H/2024 Toolchain that will be as follows:
 
     # Generic Template
     ```RUSTFLAGS="-C linker=/path/to/your/toolchain/bin/target-gcc" cargo build --target <your-target-triple> --release```
@@ -190,20 +177,23 @@ Here's a quick reference for the main arguments:
 | `-i`       | `--input`             | Path to a file or directory for input. Can be specified multiple times.                  | Required      |
 | `-o`       | `--output`            | Path for the output archive (compression) or directory (extraction).                     | Mode Dependent|
 | `-m`       | `--metadata`          | Activates metadata retrieval mode. Used with `-i` (input archive).                       | N/A           |
+| `-j`       | `--json`              | Activates json metadata mode. The metadata output will be printed in json format.        | `false`       |
 | `-e`       | `--extract`           | Specifies file indices to extract (e.g., `1,3,5-7`). Requires `-o` and `-i`.             | N/A           |
-| `-c`       | `--compression`       | Sets the compression algorithm. (Currently only uses zstd no matter what is specified)   | `zstd`        |
-|            | `--compression-level` | Sets the numerical compression level for the chosen algorithm.                           | `19`          |
+|            | `--compression-level` | Sets the numerical compression level for the zstd algorithm.                             | `19`          |
 | `-w`       | `--window`            | Hashing algorithm window size (e.g., "2KB", "4KB"). Recommended: 2KB.                    | `2KB`         |
 | `-d`       | `--dictionary`        | Compression algorithm dictionary size (e.g., "16KB", "32KB"). Recommended: 16KB.         | `16KB`        |
+| `-b`       | `--hash-bit-length`   | Sets the hashing algorithm bit length. Default value is 64. If the hash verification stage fails try setting to 128. | `false`       |
 |            | `--auto-tune`         | Autotune window and dictionary sizes for optimal size. Overrides manual settings.        | `false`       |
 |            | `--autotune-timeout`  | Sets the maximum time in seconds for each autotune iteration.                            | `None`        |
 |            | `--optimize-dictionary`| When finalizing the archive, optimize the dictionary for better compression. Can be **Very slow** depending on dictionary size. | `false`       |
 | `-t`       | `--threads`           | Sets max worker threads. Defaults to all available logical cores.                        | All cores     |
-|            | `--low-memory`        | Forces low-memory mode (sequential I/O, 4 threads for compression).                      | `false`       |
-| `-f`       | `--force`             | Overwrites the output file if it exists.                                                 | `false`       |
-| `-v`       | `--verbose`           | Activates verbose output for detailed diagnostic information.                            | `false`       |
+|            | `ignore-config`       | Forces application to not read it's config and won't create one if it doesn't already exist. | `false`       |
+|            | `--low-memory`        | Forces low-memory mode by using an on disk cache for temporarily storing data. Can adversely effect application performance. | `false`       |
+| `-f`       | `--force`             | Overwrites the output file if it exists creates the output directory if it doesn't exist. | `false`       |
+| `-p`       | `--progress`          | Activates printing progress to console.                                                  | `false`       |
 | `-q`       | `--quiet`             | Activates quiet mode, suppressing non-essential output.                                  | `false`       |
 | `-h`       | `--help`              | Prints comprehensive help information and exits.                                         | N/A           |
+|            | `--disable-logging`   | Disables logging messages to log file.                                                   | `false`       |
 
 ---
 
@@ -223,9 +213,14 @@ SpriteShrink is designed to be robust. It gracefully handles malformed inputs, e
 
 ## License
 
-This project is open-source and available under the [GPLv3 License](https://www.gnu.org/licenses/gpl-3.0.en.html). Please see the `LICENSE` file for more details [**here**](./LICENSE).
+This project utilizes multiple licenses for its different components. Please ensure you understand and comply with the license for any part of the project you use.
 
-The documentation for the `.ssmc` file format specification is licensed separately under the [Creative Commons Attribution 4.0 International License](https://creativecommons.org/licenses/by/4.0/) (CC-BY-4.0). The specification license can be found [**here**](./SSMC_File_Specification/LICENSE).
+-   **Cli Application (`sprite_shrink`)** is licensed under the **[GNU General Public License v3.0 (GPLv3)](https://www.gnu.org/licenses/gpl-3.0.en.html)**.
+    This is a copyleft license, which means that any derivative works of the application must also be licensed under the GPLv3.
+
+-   **Sprite Shrink Library (`lib_sprite_shrink`)** is licensed under the **[Mozilla Public License 2.0 (MPL-2.0)](https://www.mozilla.org/en-US/MPL/2.0/)**. This is a "weak copyleft" license. It requires that modifications to the library's source files be shared under the MPL-2.0, but it allows you to link the library into a larger work under a different license.
+
+-   **SSMC Specification (`SPECIFICATION.md`)** is licensed under the **[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/)**. This license allows you to share and adapt the specification for any purpose, even commercially, as long as you give appropriate credit.
 
 ## Support and Contact
 
