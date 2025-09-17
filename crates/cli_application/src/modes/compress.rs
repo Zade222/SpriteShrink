@@ -78,6 +78,8 @@ use crate::{
 ///   settings. The `--auto-tune` flag enables parameter optimization.
 /// * `hash_type_id`: A `u8` identifier for the hash type being used 
 ///   (e.g., 1 for 64-bit, 2 for 128-bit).
+/// * `running`: An `Arc<AtomicBool>` used for graceful cancellation of the
+///   operation.
 ///
 /// # Type Parameters
 ///
@@ -180,7 +182,7 @@ where
     .unwrap();
 
     let cache_dir = proj_dirs.cache_dir();
-    create_dir_all(cache_dir).unwrap();
+    create_dir_all(cache_dir)?;
 
     //Set db_paths
     let (db_path, at_db_path, pid) = get_db_paths();
@@ -195,9 +197,9 @@ where
     > = TableDefinition::new("data_store");
 
     let db = if process_in_memory {
-        Database::builder().create_with_backend(InMemoryBackend::new()).unwrap()
+        Database::builder().create_with_backend(InMemoryBackend::new())?
     } else {
-        Database::create(&db_path).unwrap()
+        Database::create(&db_path)?
     };
 
     let db_info = Arc::new(DBInfo {
@@ -233,30 +235,58 @@ where
 
     //Callback for getting all keys (hashes) in database
     let data_store_for_key_ret = Arc::clone(&data_store);
-    let key_ret_cb = 
-        || -> Vec<H> {
+    let key_ret_cb = {
+        let db_info_clone = Arc::clone(&db_info);
+        let batch_running_clone = Arc::clone(&running);
+        move || -> Result<Vec<H>, CliError> {
         if process_in_memory {
-            data_store_for_key_ret.iter().map(|entry| *entry.key()).collect()
+            if !batch_running_clone.load(Ordering::SeqCst) {
+                return Err(CliError::Cancelled);
+            }
+
+            Ok(data_store_for_key_ret.iter().map(|entry| *entry.key()).collect())
         } else {
+            if !batch_running_clone.load(Ordering::SeqCst) {
+                return Err(CliError::Cancelled);
+            }
+            
             //Get keys from db
-            get_keys(&db_info).unwrap()
+            Ok(get_keys(&db_info_clone)?)
         }
-    };
+    }};
 
     //Callback for getting a list of chunks from the provided list of hashes
     let chunk_ret_cb = Arc::new({
         let db_info_clone = Arc::clone(&db_info);
         let data_store_for_chunk_ret = Arc::clone(&data_store);
+        let running_clone = Arc::clone(&running);
         move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
             if process_in_memory {
-                let chunks = hashes.iter().map(|hash| {
-                    data_store_for_chunk_ret.get(hash).unwrap().clone()
-                }).collect();
+                if !running_clone.load(Ordering::SeqCst) {
+                    return Err(CliError::Cancelled);
+                }
 
-                Ok(chunks)
+                let chunks_iterator = hashes.iter().map(|hash| {
+                    data_store_for_chunk_ret
+                        .get(hash)
+                        .map(|val_ref| val_ref.clone())
+                });
+
+                let optional_chunks: Option<Vec<Vec<u8>>> = chunks_iterator
+                    .collect();
+
+                optional_chunks.ok_or_else(|| {
+                    CliError::KeyNotFound(
+                        "A chunk hash was not found in the in-memory data \
+                            store."
+                            .to_string())
+                })
             } else {
+                if !running_clone.load(Ordering::SeqCst) {
+                    return Err(CliError::Cancelled);
+                }
                 //Get chunk data from db
-                Ok(get_chunks(hashes, &db_info_clone).unwrap())
+                Ok(get_chunks(hashes, &db_info_clone)?)
             }
         }
     });
@@ -282,7 +312,7 @@ where
                     return Err(CliError::Cancelled);
                 }
                 
-                batch_insert(&db_info_ret_clone, chunk_batch).unwrap();
+                batch_insert(&db_info_ret_clone, chunk_batch)?;
                 Ok(())
             }
         }
@@ -362,9 +392,9 @@ where
                 let at_db = if process_in_memory {
                     Database::builder().create_with_backend(
                         InMemoryBackend::new()
-                    ).unwrap()
+                    )?
                 } else {
-                    Database::create(&at_db_path).unwrap()
+                    Database::create(&at_db_path)?
                 };
 
                 //Create database and encapsulate it in an Arc
@@ -403,7 +433,7 @@ where
                             batch_insert(
                                 &at_db_info_clone, 
                                 chunk_batch
-                            ).unwrap();
+                            )?;
 
                             Ok(())
                         }
@@ -422,35 +452,61 @@ where
 
                 /*Callback for getting all keys(hashes) from temporary 
                 database*/
-                let at_key_ret_cb = || -> Vec<H> {
+                let at_key_ret_cb = {
+                    let at_db_info_clone = Arc::clone(&at_db_info);
+                    let data_store_for_chunk_ret = Arc::clone(&tmp_data_store);
+                    let batch_running_clone = Arc::clone(&running);
+                    move || -> Result<Vec<H>, CliError> {
                     //Get keys from db
                     if process_in_memory {
-                        tmp_data_store.iter().map(|entry| 
+                        if !batch_running_clone.load(Ordering::SeqCst) {
+                            return Err(CliError::Cancelled);
+                        }
+                        Ok(data_store_for_chunk_ret.iter().map(|entry| 
                             *entry.key()
-                        ).collect()
+                        ).collect())
                     } else {
-                        get_keys(&at_db_info).unwrap()
+                        if !batch_running_clone.load(Ordering::SeqCst) {
+                            return Err(CliError::Cancelled);
+                        }
+                        Ok(get_keys(&at_db_info_clone)?)
                     }
-                };
+                }};
 
                 /*Callback for getting one or more chunks from the temporary 
                 database*/
                 let at_chunk_ret_cb = {
                     let at_db_info_clone = Arc::clone(&at_db_info);
                     let data_store_for_chunk_ret = Arc::clone(&tmp_data_store);
+                    let running_clone = Arc::clone(&running);
                     move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
                         if process_in_memory {
-                            let chunks = hashes.iter().map(|hash| {
+                            if !running_clone.load(Ordering::SeqCst) {
+                                return Err(CliError::Cancelled);
+                            }
+
+                            let chunks_iterator = hashes.iter().map(|hash| {
                                 data_store_for_chunk_ret
                                     .get(hash)
-                                    .unwrap()
-                                    .clone()
-                            }).collect();
+                                    .map(|val_ref| val_ref.clone())
+                            });
 
-                            Ok(chunks)
+                            let optional_chunks: Option<Vec<Vec<u8>>> = chunks_iterator
+                                .collect();
+
+                            optional_chunks.ok_or_else(|| {
+                                CliError::KeyNotFound(
+                                    "A chunk hash was not found in the in-memory data \
+                                        store."
+                                        .to_string())
+                            })
                         } else {
+                            if !running_clone.load(Ordering::SeqCst) {
+                                return Err(CliError::Cancelled);
+                            }
+
                             //Get chunk data from db
-                            Ok(get_chunks(hashes, &at_db_info_clone).unwrap())
+                            Ok(get_chunks(hashes, &at_db_info_clone)?)
                         }
                     }
                 };
@@ -703,7 +759,12 @@ where
     /*Pulls each chunk for a file, generating a hash for the file, 
     and verifies the hash matches the hash of original file.*/
     for fmp in sfm_clone{
-        let entry = _veri_hashes.get(&fmp.filename).unwrap();
+        let entry = _veri_hashes.get(&fmp.filename)
+            .ok_or_else(|| CliError::InternalError(format!(
+            "Verification hash missing for file: {}",
+            fmp.filename
+        )))?;
+
         let veri_hash = *entry.value();
 
         let get_chunk_data_for_verify = {
@@ -737,7 +798,8 @@ where
 
     /*Check whether each thread completed without error. */
     for handle in thread_handles {
-        match handle.join().unwrap() {
+        match handle.join()
+            .expect("A verification thread panicked.") {
             Ok(_) => (), //Verification succeeded for this file
             Err(e) => return Err(e.into()), //Propagate the error
         }
@@ -882,7 +944,7 @@ where
             chunk_count += 1;
 
             if (chunk_count >= BUFFER_SIZE) || flush_flag {
-                append_data_to_file(&tfp_clone, &write_buffer).unwrap();
+                append_data_to_file(&tfp_clone, &write_buffer)?;
                 write_buffer.clear();
                 chunk_count = 0;
             };
@@ -1049,8 +1111,9 @@ where
         [u8; 64]
     >> = Arc::new(DashMap::new());
 
-    let thread_count = thread::available_parallelism().unwrap().get();
+    let thread_count = thread::available_parallelism()?.get();
 
+    //Reserve one thread for the mainprocessing/aggregation logic.
     let task_thread_count = std::cmp::max(
         1,
         thread_count.saturating_sub(1)
@@ -1070,17 +1133,17 @@ where
 
     let file_paths_owned = file_paths.to_owned();
 
-    let worker_handle = thread::spawn(move || {
-        worker_pool.install(||{
+    let worker_handle = thread::spawn(move || -> Result<(), CliError> {
+        worker_pool.install(|| -> Result<(), CliError>{
             file_paths_owned
                 .par_iter()
-                .for_each(|path| {
+                .try_for_each(|path| -> Result<(), CliError> {
                     let sender_clone = sender.clone();
                     let fcd = file_chunk_worker(
                         path, 
                         window_size, 
                         sender_clone
-                    ).unwrap();
+                    )?;
 
                     worker_veri_hashes.insert(
                         fcd.file_name.clone(), 
@@ -1101,8 +1164,12 @@ where
                         fmp.filename.clone(), 
                         fmp
                     );
-                })
-        });
+
+                    Ok(())
+                })?;
+            Ok(())
+        })?;
+        Ok(())
     });
 
     const BATCH_SIZE: usize = 1000;
@@ -1120,7 +1187,8 @@ where
 
         if chunk_batch.len() >= BATCH_SIZE {
             //When the batch is full, write it to the database or data_store
-            batch_sender.send(std::mem::take(&mut chunk_batch)).unwrap();
+            batch_sender.send(std::mem::take(&mut chunk_batch))
+                .map_err(|e| CliError::FlumeSendError(e.to_string()))?;
             chunk_batch.reserve(BATCH_SIZE);
         }
 
@@ -1132,19 +1200,16 @@ where
 
     //Write any remaining chunks in the batch
     if !chunk_batch.is_empty() {
-        batch_sender.send(chunk_batch).unwrap();
+        batch_sender.send(chunk_batch)
+            .map_err(|e| CliError::FlumeSendError(e.to_string()))?;
     };
 
     //Batch sender is done so drop it and clean up any related threads.
     drop(batch_sender);
-    writer_handle.join().unwrap()?;
+    writer_handle.join().expect("The writer thread panicked.")?;
 
     //Check for any worker errors.
-    worker_handle.join().map_err(|_| {
-        CliError::InternalError(
-            "File processing worker thread panicked.".to_string()
-        )
-    })?;
+    worker_handle.join().expect("A file chunk worker thread panicked.")?;
 
     //Finish the progress bar
     if let Some(bar) = progress_bar {

@@ -11,7 +11,9 @@ use std::collections::HashMap;
 use dashmap::DashMap;
 use thiserror::Error;
 
-use crate::lib_error_handling::SpriteShrinkError;
+use crate::lib_error_handling::{
+    IsCancelled, SpriteShrinkError
+};
 use crate::lib_structs::{ChunkLocation, FileManifestParent};
 
 #[derive(Error, Debug)]
@@ -21,6 +23,9 @@ pub enum SerializationError {
 
     #[error("An error occurred in an external callback: {0}")]
     External(String),
+
+    #[error("Operation cancelled by user.")]
+    Cancelled,
 }
 
 /// Extracts all values from a DashMap into a vector.
@@ -68,7 +73,8 @@ where
 ///
 /// * `sorted_hashes`: A slice of hashes that have been sorted into a
 ///   deterministic order. This consistent ordering is critical for ensuring
-///   that the generated chunk index is correct and reproducible.
+///   that the generated chunk index and its offsets are correct and 
+///   reproducible.
 /// * `data_store_get_chunk_cb`: A callback function that the serializer uses 
 ///   to fetch the raw byte data for a given set of hashes. It must return a
 ///   `Vec<Vec<u8>>` where the data for each chunk is in the same order as the
@@ -197,9 +203,9 @@ pub fn serialize_uncompressed_data<D, E, H, K>(
 ), SpriteShrinkError>
 where
     D: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
-    E: std::error::Error + Send + Sync + 'static,
+    E: std::error::Error + IsCancelled + Send + Sync + 'static,
     H: Copy + Ord + Eq + std::hash::Hash + std::fmt::Display,
-    K: Fn() -> Vec<H>
+    K: Fn() -> Result<Vec<H>, E>
 {
     let mut ser_file_manifest = dashmap_values_to_vec(file_manifest);
 
@@ -211,7 +217,16 @@ where
         fmp.chunk_metadata.sort_by_key(|metadata| metadata.offset);
     });
 
-    let mut sorted_hashes: Vec<H> = data_store_key_cb();
+    let mut sorted_hashes: Vec<H> = match data_store_key_cb() {
+        Ok(hashes) => hashes,
+        Err(e) => {
+            if e.is_cancelled() {
+                return Err(SpriteShrinkError::Cancelled);
+            }
+            return Err(SpriteShrinkError::External(Box::new(e)));
+        }
+    };
+    
     
     sorted_hashes.sort_unstable();
 

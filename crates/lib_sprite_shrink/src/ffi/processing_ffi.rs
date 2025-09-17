@@ -15,7 +15,9 @@ use std::{
 use fastcdc::v2020::Chunk;
 use libc::c_char;
 
-use crate::ffi::FFIResult;
+use crate::ffi::ffi_error_handling::{
+    FFICallbackStatus, FFIResult
+};
 use crate::ffi::ffi_types::{
     FFIChunk, FFIChunkDataArray,
     FFIFileManifestChunks,
@@ -162,7 +164,11 @@ where
             .map(|(hash, mut data_vec)| {
                 let data_ptr = data_vec.as_mut_ptr();
                 let data_len = data_vec.len();
-                std::mem::forget(data_vec); //Give up ownership of the inner Vec<u8>
+
+                /*data_vec is now owned and must be prevented from being 
+                dropped at the end of this closure, as we are transferring its
+                allocation to the FFI caller.*/
+                std::mem::forget(data_vec); 
                 FFIHashedChunkData::from((
                     hash,
                     data_ptr,
@@ -759,7 +765,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u128(
 ///   array.
 /// - The `get_chunks_cb` function pointer is valid and points to a function
 ///   with the correct signature.
-fn test_compression_ffi_internal<E, H>(
+fn test_compression_ffi_internal<H>(
     total_data_size: u64,
     sorted_hashes_array_ptr: *const H,
     sorted_hashes_len: usize,
@@ -771,11 +777,11 @@ fn test_compression_ffi_internal<E, H>(
     get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void, 
         hashes: *const H, 
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
 ) -> FFIResult 
 where 
-    E: std::error::Error + IsCancelled + Send + Sync + 'static,
     H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
 {
     let sorted_hashes = unsafe {
@@ -791,14 +797,17 @@ where
 
     let user_data_addr = user_data as usize;
 
-    let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, E> {
-        let ffi_chunks_array = unsafe {
+    let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
+        let mut ffi_chunks_array = FFIChunkDataArray { ptr: std::ptr::null_mut(), len: 0 };
+        let status = unsafe {
             get_chunks_cb(
-                user_data_addr as *mut c_void, 
-                hashes.as_ptr(), 
-                hashes.len()
-            )};
-        
+                user_data_addr as *mut c_void,
+                hashes.as_ptr(),
+                hashes.len(),
+                & mut ffi_chunks_array
+            )
+        };
+        Result::from(status)?;
         let ffi_chunks_slice = unsafe {slice::from_raw_parts(
             ffi_chunks_array.ptr, 
             ffi_chunks_array.len
@@ -858,14 +867,15 @@ pub unsafe extern "C" fn test_compression_ffi_u64(
     get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void, 
         hashes: *const u64, 
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
 ) -> FFIResult {
     if sorted_hashes_array_ptr.is_null(){
         return FFIResult::NullArgument;
     };
 
-    test_compression_ffi_internal::<SpriteShrinkError, u64>(
+    test_compression_ffi_internal::<u64>(
         total_data_size,
         sorted_hashes_array_ptr,
         sorted_hashes_len,
@@ -900,14 +910,15 @@ pub unsafe extern "C" fn test_compression_ffi_u128(
     get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void, 
         hashes: *const u128, 
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
 ) -> FFIResult {
     if sorted_hashes_array_ptr.is_null(){
         return FFIResult::NullArgument;
     };
 
-    test_compression_ffi_internal::<SpriteShrinkError, u128>(
+    test_compression_ffi_internal::<u128>(
         total_data_size,
         sorted_hashes_array_ptr,
         sorted_hashes_len,

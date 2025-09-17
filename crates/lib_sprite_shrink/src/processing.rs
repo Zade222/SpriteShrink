@@ -247,6 +247,8 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 ///   integrity check.
 /// * `get_chunk_data`: A callback function that takes a slice of chunk hashes
 ///   and each corresponding chunks byte data.
+/// * `progress_cb`: A callback function for reporting the amount of bytes 
+///   processed back to the host application.
 ///
 /// # Returns
 ///
@@ -307,9 +309,9 @@ where
                     /*Check if the error from the callback indicates
                     cancellation.*/
                     if e.is_cancelled() {
-                            let _ = to_hash_tx.send(
-                                Err(SpriteShrinkError::Cancelled)
-                            );
+                        let _ = to_hash_tx.send(
+                            Err(SpriteShrinkError::Cancelled)
+                        );
                     } else {
                         //Otherwise, treat it as a generic external error.
                         let _ = to_hash_tx.send(Err(
@@ -330,14 +332,17 @@ where
     chunk data and feed it to the hasher.*/
     while let Ok(result) = to_hash_rx.recv() {
         match result {
+            //Process the batch of chunks received from the fetcher thread.
             Ok(chunk_batch) => {
                 for chunk_data in chunk_batch {
+                    //Report progress before updating the hasher.
                     progress_cb(chunk_data.len() as u64);
+                    //Update the hash.
                     hasher.update(&chunk_data);
                 }
             }
             Err(e) => {
-                // If we receive an error, we stop processing and return it.
+                //If we receive an error, we stop processing and return it.
                 return Err(e);
             }
         }

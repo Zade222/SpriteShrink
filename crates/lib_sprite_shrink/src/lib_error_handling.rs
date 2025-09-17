@@ -35,7 +35,7 @@ pub enum SpriteShrinkError {
     Processing(ProcessingError),
 
     #[error("An error occurred during serialization")]
-    Serialization(#[from] SerializationError),
+    Serialization(SerializationError),
 
     #[error("I/O Error")] 
     Io(#[from] io::Error), 
@@ -82,6 +82,26 @@ impl From<ProcessingError> for SpriteShrinkError {
         match err {
             ProcessingError::Cancelled => SpriteShrinkError::Cancelled,
             _ => SpriteShrinkError::Processing(err),
+        }
+    }
+}
+
+/// Converts a `SerializationError` into a `SpriteShrinkError`.
+///
+/// This implementation allows for the ergonomic propagation of errors from 
+/// the data serialization module into the library's top-level error type. It 
+/// wraps most serialization-specific errors within the 
+/// `SpriteShrinkError::Serialization` variant.
+///
+/// A special case is handled for `ProcessingError::Cancelled` to ensure that a
+/// user-initiated cancellation is preserved as the top-level
+/// `SpriteShrinkError::Cancelled` variant, allowing for specific cancellation
+/// logic in the calling application.
+impl From<SerializationError> for SpriteShrinkError {
+    fn from(err: SerializationError) -> Self {
+        match err {
+            SerializationError::Cancelled => SpriteShrinkError::Cancelled,
+            _ => SpriteShrinkError::Serialization(err),
         }
     }
 }

@@ -10,8 +10,8 @@ use std::{
 };
 
 use crate::archive::{ArchiveBuilder};
-use crate::ffi::{
-    FFIResult
+use crate::ffi::ffi_error_handling::{
+    FFICallbackStatus, FFIResult
 };
 use crate::ffi::ffi_types::{
     ArchiveBuilderU64, ArchiveBuilderU128,
@@ -117,33 +117,47 @@ where
 ///   `ArchiveBuilder`.
 /// - The `get_chunks_cb` and `write_comp_data_cb` function pointers are valid
 ///   and point to functions with the correct signatures.
-fn setup_builder_closures<E, H: 'static>(
+fn setup_builder_closures<H: 'static>(
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void, 
         hashes: *const H, 
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
     write_comp_data_cb: unsafe extern "C" fn(
         user_data: *mut c_void, 
         data: *const u8, 
         data_len: usize, 
         is_flush: bool
-    ),
+    ) -> FFICallbackStatus,
 ) -> (
-    impl Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
-    impl FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
+    impl Fn(&[H]) -> Result<
+        Vec<Vec<u8>>, 
+        SpriteShrinkError
+    > + Send + Sync + 'static,
+    impl FnMut(&[u8], bool) -> Result<
+        (), 
+        SpriteShrinkError
+    > + Send + Sync + 'static,
 ) {
     let user_data_addr = user_data as usize;
 
-    let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, E> {
-        let ffi_chunks_array = unsafe {
+    let get_chunks_closure = move |
+        hashes: &[H]
+    | -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
+        let mut ffi_chunks_array = FFIChunkDataArray {
+            ptr: std::ptr::null_mut(), len: 0
+        };
+        let status = unsafe {
             get_chunks_cb(
                 user_data_addr as *mut c_void,
                 hashes.as_ptr(),
                 hashes.len(),
+                & mut ffi_chunks_array
             )
         };
+        Result::from(status)?;
         let ffi_chunks_slice = unsafe {slice::from_raw_parts(
             ffi_chunks_array.ptr, 
             ffi_chunks_array.len
@@ -160,17 +174,23 @@ fn setup_builder_closures<E, H: 'static>(
         Ok(chunks)
     };
 
-    let write_data_closure = move |data: &[u8], flush: bool| -> Result<(), E> {
-        unsafe {
+    let write_data_closure = move |
+        data: &[u8], 
+        flush: bool
+    | -> Result<(), SpriteShrinkError> {
+        let status = unsafe {
             write_comp_data_cb(
                 user_data_addr as *mut c_void,
                 data.as_ptr(),
                 data.len(),
                 flush,
-            );
+            )
+        };
+
+        Result::from(status)?;
 
         Ok(())
-        }
+        
     };
 
     (get_chunks_closure, write_data_closure)
@@ -198,8 +218,6 @@ fn setup_builder_closures<E, H: 'static>(
 /// * `sorted_hashes_len`: The number of elements in the 
 ///   `sorted_hashes_array_ptr` array.
 /// * `file_count`: The total number of files being added to the archive.
-/// * `hash_type`: A numerical code representing the hash algorithm used 
-///   (e.g., 1 for xxh3_64).
 /// * `total_size`: The total combined size in bytes of all unique,
 ///   uncompressed chunks.
 /// * `user_data`: An opaque `void` pointer that will be passed back to the C
@@ -241,20 +259,20 @@ pub unsafe extern "C" fn archive_builder_new_u64(
     sorted_hashes_array_ptr: *const u64,
     sorted_hashes_len: usize,
     file_count: u32,
-    hash_type: u8,
     total_size: u64,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void, 
         hashes: *const u64, 
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
     write_comp_data_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
         data: *const u8, 
         data_len: usize, 
         is_flush: bool
-    ),
+    ) -> FFICallbackStatus,
     out_ptr: *mut *mut ArchiveBuilderU64,
 ) -> FFIResult {
     if manifest_array_ptr.is_null() || 
@@ -281,7 +299,7 @@ pub unsafe extern "C" fn archive_builder_new_u64(
     .collect();
 
     let (get_chunks_closure, write_data_closure) = 
-    setup_builder_closures::<SpriteShrinkError, u64>(
+    setup_builder_closures::<u64>(
         user_data,
         get_chunks_cb,
         write_comp_data_cb
@@ -291,7 +309,7 @@ pub unsafe extern "C" fn archive_builder_new_u64(
         ser_file_manifest,
         sorted_hashes,
         file_count,
-        hash_type, 
+        1, 
         total_size,
         get_chunks_closure,
         write_data_closure
@@ -330,8 +348,6 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 /// * `sorted_hashes_len`: The number of elements in the 
 ///   `sorted_hashes_array_ptr` array.
 /// * `file_count`: The total number of files being added to the archive.
-/// * `hash_type`: A numerical code representing the hash algorithm used 
-///   (e.g., 1 for xxh3_64).
 /// * `total_size`: The total combined size in bytes of all unique,
 ///   uncompressed chunks.
 /// * `user_data`: An opaque `void` pointer that will be passed back to the C
@@ -373,20 +389,20 @@ pub unsafe extern "C" fn archive_builder_new_u128(
     sorted_hashes_array_ptr: *const u128,
     sorted_hashes_len: usize,
     file_count: u32,
-    hash_type: u8,
     total_size: u64,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void, 
         hashes: *const u128, 
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
     write_comp_data_cb: unsafe extern "C" fn(
         user_data: *mut c_void, 
         data: *const u8, 
         data_len: usize, 
         is_flush: bool
-    ),
+    ) -> FFICallbackStatus,
     out_ptr: *mut *mut ArchiveBuilderU128,
 ) -> FFIResult {
     if manifest_array_ptr.is_null() || 
@@ -413,7 +429,7 @@ pub unsafe extern "C" fn archive_builder_new_u128(
     .collect();
 
     let (get_chunks_closure, write_data_closure) = 
-    setup_builder_closures::<SpriteShrinkError, u128>(
+    setup_builder_closures::<u128>(
         user_data,
         get_chunks_cb,
         write_comp_data_cb
@@ -423,7 +439,7 @@ pub unsafe extern "C" fn archive_builder_new_u128(
         ser_file_manifest,
         sorted_hashes,
         file_count,
-        hash_type, 
+        2, 
         total_size,
         get_chunks_closure,
         write_data_closure
@@ -434,7 +450,9 @@ pub unsafe extern "C" fn archive_builder_new_u128(
     );
 
     unsafe {
-        *out_ptr = Box::into_raw(builder_trait_object) as *mut ArchiveBuilderU128;
+        *out_ptr = Box::into_raw(
+            builder_trait_object
+        ) as *mut ArchiveBuilderU128;
     };
     
     FFIResult::Ok
@@ -745,7 +763,41 @@ pub unsafe extern "C" fn archive_builder_set_c_progress_u128(
     )
 }
 
-
+/// A generic helper to process the result of an `ArchiveBuilder::build` call.
+///
+/// This internal function takes the `Result` from a build operation and
+/// transforms it into a C-compatible format.
+///
+/// If the build was successful (`Ok`), it takes the `Vec<u8>` containing the
+/// archive data, allocates an `FFIArchiveData` struct on the heap to hold a
+/// pointer to this data, and transfers ownership of both the struct and the
+/// underlying byte buffer to the C caller via the `out_ptr`.
+///
+/// If the build failed (`Err`), it converts the `SpriteShrinkError` into an
+/// appropriate `FFIResult` status code to be returned to the caller.
+///
+/// # Arguments
+///
+/// * `result`: The `Result` returned from the `ArchiveBuilder::build()` 
+///   method.
+/// * `out_ptr`: A raw pointer to a location where the pointer to the newly
+///   allocated `FFIArchiveData` struct will be written on success.
+///
+/// # Returns
+///
+/// * `FFIResult::Ok` on success, with `out_ptr` pointing to the 
+///   `FFIArchiveData` struct.
+/// * An FFI-safe error code corresponding to the `SpriteShrinkError` on 
+///   failure.
+///
+/// # Safety
+///
+/// The caller must uphold the following safety invariants:
+/// - The `out_ptr` must be a valid, non-null pointer.
+/// - If the function returns `FFIResult::Ok`, the C caller takes ownership of
+///   the `FFIArchiveData` pointer written to `out_ptr`. This pointer **must**
+///   be passed to `archive_data_free` to deallocate the struct and the
+///   underlying byte buffer, preventing a memory leak.
 unsafe fn handle_build_result(
     result: Result<Vec<u8>, SpriteShrinkError>,
     out_ptr: *mut *mut FFIArchiveData,

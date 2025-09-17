@@ -104,6 +104,9 @@ pub enum CliError {
     #[error("Argument parsing error: {0}")]
     ArgumentParsing(#[from] clap::Error),
 
+    #[error("Database error {0}")]
+    RedbDatabaseError(#[from] redb::DatabaseError),
+
     #[error("Database table error {0}")]
     RedbTableError(#[from] redb::TableError),
 
@@ -137,6 +140,9 @@ pub enum CliError {
 
     #[error("Operation cancelled by user.")]
     Cancelled,
+
+    #[error("Flume channel send error: {0}")]
+    FlumeSendError(String),
 }
 
 /// Converts a library-level `SpriteShrinkError` into a `CliError`.

@@ -451,6 +451,25 @@ pub type FFIFileManifestParentU64 = FFIFileManifestParent<u64>;
 /// chunk hash algorithm produces a 128-bit integer.
 pub type FFIFileManifestParentU128 = FFIFileManifestParent<u128>;
 
+/// FFI-safe struct for passing an array of keys from C to Rust.
+#[repr(C)]
+pub struct FFIKeyArray<H> {
+    pub ptr: *mut H,
+    pub len: usize,
+}
+
+/// An `FFIKeyArray` specialized for `u64` hashes.
+///
+/// This type is used in FFI functions that deal with hash keys where the
+/// chunk hash algorithm produces a 64-bit integer.
+pub type FFIKeyArrayU64 = FFIKeyArray<u64>;
+
+/// An `FFIKeyArray` specialized for `u128` hashes.
+///
+/// This type is used in FFI functions that deal with hash keys where the
+/// chunk hash algorithm produces a 128-bit integer.
+pub type FFIKeyArrayU128 = FFIKeyArray<u128>;
+
 // Converts a tuple containing a Rust-native `FileManifestParent` and raw
 // pointers for its heap-allocated fields into the FFI-safe
 // `FFIFileManifestParent` struct.

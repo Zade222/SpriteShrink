@@ -311,7 +311,7 @@ where
     let mut worker_handles = Vec::with_capacity(worker_count);
 
     let num_threads = if worker_count == 0 {
-        std::thread::available_parallelism().unwrap().get()
+        std::thread::available_parallelism()?.get()
     } else {
         worker_count
     };
@@ -469,7 +469,9 @@ where
                         /*Send the compressed data to be written by the host 
                         application*/
                         chunk_write_cb(&data_to_write)
-                            .map_err(|e| ArchiveError::External(e.to_string()))?;
+                            .map_err(
+                                |e| ArchiveError::External(e.to_string())
+                            )?;
 
                         //Incrment write cursor.
                         write_cursor += 1;
