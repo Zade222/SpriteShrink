@@ -8,7 +8,6 @@ We welcome contributions to SpriteShrink! This document outlines the guidelines 
    * [Prerequisites](#prerequisites)
    * [Cloning the Repository](#cloning-the-repository)
    * [Building the Project](#building-the-project)
-   * [Running Tests](#running-tests)
 2. [Contribution Workflow](#2-contribution-workflow)
    * [Forking the Repository](#forking-the-repository)
    * [Creating a Branch](#creating-a-branch)
@@ -55,18 +54,6 @@ cargo build --release
 
 This will compile both the CLI application and the library in release mode.
 
-### Running Tests
-
-It is crucial to run all tests before submitting a pull request to ensure your changes haven't introduced any regressions.
-
-You can run the full test suite for the entire project from the root directory:
-
-```bash
-cargo test
-```
-
-This command will compile all crates and run all unit and integration tests. All tests must pass successfully.
-
 ## 2. Contribution Workflow
 
 ### Forking the Repository
@@ -106,7 +93,7 @@ git push origin your-branch-name
 
 Then, go to the original SpriteShrink GitHub repository and open a new Pull Request (PR) from your branch.
 
-When creating your PR, please ensure you fill out the provided Pull Request template completely. This template includes a checklist to help you confirm that you've followed all project guidelines (e.g., run tests, updated documentation, followed formatting rules).
+When creating your PR, please ensure you fill out the provided Pull Request template completely. This template includes a checklist to help you confirm that you've followed all project guidelines (e.g., tested, updated documentation, followed formatting rules).
 
 ## 3. Coding Standards
 
@@ -132,22 +119,11 @@ All public items (functions, structs, enums, etc.) in the `lib_sprite_shrink` li
 * Details on the return value.
 * At least one working usage example (where applicable).
 
-The build process is configured to enforce this, and missing documentation for public items will cause the build to fail.
-
-### Testing
-
-Maintain a high and consistent level of automated test coverage for all primary application and library code.
-
-* `lib_sprite_shrink` library: Aim for at least 85% line coverage.
-* `cli_application` executable: Aim for at least 80% line coverage.
-
-A failure to meet this threshold in a proposed code change will cause the automated build to fail. Please write unit and integration tests for your new features or bug fixes.
-
 ### Error Handling
 
-The `lib_sprite_shrink` library defines a single, public error enum (`SpriteShrinkError`) that represents all possible failure conditions. All public, fallible functions in the library must use this error type in their returned `Result`.
+The `lib_sprite_shrink` library defines a single, public error enum (`SpriteShrinkError`) and module specific enums that represents all possible failure conditions. All public, fallible functions in the library must use this error type in their returned `Result`.
 
-When implementing new functionality, ensure that errors are handled gracefully and propagated using this `SpriteShrinkError` enum where appropriate.
+When implementing new functionality, ensure that errors are handled gracefully and propagated using this `SpriteShrinkError` or module specific enum where appropriate.
 
 ## 4. Reporting Issues
 
