@@ -64,10 +64,10 @@ pub struct Args {
         long, 
         help_heading = "Primary Options", 
         conflicts_with = "extract",
-        help = "Activates metadata retrieval mode, used in \ncombination with \
-        -i."
+        help = "Activates archive file list mode, used in \ncombination with \
+        -i. Lists all files, and their\n indices, in an archive."
     )]
-    pub metadata: bool,
+    pub list: bool,
 
     #[arg(
         short, 
@@ -77,7 +77,7 @@ pub struct Args {
         help = "Activates json metadata mode. The metadata output \nwill be \
         printed in json format."
     )]
-    pub json: bool,
+    pub metadata: bool,
 
     #[arg(
         short, 
@@ -100,7 +100,7 @@ pub struct Args {
     pub compression: String,*/
 
     #[arg(
-        short = 'l', 
+        short = 'c', 
         long = "compression-level", 
         value_name = "LEVEL",
         help_heading = "Tuning Parameters",
@@ -166,8 +166,9 @@ pub struct Args {
         help = "When generating dictionary for compression,\noptimize the \
         dictionary for better\ncompression. NOT recommended for large files\n\
         as it can be very slow.\n\
-        Can cause the application to consume \nsignificant amount of memory \
-        even with the \nlow-memory flag."
+        Can cause the application to consume a\nsignificant amount of memory \
+        even with the \nlow-memory flag. To avoid system instability,\ndo not \
+        use with a large input data set."
     )]
     pub optimize_dictionary: bool,
 
@@ -277,7 +278,7 @@ pub fn validate_args(
     //Check if the output file already exists and if the force flag is set.
     if let Some(output_path) = &args.output
         && !args.force
-        && !args.metadata
+        && !args.list
         && args.extract.is_none()
         && output_path.exists()
     {
@@ -320,7 +321,7 @@ pub fn validate_args(
     }
 
     //Compression Mode
-    if !args.metadata && args.extract.is_none() {
+    if !args.list && !args.metadata && args.extract.is_none() {
         if args.output.is_none() {
             return Err(CliError::MissingFlag(
                 "Output path (-o) is required when in compression mode."
@@ -424,8 +425,8 @@ pub fn merge_config_and_args (
     if !arg_was_present("low_memory") {
         args.low_memory = config.low_memory;
     }
-    if !arg_was_present("json") {
-        args.json = config.json_output;
+    if !arg_was_present("metadata") {
+        args.metadata = config.json_output;
     }
     if !arg_was_present("quiet") {
         args.quiet = config.quiet_output;

@@ -99,11 +99,12 @@ fn run(
         file_paths.extend(files_from_dirs(&dir_paths)?);
     }
 
-    match (args.extract.as_ref(), args.metadata){
+    match (args.extract.as_ref(), (args.list || args.metadata)) {
         (Some(extract_str), false) => {
             if file_paths.len() > 1 {
                 return Err(CliError::TooManyFiles(
-                    "Only one file is supported for extraction.".to_string(),
+                    "Only one input file is supported for extraction."
+                    .to_string(),
                 ));
             }
             let file_path = file_paths.first().ok_or_else(
@@ -144,7 +145,7 @@ fn run(
             match file_paths.len() {
                 1 => {
                     debug!("Mode: Info");
-                    run_info(&file_paths[0], args.json)?
+                    run_info(&file_paths[0], args.list, args.metadata)?
                 },
                 0 => return Err(CliError::NoFilesFound()),
                 _ => {
@@ -185,8 +186,7 @@ fn run(
         }
 
         (Some(_), true) => {
-            /*This case is already handled by validate_args, but we can be 
-            explicit.*/
+            /*This case is already handled by validate_args.*/
             return Err(CliError::ConflictingArguments(
                 "Metadata and extraction modes cannot be used simultaneously."
                     .to_string(),

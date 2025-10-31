@@ -34,6 +34,11 @@ use crate::error_handling::CliError;
 ///
 /// * `file_path`: A `Path` pointing to the archive file whose
 ///   metadata is to be displayed.
+/// * `list`: A user provided boolean flag that determines the plain text 
+///   output format. If `true`, the output will be a plain text table.
+/// * `metadata`: A user provided boolean flag that determines the json 
+///   output format. If `true`, the output will be JSON.
+/// 
 ///
 /// # Returns
 ///
@@ -46,7 +51,8 @@ use crate::error_handling::CliError;
 /// This function does not panic but prints directly to standard output.
 pub fn run_info(
     file_path: &Path,
-    json: bool
+    list: bool,
+    metadata: bool
 ) -> Result<(), CliError> {
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
@@ -65,7 +71,7 @@ pub fn run_info(
                     &header.man_offset, 
                     &man_length
                 )?;
-            dispatch_print_info(file_manifest, json)?
+            dispatch_print_info(file_manifest, list, metadata)?
         }};
     }
 
@@ -96,8 +102,10 @@ pub fn run_info(
 ///
 /// * `file_manifest`: A vector of `FileManifestParent` structs, where each
 ///   struct contains the metadata for a single file in the archive.
-/// * `json`: A boolean flag that determines the output format. If `true`,
-///   the output will be JSON; otherwise, it will be a plain text table.
+/// * `list`: A user provided boolean flag that determines the plain text 
+///   output format. If `true`, the output will be a plain text table.
+/// * `metadata`: A user provided boolean flag that determines the json 
+///   output format. If `true`, the output will be JSON.
 ///
 /// # Type Parameters
 ///
@@ -106,9 +114,10 @@ pub fn run_info(
 ///   to be passed to the underlying print functions.
 fn dispatch_print_info<H: Clone>(
     file_manifest: Vec<FileManifestParent<H>>,
-    json: bool,
+    _list: bool,
+    metadata: bool
 ) -> Result<(), CliError>{
-    if json {
+    if metadata {
         print_info_json::<H>(file_manifest)?; 
     } else {
         print_info_table::<H>(file_manifest);
