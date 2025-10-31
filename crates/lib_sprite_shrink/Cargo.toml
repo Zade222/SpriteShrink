@@ -1,6 +1,6 @@
 [package]
 name = "sprite_shrink"
-version = "0.9.9.1"
+version = "0.9.9-beta2"
 edition = "2024"
 publish = true
 license = "MPL-2.0"

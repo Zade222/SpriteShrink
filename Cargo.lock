@@ -1127,7 +1127,7 @@ dependencies = [
 
 [[package]]
 name = "sprite_shrink"
-version = "0.9.9"
+version = "0.9.9-beta2"
 dependencies = [
  "bincode",
  "bytemuck",
@@ -1148,7 +1148,7 @@ dependencies = [
 
 [[package]]
 name = "sprite_shrink_application"
-version = "0.9.9"
+version = "0.9.9-beta2"
 dependencies = [
  "bytesize",
  "clap",
