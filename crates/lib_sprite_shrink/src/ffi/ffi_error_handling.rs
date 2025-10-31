@@ -43,7 +43,7 @@ impl From<SpriteShrinkError> for FFIStatus {
             SpriteShrinkError::Parsing(
                 ParsingError::ManifestDecodeError(_)
             ) => FFIStatus::ManifestDecodeError,
-    
+
             //Archive errors
             SpriteShrinkError::Archive(
                 ArchiveError::Dictionary(_)
@@ -54,7 +54,7 @@ impl From<SpriteShrinkError> for FFIStatus {
             SpriteShrinkError::Archive(
                 ArchiveError::ThreadPoolError(_)
             ) => FFIStatus::ThreadPoolError,
-            
+
             //Processing errors
             SpriteShrinkError::Processing(
                 ProcessingError::HashMismatchError(_)
@@ -70,7 +70,7 @@ impl From<SpriteShrinkError> for FFIStatus {
             SpriteShrinkError::Serialization(
                 SerializationError::MissingChunk(_)
             ) => FFIStatus::SerializationMissingChunk,
-            
+
             //Catch all for any other error.
             _ => FFIStatus::InternalError,
         }

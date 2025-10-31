@@ -2,11 +2,11 @@
 //!
 //! # Safety
 //!
-//! All structs in this module that are passed across the FFI boundary are 
+//! All structs in this module that are passed across the FFI boundary are
 //! marked with `#[repr(C)]` to ensure a C-compatible memory layout.
 //!
 //! When interacting with these structs from C, the caller is responsible for:
-//! - Ensuring that all pointers are valid and not null unless otherwise 
+//! - Ensuring that all pointers are valid and not null unless otherwise
 //!   specified.
 //! - Managing the memory for any data pointed to by these structs, including
 //!   allocating it before calling Rust and freeing it after Rust returns it.
@@ -86,29 +86,30 @@ pub struct ArchiveBuilderU64 { _private: [u8; 0] }
 #[repr(C)]
 pub struct ArchiveBuilderU128 { _private: [u8; 0] }
 
-/// Holds the final output data from a successful archive build.
+/// Represents a buffer containing the final, compressed archive data.
 ///
-/// This struct is returned by the `archive_builder_build_*` functions and
-/// contains a pointer to the complete, in-memory archive data. The ownership
-/// of this memory is transferred to the C caller.
+/// This struct is returned by a successful build operation (e.g., from
+/// `archive_builder_build_u64`). When a C caller receives a pointer to this
+/// struct, it takes ownership of both the struct itself and the underlying
+/// data buffer it points to.
 ///
-/// # Fields
+/// # Memory Management
 ///
-/// * `data`: A raw pointer to the start of the byte array containing the
-///   entire archive's data. This includes the header, manifest, dictionary.
-/// * `data_len`: The total length of the `data` byte array.
+/// The memory for this struct and its data buffer is allocated by the Rust
+/// library. Therefore, it **MUST** be deallocated by the Rust library.
 ///
-/// # Safety
+/// The C caller is responsible for passing the pointer they receive back to the
+/// `archive_data_free` function to release the memory. Failure to do so will
+/// result in a memory leak.
 ///
-/// The C caller takes full ownership of the memory pointed to by `data`.
-/// To prevent a memory leak, this memory **must** be deallocated by passing
-/// the `FFIArchiveData` pointer to the [`archive_data_free`] function once it
-/// is no longer needed. The pointer becomes invalid after the `free` function
-/// is called and must not be used again.
+/// **Warning:** Do NOT attempt to free the `data` pointer manually using `free()`
+/// in C. The memory is managed by Rust's allocator, and attempting to free it
+/// with a different allocator will lead to heap corruption and undefined behavior.
 #[repr(C)]
 pub struct FFIArchiveData {
     pub data: *mut u8,
     pub data_len: usize,
+    pub data_cap: usize,
 }
 
 /// FFI-safe equivalent of a `fastcdc::Chunk`, representing a content-defined
@@ -211,7 +212,7 @@ impl<H> From<(H, ChunkLocation)> for FFIChunkIndexEntry<H> {
 /// this struct is returned to Rust, the Rust side takes ownership of all this
 /// memory and will deallocate it. The C caller **must not** free this memory
 /// after the function call returns.
-/// FFI-safe equivalent of `ChunkLocation`, representing a slice of the 
+/// FFI-safe equivalent of `ChunkLocation`, representing a slice of the
 /// archive.
 #[repr(C)]
 pub struct FFIChunkDataArray {
@@ -341,7 +342,7 @@ pub struct FFIFileData {
 ///
 /// # Fields
 ///
-/// * `fmp`: An [`FFIFileManifestParent`] struct containing the file's 
+/// * `fmp`: An [`FFIFileManifestParent`] struct containing the file's
 ///   metadata, such as its name and an ordered list of its chunk metadata.
 /// * `hashed_chunks`: A pointer to an array of [`FFIHashedChunkData`] structs.
 ///   Each struct in this array contains a chunk's unique hash and a pointer
@@ -382,8 +383,8 @@ pub type FFIFileManifestChunksU128 = FFIFileManifestChunks<u128>;
 // Converts a tuple containing the constituent parts into the FFI-safe
 // `FFIFileManifestChunks` struct.
 impl<H> From<(
-    FFIFileManifestParent<H>, 
-    *mut FFIHashedChunkData<H>, 
+    FFIFileManifestParent<H>,
+    *mut FFIHashedChunkData<H>,
     usize
 )> for FFIFileManifestChunks<H> {
     fn from(
@@ -479,12 +480,12 @@ pub type FFIKeyArrayU128 = FFIKeyArray<u128>;
 // manually allocated and prepared for C ownership.
 impl<H> From<(
     FileManifestParent<H>,
-    *mut std::os::raw::c_char, 
+    *mut std::os::raw::c_char,
     *const FFISSAChunkMeta<H>
 )> for FFIFileManifestParent<H> {
     fn from(parts: (
-        FileManifestParent<H>, 
-        *mut std::os::raw::c_char, 
+        FileManifestParent<H>,
+        *mut std::os::raw::c_char,
         *const FFISSAChunkMeta<H>
     )) -> Self {
         let (fmp, filename, chunk_metadata) = parts;
@@ -526,7 +527,7 @@ where
             /*Reconstruct the slice of chunk metadata from the raw pointer
             and length.*/
             let chunk_metadata_slice = slice::from_raw_parts(
-                fmp.chunk_metadata, 
+                fmp.chunk_metadata,
                 fmp.chunk_metadata_len as usize
             );
 
@@ -599,7 +600,7 @@ pub type FFIHashedChunkDataU128 = FFIHashedChunkData<u128>;
 // `FFIHashedChunkData` struct. This is a convenience for assembling the
 // struct from its raw components.
 impl<H> From<(H, *mut u8, usize)> for FFIHashedChunkData<H> {
-    fn from((hash, chunk_data, chunk_data_len): 
+    fn from((hash, chunk_data, chunk_data_len):
     (H, *mut u8, usize)) -> Self {
         Self {
             hash,
@@ -655,7 +656,7 @@ pub type FFIParsedChunkIndexArrayU128 = FFIParsedChunkIndexArray<u128>;
 
 // Converts a tuple containing a raw pointer to the entries and their length
 // into the FFI-safe `FFIParsedChunkIndexArray` struct.
-impl<H> From<(*mut FFIChunkIndexEntry<H>, usize)> for 
+impl<H> From<(*mut FFIChunkIndexEntry<H>, usize)> for
 FFIParsedChunkIndexArray<H> {
     fn from(parts: (*mut FFIChunkIndexEntry<H>, usize)) -> Self {
         Self {
@@ -906,10 +907,10 @@ pub type FFISeekInfoArrayU128 = FFISeekInfoArray<u128>;
 
 //Converts a tuple containing a raw pointer to the seek info chunks and
 // their length into the FFI-safe `FFISeekInfoArray` struct.
-impl<H: Hashable> From<(*mut FFISeekChunkInfo<H>, usize)> for 
+impl<H: Hashable> From<(*mut FFISeekChunkInfo<H>, usize)> for
     FFISeekInfoArray<H> {
         fn from((
-            chunks_ptr, 
+            chunks_ptr,
             chunks_len
         ): (*mut FFISeekChunkInfo<H>, usize)) -> Self {
             Self {
@@ -982,7 +983,7 @@ pub type FFISerializedOutputU128 = FFISerializedOutput<u128>;
 // Converts a tuple containing all the constituent raw pointers and lengths
 // into the FFI-safe `FFISerializedOutput` struct.
 impl<H> From<(
-    *mut FFIFileManifestParent<H>, 
+    *mut FFIFileManifestParent<H>,
     usize,
     *mut FFIChunkIndexEntry<H>,
     usize,
@@ -997,7 +998,7 @@ impl<H> From<(
         sorted_hashes_ptr,
         sorted_hashes_len
     ): (
-        *mut FFIFileManifestParent<H>, 
+        *mut FFIFileManifestParent<H>,
         usize,
         *mut FFIChunkIndexEntry<H>,
         usize,

@@ -74,7 +74,7 @@ where
     fn with_c_progress(&mut self, callback: extern "C" fn(FFIProgress, *mut c_void), user_data: *mut c_void) {
         self.with_c_progress(callback, user_data);
     }
-    
+
 
     fn build(self: Box<Self>) -> Result<Vec<u8>, SpriteShrinkError> {
         (*self).build()
@@ -83,9 +83,9 @@ where
 
 /// Creates Rust closures that wrap C function pointers for the ArchiveBuilder.
 ///
-/// This function acts as a bridge between the C-style callback mechanism 
+/// This function acts as a bridge between the C-style callback mechanism
 /// (function pointers and an opaque `user_data` pointer) and the idiomatic
-/// Rust API of `ArchiveBuilder`, which expects closures. It captures the C 
+/// Rust API of `ArchiveBuilder`, which expects closures. It captures the C
 /// callbacks and the `user_data` pointer into two closures that can be passed
 /// to the builder.
 ///
@@ -97,47 +97,51 @@ where
 /// * `get_chunks_cb`: A C function pointer that the `ArchiveBuilder` will call
 ///   via the returned closure to request uncompressed chunk data.
 /// * `write_comp_data_cb`: A C function pointer that the `ArchiveBuilder` will
-///   call via the returned closure to write out the final compressed archive 
+///   call via the returned closure to write out the final compressed archive
 ///   data.
 ///
 /// # Returns
 ///
 /// A tuple containing two closures:
-/// 1. A `get_chunks_closure` that can be called with a slice of hashes 
+/// 1. A `get_chunks_closure` that can be called with a slice of hashes
 ///    (`&[H]`) and returns the corresponding chunk data (`Vec<Vec<u8>>`).
-/// 2. A `write_data_closure` that can be called with a slice of bytes 
+/// 2. A `write_data_closure` that can be called with a slice of bytes
 ///    (`&[u8]`) and a boolean flush flag to write data.
 ///
 /// # Safety
 ///
-/// The closures created by this function contain `unsafe` blocks that 
+/// The closures created by this function contain `unsafe` blocks that
 /// dereference raw pointers and call C functions. The caller of the public FFI
 /// function that uses this helper must guarantee that:
-/// - The `user_data` pointer is valid for the entire lifetime of the 
+/// - The `user_data` pointer is valid for the entire lifetime of the
 ///   `ArchiveBuilder`.
 /// - The `get_chunks_cb` and `write_comp_data_cb` function pointers are valid
 ///   and point to functions with the correct signatures.
 fn setup_builder_closures<H: 'static>(
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const H, 
+        user_data: *mut c_void,
+        hashes: *const H,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
+    free_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        chunks: FFIChunkDataArray
+    ),
     write_comp_data_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        data: *const u8, 
-        data_len: usize, 
+        user_data: *mut c_void,
+        data: *const u8,
+        data_len: usize,
         is_flush: bool
     ) -> FFICallbackStatus,
 ) -> (
     impl Fn(&[H]) -> Result<
-        Vec<Vec<u8>>, 
+        Vec<Vec<u8>>,
         SpriteShrinkError
     > + Send + Sync + 'static,
     impl FnMut(&[u8], bool) -> Result<
-        (), 
+        (),
         SpriteShrinkError
     > + Send + Sync + 'static,
 ) {
@@ -154,28 +158,36 @@ fn setup_builder_closures<H: 'static>(
                 user_data_addr as *mut c_void,
                 hashes.as_ptr(),
                 hashes.len(),
-                & mut ffi_chunks_array
+                &mut ffi_chunks_array
             )
         };
         Result::from(status)?;
-        let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr, 
-            ffi_chunks_array.len
-        )};
 
-        let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.len)}
-        }).collect();
-        
-        let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr, 
-            ffi_chunks_array.len, 
-            ffi_chunks_array.len)};
+        if ffi_chunks_array.ptr.is_null() {
+            return Ok(Vec::new());
+        }
+
+        let chunks = unsafe{
+            let ffi_chunks_slice = slice::from_raw_parts(
+                ffi_chunks_array.ptr,
+                ffi_chunks_array.len
+            );
+
+            let rust_chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
+                let c_chunk_slice = slice::from_raw_parts(c.ptr, c.len);
+                c_chunk_slice.to_vec()
+            }).collect();
+
+            free_chunks_cb(user_data_addr as *mut c_void, ffi_chunks_array);
+
+            rust_chunks
+        };
+
         Ok(chunks)
     };
 
     let write_data_closure = move |
-        data: &[u8], 
+        data: &[u8],
         flush: bool
     | -> Result<(), SpriteShrinkError> {
         let status = unsafe {
@@ -190,7 +202,7 @@ fn setup_builder_closures<H: 'static>(
         Result::from(status)?;
 
         Ok(())
-        
+
     };
 
     (get_chunks_closure, write_data_closure)
@@ -198,35 +210,35 @@ fn setup_builder_closures<H: 'static>(
 
 /// Creates and initializes a new `ArchiveBuilder` for u64 hashes.
 ///
-/// This function serves as the entry point for the archive creation process 
+/// This function serves as the entry point for the archive creation process
 /// from a C interface. It configures a new builder with the necessary file
 /// metadata, a list of all unique chunk hashes, and C callback functions for
 /// data retrieval and writing.
 ///
 /// On success, it returns a pointer to an opaque `ArchiveBuilderU64` handle
-/// via the `out_ptr` parameter. This handle can then be used with other FFI 
+/// via the `out_ptr` parameter. This handle can then be used with other FFI
 /// functions to configure and finally build the archive.
 ///
 /// # Arguments
 ///
 /// * `manifest_array_ptr`: A pointer to the start of an array of
-///   `FFIFileManifestParentU64` structs, representing the metadata for all 
+///   `FFIFileManifestParentU64` structs, representing the metadata for all
 ///   files to be included in the archive.
 /// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
-/// * `sorted_hashes_array_ptr`: A pointer to a sorted array of all unique 
+/// * `sorted_hashes_array_ptr`: A pointer to a sorted array of all unique
 ///   `u64` chunk hashes that make up the data for all files.
-/// * `sorted_hashes_len`: The number of elements in the 
+/// * `sorted_hashes_len`: The number of elements in the
 ///   `sorted_hashes_array_ptr` array.
 /// * `file_count`: The total number of files being added to the archive.
 /// * `total_size`: The total combined size in bytes of all unique,
 ///   uncompressed chunks.
 /// * `user_data`: An opaque `void` pointer that will be passed back to the C
 ///   callbacks, allowing the C side to maintain state.
-/// * `get_chunks_cb`: A C function pointer that the builder will call to 
+/// * `get_chunks_cb`: A C function pointer that the builder will call to
 ///   request the raw data for a given set of hashes.
 /// * `write_comp_data_cb`: A C function pointer that the builder will call to
 ///   write out the compressed archive data as it is generated.
-/// * `out_ptr`: A pointer to a `*mut ArchiveBuilderU64` where the handle to 
+/// * `out_ptr`: A pointer to a `*mut ArchiveBuilderU64` where the handle to
 ///   the newly created builder will be written.
 ///
 /// # Returns
@@ -241,11 +253,11 @@ fn setup_builder_closures<H: 'static>(
 /// The caller is responsible for ensuring the following invariants:
 /// - All pointer arguments (`manifest_array_ptr`, `sorted_hashes_array_ptr`,
 ///   `out_ptr`) must be non-null and point to valid memory.
-/// - The `manifest_len` and `sorted_hashes_len` arguments must accurately 
+/// - The `manifest_len` and `sorted_hashes_len` arguments must accurately
 ///   reflect the number of elements in their respective arrays.
-/// - The `user_data` pointer and the C callback function pointers 
+/// - The `user_data` pointer and the C callback function pointers
 ///   (`get_chunks_cb`, `write_comp_data_cb`) must be valid for the entire
-///   lifetime of the builder, until it is consumed by 
+///   lifetime of the builder, until it is consumed by
 ///   `archive_builder_build_u64` or freed by `archive_builder_free_u64`.
 /// - The `ArchiveBuilderU64` handle returned via `out_ptr` is owned by the C
 ///   caller and **must** be passed to either `archive_builder_build_u64` to
@@ -262,46 +274,51 @@ pub unsafe extern "C" fn archive_builder_new_u64(
     total_size: u64,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const u64, 
+        user_data: *mut c_void,
+        hashes: *const u64,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
+    free_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        chunks: FFIChunkDataArray
+    ),
     write_comp_data_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
-        data: *const u8, 
-        data_len: usize, 
+        data: *const u8,
+        data_len: usize,
         is_flush: bool
     ) -> FFICallbackStatus,
     out_ptr: *mut *mut ArchiveBuilderU64,
 ) -> FFIResult {
-    if manifest_array_ptr.is_null() || 
-        sorted_hashes_array_ptr.is_null() || 
+    if manifest_array_ptr.is_null() ||
+        sorted_hashes_array_ptr.is_null() ||
         out_ptr.is_null() {
             return FFIResult::NullArgument;
     }
 
     let sorted_hashes = unsafe{slice::from_raw_parts(
-        sorted_hashes_array_ptr, 
+        sorted_hashes_array_ptr,
         sorted_hashes_len
     )};
 
     let ffi_manifests = unsafe {
         slice::from_raw_parts(
-            manifest_array_ptr, 
+            manifest_array_ptr,
             manifest_len
         )
     };
-    
+
     let ser_file_manifest: Vec<FileManifestParent<u64>> = ffi_manifests
     .iter()
     .map(FileManifestParent::<u64>::from) // Use the From trait
     .collect();
 
-    let (get_chunks_closure, write_data_closure) = 
+    let (get_chunks_closure, write_data_closure) =
     setup_builder_closures::<u64>(
         user_data,
         get_chunks_cb,
+        free_chunks_cb,
         write_comp_data_cb
     );
 
@@ -309,7 +326,7 @@ pub unsafe extern "C" fn archive_builder_new_u64(
         ser_file_manifest,
         sorted_hashes,
         file_count,
-        1, 
+        1,
         total_size,
         get_chunks_closure,
         write_data_closure
@@ -319,44 +336,46 @@ pub unsafe extern "C" fn archive_builder_new_u64(
         builder
     );
 
+    let handle = Box::new(builder_trait_object);
+
     unsafe {
-        *out_ptr = Box::into_raw(builder_trait_object) as *mut ArchiveBuilderU64;
+        *out_ptr = Box::into_raw(handle) as *mut ArchiveBuilderU64;
     };
-    
+
     FFIResult::Ok
 }
 
 /// Creates and initializes a new `ArchiveBuilder` for u128 hashes.
 ///
-/// This function serves as the entry point for the archive creation process 
+/// This function serves as the entry point for the archive creation process
 /// from a C interface. It configures a new builder with the necessary file
 /// metadata, a list of all unique chunk hashes, and C callback functions for
 /// data retrieval and writing.
 ///
 /// On success, it returns a pointer to an opaque `ArchiveBuilderU128` handle
-/// via the `out_ptr` parameter. This handle can then be used with other FFI 
+/// via the `out_ptr` parameter. This handle can then be used with other FFI
 /// functions to configure and finally build the archive.
 ///
 /// # Arguments
 ///
 /// * `manifest_array_ptr`: A pointer to the start of an array of
-///   `FFIFileManifestParentU128` structs, representing the metadata for all 
+///   `FFIFileManifestParentU128` structs, representing the metadata for all
 ///   files to be included in the archive.
 /// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
-/// * `sorted_hashes_array_ptr`: A pointer to a sorted array of all unique 
+/// * `sorted_hashes_array_ptr`: A pointer to a sorted array of all unique
 ///   `u128` chunk hashes that make up the data for all files.
-/// * `sorted_hashes_len`: The number of elements in the 
+/// * `sorted_hashes_len`: The number of elements in the
 ///   `sorted_hashes_array_ptr` array.
 /// * `file_count`: The total number of files being added to the archive.
 /// * `total_size`: The total combined size in bytes of all unique,
 ///   uncompressed chunks.
 /// * `user_data`: An opaque `void` pointer that will be passed back to the C
 ///   callbacks, allowing the C side to maintain state.
-/// * `get_chunks_cb`: A C function pointer that the builder will call to 
+/// * `get_chunks_cb`: A C function pointer that the builder will call to
 ///   request the raw data for a given set of hashes.
 /// * `write_comp_data_cb`: A C function pointer that the builder will call to
 ///   write out the compressed archive data as it is generated.
-/// * `out_ptr`: A pointer to a `*mut ArchiveBuilderU128` where the handle to 
+/// * `out_ptr`: A pointer to a `*mut ArchiveBuilderU128` where the handle to
 ///   the newly created builder will be written.
 ///
 /// # Returns
@@ -371,11 +390,11 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 /// The caller is responsible for ensuring the following invariants:
 /// - All pointer arguments (`manifest_array_ptr`, `sorted_hashes_array_ptr`,
 ///   `out_ptr`) must be non-null and point to valid memory.
-/// - The `manifest_len` and `sorted_hashes_len` arguments must accurately 
+/// - The `manifest_len` and `sorted_hashes_len` arguments must accurately
 ///   reflect the number of elements in their respective arrays.
-/// - The `user_data` pointer and the C callback function pointers 
+/// - The `user_data` pointer and the C callback function pointers
 ///   (`get_chunks_cb`, `write_comp_data_cb`) must be valid for the entire
-///   lifetime of the builder, until it is consumed by 
+///   lifetime of the builder, until it is consumed by
 ///   `archive_builder_build_u128` or freed by `archive_builder_free_u128`.
 /// - The `ArchiveBuilderU128` handle returned via `out_ptr` is owned by the C
 ///   caller and **must** be passed to either `archive_builder_build_u128` to
@@ -392,46 +411,51 @@ pub unsafe extern "C" fn archive_builder_new_u128(
     total_size: u64,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const u128, 
+        user_data: *mut c_void,
+        hashes: *const u128,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
+    free_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        chunks: FFIChunkDataArray
+    ),
     write_comp_data_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        data: *const u8, 
-        data_len: usize, 
+        user_data: *mut c_void,
+        data: *const u8,
+        data_len: usize,
         is_flush: bool
     ) -> FFICallbackStatus,
     out_ptr: *mut *mut ArchiveBuilderU128,
 ) -> FFIResult {
-    if manifest_array_ptr.is_null() || 
-        sorted_hashes_array_ptr.is_null() || 
+    if manifest_array_ptr.is_null() ||
+        sorted_hashes_array_ptr.is_null() ||
         out_ptr.is_null() {
             return FFIResult::NullArgument;
     }
-    
+
     let sorted_hashes = unsafe{slice::from_raw_parts(
-        sorted_hashes_array_ptr, 
+        sorted_hashes_array_ptr,
         sorted_hashes_len
     )};
 
     let ffi_manifests = unsafe {
         slice::from_raw_parts(
-            manifest_array_ptr, 
+            manifest_array_ptr,
             manifest_len
         )
     };
-    
+
     let ser_file_manifest: Vec<FileManifestParent<u128>> = ffi_manifests
     .iter()
     .map(FileManifestParent::<u128>::from) // Use the From trait
     .collect();
 
-    let (get_chunks_closure, write_data_closure) = 
+    let (get_chunks_closure, write_data_closure) =
     setup_builder_closures::<u128>(
         user_data,
         get_chunks_cb,
+        free_chunks_cb,
         write_comp_data_cb
     );
 
@@ -439,7 +463,7 @@ pub unsafe extern "C" fn archive_builder_new_u128(
         ser_file_manifest,
         sorted_hashes,
         file_count,
-        2, 
+        2,
         total_size,
         get_chunks_closure,
         write_data_closure
@@ -449,26 +473,26 @@ pub unsafe extern "C" fn archive_builder_new_u128(
         builder
     );
 
+    let handle = Box::new(builder_trait_object);
+
     unsafe {
-        *out_ptr = Box::into_raw(
-            builder_trait_object
-        ) as *mut ArchiveBuilderU128;
+        *out_ptr = Box::into_raw(handle) as *mut ArchiveBuilderU128;
     };
-    
+
     FFIResult::Ok
 }
 
-/// A generic helper to safely update the internal state of an 
+/// A generic helper to safely update the internal state of an
 /// `ArchiveBuilder`.
 ///
-/// This private function centralizes the logic for modifying an 
+/// This private function centralizes the logic for modifying an
 /// `ArchiveBuilder` instance that is managed behind an opaque FFI handle. It
-/// takes a raw pointer to the handle, safely casts it back into a mutable 
+/// takes a raw pointer to the handle, safely casts it back into a mutable
 /// reference to the underlying Rust trait object, and then executes a provided
 /// closure to perform the update.
 ///
-/// This approach avoids duplicating the unsafe pointer casting and 
-/// null-checking logic in every public FFI setter function 
+/// This approach avoids duplicating the unsafe pointer casting and
+/// null-checking logic in every public FFI setter function
 /// (e.g., `set_compression_level`, `set_dictionary_size`, etc.).
 ///
 /// # Type Parameters
@@ -485,9 +509,9 @@ pub unsafe extern "C" fn archive_builder_new_u128(
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` if the `builder_handle` is valid and the update was 
+/// * `FFIResult::Ok` if the `builder_handle` is valid and the update was
 ///   applied.
-/// * `FFIResult::NullArgument` if the provided `builder_handle` is a null 
+/// * `FFIResult::NullArgument` if the provided `builder_handle` is a null
 ///   pointer.
 fn update_builder_internal<T>(
     builder_handle: *mut T,
@@ -511,7 +535,7 @@ where
 /// Sets the compression algorithm on the ArchiveBuilder for a u64 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid, non-null pointer from 
+/// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u64(
@@ -519,7 +543,7 @@ pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u64(
     code: u16
 ) -> FFIResult {
     update_builder_internal(
-        builder_handle, 
+        builder_handle,
         |b| b.set_compression_algorithm(code)
     )
 }
@@ -527,7 +551,7 @@ pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u64(
 /// Sets the compression algorithm on the ArchiveBuilder for a u128 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid, non-null pointer from 
+/// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u128`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u128(
@@ -535,7 +559,7 @@ pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u128(
     code: u16
 ) -> FFIResult {
     update_builder_internal(
-        builder_handle, 
+        builder_handle,
         |b| b.set_compression_algorithm(code)
     )
 }
@@ -543,7 +567,7 @@ pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u128(
 /// Sets the compression level on the ArchiveBuilder for a u64 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid, non-null pointer from 
+/// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_compression_level_u64(
@@ -551,7 +575,7 @@ pub unsafe extern "C" fn archive_builder_set_compression_level_u64(
     level: i32,
 ) -> FFIResult {
     update_builder_internal(
-        builder_handle, 
+        builder_handle,
         |b| b.set_compression_level(level)
     )
 }
@@ -559,7 +583,7 @@ pub unsafe extern "C" fn archive_builder_set_compression_level_u64(
 /// Sets the compression level on the ArchiveBuilder for a u128 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid, non-null pointer from 
+/// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u128`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_compression_level_u128(
@@ -567,7 +591,7 @@ pub unsafe extern "C" fn archive_builder_set_compression_level_u128(
     level: i32,
 ) -> FFIResult {
     update_builder_internal(
-        builder_handle, 
+        builder_handle,
         |b| b.set_compression_level(level)
     )
 }
@@ -575,7 +599,7 @@ pub unsafe extern "C" fn archive_builder_set_compression_level_u128(
 /// Sets the dictionary size on the ArchiveBuilder for a u64 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid, non-null pointer from 
+/// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_dictionary_size_u64(
@@ -583,7 +607,7 @@ pub unsafe extern "C" fn archive_builder_set_dictionary_size_u64(
     size: u64,
 ) -> FFIResult {
     update_builder_internal(
-        builder_handle, 
+        builder_handle,
         |b| b.set_dictionary_size(size)
     )
 }
@@ -591,7 +615,7 @@ pub unsafe extern "C" fn archive_builder_set_dictionary_size_u64(
 /// Sets the dictionary size on the ArchiveBuilder for a u128 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid, non-null pointer from 
+/// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u128`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_dictionary_size_u128(
@@ -599,7 +623,7 @@ pub unsafe extern "C" fn archive_builder_set_dictionary_size_u128(
     size: u64,
 ) -> FFIResult {
     update_builder_internal(
-        builder_handle, 
+        builder_handle,
         |b| b.set_dictionary_size(size)
     )
 }
@@ -607,7 +631,7 @@ pub unsafe extern "C" fn archive_builder_set_dictionary_size_u128(
 /// Sets the worker count on the ArchiveBuilder for a u64 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid, non-null pointer from 
+/// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_worker_count_u64(
@@ -615,7 +639,7 @@ pub unsafe extern "C" fn archive_builder_set_worker_count_u64(
     threads: usize,
 ) -> FFIResult {
     update_builder_internal(
-        builder_handle, 
+        builder_handle,
         |b| b.set_worker_threads(threads)
     )
 }
@@ -623,7 +647,7 @@ pub unsafe extern "C" fn archive_builder_set_worker_count_u64(
 /// Sets the worker count on the ArchiveBuilder for a u128 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid, non-null pointer from 
+/// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u128`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_worker_count_u128(
@@ -631,7 +655,7 @@ pub unsafe extern "C" fn archive_builder_set_worker_count_u128(
     threads: usize,
 ) -> FFIResult {
     update_builder_internal(
-        builder_handle, 
+        builder_handle,
         |b| b.set_worker_threads(threads)
     )
 }
@@ -639,7 +663,7 @@ pub unsafe extern "C" fn archive_builder_set_worker_count_u128(
 /// Sets the optimize dictionary flag on the ArchiveBuilder for a u64 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid, non-null pointer from 
+/// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_optimize_dictionary_u64(
@@ -647,7 +671,7 @@ pub unsafe extern "C" fn archive_builder_set_optimize_dictionary_u64(
     optimize: bool,
 ) -> FFIResult {
     update_builder_internal(
-        builder_handle, 
+        builder_handle,
         |b| b.set_optimize_dictionary(optimize)
     )
 }
@@ -655,7 +679,7 @@ pub unsafe extern "C" fn archive_builder_set_optimize_dictionary_u64(
 /// Sets the optimize dictionary flag on the ArchiveBuilder for a u128 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid, non-null pointer from 
+/// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u128`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_optimize_dictionary_u128(
@@ -663,7 +687,7 @@ pub unsafe extern "C" fn archive_builder_set_optimize_dictionary_u128(
     optimize: bool,
 ) -> FFIResult {
     update_builder_internal(
-        builder_handle, 
+        builder_handle,
         |b| b.set_optimize_dictionary(optimize)
     )
 }
@@ -706,7 +730,7 @@ fn ffi_builder_progress_internal<T>(
     builder_handle: *mut T,
     callback: extern "C" fn(FFIProgress, *mut c_void),
     user_data: *mut c_void,
-) -> FFIResult 
+) -> FFIResult
 where
     T: FFIBuilderHandle,
 {
@@ -728,8 +752,8 @@ where
 /// Sets the progress callback for the ArchiveBuilder for a u64 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid pointer returned from 
-/// `archive_builder_new_u64`. The `callback` function pointer must be 
+/// The `builder_handle` must be a valid pointer returned from
+/// `archive_builder_new_u64`. The `callback` function pointer must be
 /// valid for the lifetime of the builder.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_c_progress_u64(
@@ -747,8 +771,8 @@ pub unsafe extern "C" fn archive_builder_set_c_progress_u64(
 /// Sets the progress callback for the ArchiveBuilder for a u128 hash.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid pointer returned from 
-/// `archive_builder_new_u128`. The `callback` function pointer must be 
+/// The `builder_handle` must be a valid pointer returned from
+/// `archive_builder_new_u128`. The `callback` function pointer must be
 /// valid for the lifetime of the builder.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_set_c_progress_u128(
@@ -778,16 +802,16 @@ pub unsafe extern "C" fn archive_builder_set_c_progress_u128(
 ///
 /// # Arguments
 ///
-/// * `result`: The `Result` returned from the `ArchiveBuilder::build()` 
+/// * `result`: The `Result` returned from the `ArchiveBuilder::build()`
 ///   method.
 /// * `out_ptr`: A raw pointer to a location where the pointer to the newly
 ///   allocated `FFIArchiveData` struct will be written on success.
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` on success, with `out_ptr` pointing to the 
+/// * `FFIResult::Ok` on success, with `out_ptr` pointing to the
 ///   `FFIArchiveData` struct.
-/// * An FFI-safe error code corresponding to the `SpriteShrinkError` on 
+/// * An FFI-safe error code corresponding to the `SpriteShrinkError` on
 ///   failure.
 ///
 /// # Safety
@@ -806,11 +830,13 @@ unsafe fn handle_build_result(
         Ok(mut archive_data) => {
             let data_ptr = archive_data.as_mut_ptr();
             let data_len = archive_data.len();
+            let data_cap = archive_data.capacity();
             std::mem::forget(archive_data); // Give ownership to C caller
 
             let output = Box::new(FFIArchiveData {
                 data: data_ptr,
                 data_len,
+                data_cap,
             });
             unsafe {
                     *out_ptr = Box::into_raw(output);
@@ -825,12 +851,12 @@ unsafe fn handle_build_result(
 /// an out-parameter for a u64 hash.
 ///
 /// # Safety
-/// - `builder_handle` must be a valid pointer from 
+/// - `builder_handle` must be a valid pointer from
 ///   `archive_builder_new_u64`.
 /// - `out_data` must be a valid pointer to an `*mut FFIArchiveData`.
-/// - This function consumes the builder; `builder_handle` is invalid 
+/// - This function consumes the builder; `builder_handle` is invalid
 ///   after this call.
-/// - The pointer returned via `out_data` must be freed with 
+/// - The pointer returned via `out_data` must be freed with
 ///   `archive_data_free_u64`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_build_u64(
@@ -841,7 +867,7 @@ pub unsafe extern "C" fn archive_builder_build_u64(
         return FFIResult::NullArgument;
     }
 
-    let handle_box = unsafe { 
+    let handle_box = unsafe {
         Box::from_raw(builder_handle as *mut Box<
             dyn ArchiveBuilderTrait<u64>
         >)
@@ -849,8 +875,8 @@ pub unsafe extern "C" fn archive_builder_build_u64(
     let builder = *handle_box;
     let result = builder.build();
 
-    unsafe { 
-        handle_build_result(result, out_ptr) 
+    unsafe {
+        handle_build_result(result, out_ptr)
     }
 }
 
@@ -858,12 +884,12 @@ pub unsafe extern "C" fn archive_builder_build_u64(
 /// an out-parameter for a u128 hash.
 ///
 /// # Safety
-/// - `builder_handle` must be a valid pointer from 
+/// - `builder_handle` must be a valid pointer from
 ///   `archive_builder_new_u128`.
 /// - `out_data` must be a valid pointer to an `*mut FFIArchiveData`.
-/// - This function consumes the builder; `builder_handle` is invalid 
+/// - This function consumes the builder; `builder_handle` is invalid
 ///   after this call.
-/// - The pointer returned via `out_data` must be freed with 
+/// - The pointer returned via `out_data` must be freed with
 ///   `archive_data_free_u128`
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_build_u128(
@@ -874,7 +900,7 @@ pub unsafe extern "C" fn archive_builder_build_u128(
         return FFIResult::NullArgument;
     }
 
-    let handle_box = unsafe { 
+    let handle_box = unsafe {
         Box::from_raw(builder_handle as *mut Box<
             dyn ArchiveBuilderTrait<u128>
         >)
@@ -882,8 +908,8 @@ pub unsafe extern "C" fn archive_builder_build_u128(
     let builder = *handle_box;
     let result = builder.build();
 
-    unsafe { 
-        handle_build_result(result, out_ptr) 
+    unsafe {
+        handle_build_result(result, out_ptr)
     }
 }
 
@@ -912,8 +938,8 @@ pub unsafe extern "C" fn archive_builder_build_u128(
 /// The caller of this function must guarantee that:
 /// - The `builder_handle` is a valid pointer that was originally returned from
 ///   a successful call to `archive_builder_new_*`.
-/// - The handle has not already been freed or passed to an 
-///   `archive_builder_build_*` function, as both actions invalidate the 
+/// - The handle has not already been freed or passed to an
+///   `archive_builder_build_*` function, as both actions invalidate the
 ///   pointer.
 /// - The handle must not be used again after this function is called.
 ///
@@ -921,7 +947,7 @@ pub unsafe extern "C" fn archive_builder_build_u128(
 /// in undefined behavior.
 fn archive_builder_free_internal<T>(
     builder_handle: *mut T
-) 
+)
 where
     T: FFIBuilderHandle,
 {
@@ -939,7 +965,7 @@ where
 /// Frees the ArchiveBuilder if the build is never run for u64 hashes.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid pointer from 
+/// The `builder_handle` must be a valid pointer from
 /// `archive_builder_new_u64` that has not been passed to
 /// `archive_builder_build_u64`.
 #[unsafe(no_mangle)]
@@ -954,7 +980,7 @@ pub unsafe extern "C" fn archive_builder_free_u64(
 /// Frees the ArchiveBuilder if the build is never run for u128 hashes.
 ///
 /// # Safety
-/// The `builder_handle` must be a valid pointer from 
+/// The `builder_handle` must be a valid pointer from
 /// `archive_builder_new_u128` that has not been passed to
 /// `archive_builder_build_u128`.
 #[unsafe(no_mangle)]
@@ -969,19 +995,19 @@ pub unsafe extern "C" fn archive_builder_free_u128(
 /// Frees the data returned by a successful build.
 ///
 /// # Safety
-/// The `archive_data_ptr` must be a valid pointer from 
+/// The `archive_data_ptr` must be a valid pointer from
 /// `archive_builder_build`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_data_free(
-    archive_data_ptr: *mut FFIArchiveData) 
+    archive_data_ptr: *mut FFIArchiveData)
 {
     unsafe{
         if !archive_data_ptr.is_null() {
             let archive_box = Box::from_raw(archive_data_ptr);
             let _ = Vec::from_raw_parts(
-                archive_box.data, 
-                archive_box.data_len, 
-                archive_box.data_len
+                archive_box.data,
+                archive_box.data_len,
+                archive_box.data_cap,
             );
         }
     }
