@@ -176,8 +176,8 @@ Here's a quick reference for the main arguments:
 | :---       | :---                  | :---                                                                                     | :---          |
 | `-i`       | `--input`             | Path to a file or directory for input. Can be specified multiple times.                  | Required      |
 | `-o`       | `--output`            | Path for the output archive (compression) or directory (extraction).                     | Mode Dependent|
-| `-m`       | `--metadata`          | Activates metadata retrieval mode. Used with `-i` (input archive).                       | N/A           |
-| `-j`       | `--json`              | Activates json metadata mode. The metadata output will be printed in json format.        | `false`       |
+| `-l`       | `--list`              | Activates file list mode. Lists archive contents in a plain text table. Used with `-i` (input archive).| N/A           |
+| `-m`       | `--metadata`          | Activates metadata mode. Lists archive contents in json format. Used with -i (input archive).| `false`       |
 | `-e`       | `--extract`           | Specifies file indices to extract (e.g., `1,3,5-7`). Requires `-o` and `-i`.             | N/A           |
 |            | `--compression-level` | Sets the numerical compression level for the zstd algorithm.                             | `19`          |
 | `-w`       | `--window`            | Hashing algorithm window size (e.g., "2KB", "4KB"). Recommended: 2KB.                    | `2KB`         |
@@ -221,6 +221,8 @@ This project utilizes multiple licenses for its different components. Please ens
 -   **Sprite Shrink Library (`lib_sprite_shrink`)** is licensed under the **[Mozilla Public License 2.0 (MPL-2.0)](https://www.mozilla.org/en-US/MPL/2.0/)**. This is a "weak copyleft" license. It requires that modifications to the library's source files be shared under the MPL-2.0, but it allows you to link the library into a larger work under a different license.
 
 -   **SSMC Specification (`SPECIFICATION.md`)** is licensed under the **[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/)**. This license allows you to share and adapt the specification for any purpose, even commercially, as long as you give appropriate credit.
+
+-   **User Manual (`user_manual.md`)** is licensed under the **[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/)**. This license allows you to share and adapt the specification for any purpose, even commercially, as long as you give appropriate credit.
 
 ## Support and Contact
 
