@@ -151,7 +151,7 @@ fn setup_builder_closures<H: 'static>(
         hashes: &[H]
     | -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
         let mut ffi_chunks_array = FFIChunkDataArray {
-            ptr: std::ptr::null_mut(), len: 0
+            ptr: std::ptr::null_mut(), len: 0, cap: 0
         };
         let status = unsafe {
             get_chunks_cb(

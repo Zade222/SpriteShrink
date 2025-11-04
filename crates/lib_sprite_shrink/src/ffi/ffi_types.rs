@@ -216,6 +216,7 @@ impl<H> From<(H, ChunkLocation)> for FFIChunkIndexEntry<H> {
 pub struct FFIChunkDataArray {
     pub ptr: *mut FFIVecBytes,
     pub len: usize,
+    pub cap: usize,
 }
 
 /// FFI-safe equivalent of `ChunkLocation`, representing a slice of the
@@ -321,7 +322,7 @@ pub type FFIDataStoreEntryU128 = FFIDataStoreEntry<u128>;
 pub struct FFIFileData {
     pub filename: *const c_char,
     pub file_data: *const u8,
-    pub file_data_len: usize
+    pub file_data_len: usize,
 }
 
 /// A composite FFI structure that bundles a file's manifest with its
@@ -360,6 +361,7 @@ pub struct FFIFileManifestChunks<H> {
     pub fmp: FFIFileManifestParent<H>,
     pub hashed_chunks: *mut FFIHashedChunkData<H>,
     pub hashed_chunks_len: usize,
+    pub hashed_chunks_cap: usize,
 }
 
 /// An `FFIFileManifestChunks` struct specialized for `u64` hashes.
@@ -383,12 +385,14 @@ pub type FFIFileManifestChunksU128 = FFIFileManifestChunks<u128>;
 impl<H> From<(
     FFIFileManifestParent<H>,
     *mut FFIHashedChunkData<H>,
+    usize,
     usize
 )> for FFIFileManifestChunks<H> {
     fn from(
-        (fmp, hashed_chunks, hashed_chunks_len): (
+        (fmp, hashed_chunks, hashed_chunks_len, hashed_chunks_cap): (
             FFIFileManifestParent<H>,
             *mut FFIHashedChunkData<H>,
+            usize,
             usize,
         ),
     ) -> Self {
@@ -396,6 +400,7 @@ impl<H> From<(
             fmp,
             hashed_chunks,
             hashed_chunks_len,
+            hashed_chunks_cap,
         }
     }
 }
@@ -456,6 +461,7 @@ pub type FFIFileManifestParentU128 = FFIFileManifestParent<u128>;
 pub struct FFIKeyArray<H> {
     pub ptr: *mut H,
     pub len: usize,
+    pub cap: usize,
 }
 
 /// An `FFIKeyArray` specialized for `u64` hashes.
@@ -582,6 +588,7 @@ pub struct FFIHashedChunkData<H> {
     pub hash: H,
     pub chunk_data: *mut u8,
     pub chunk_data_len: usize,
+    pub chunk_data_cap: usize,
 }
 
 /// An `FFIHashedChunkData` struct specialized for `u64` hashes.
@@ -599,13 +606,14 @@ pub type FFIHashedChunkDataU128 = FFIHashedChunkData<u128>;
 // Converts a tuple containing the constituent parts into the FFI-safe
 // `FFIHashedChunkData` struct. This is a convenience for assembling the
 // struct from its raw components.
-impl<H> From<(H, *mut u8, usize)> for FFIHashedChunkData<H> {
-    fn from((hash, chunk_data, chunk_data_len):
-    (H, *mut u8, usize)) -> Self {
+impl<H> From<(H, *mut u8, usize, usize)> for FFIHashedChunkData<H> {
+    fn from((hash, chunk_data, chunk_data_len, chunk_data_cap):
+    (H, *mut u8, usize, usize)) -> Self {
         Self {
             hash,
             chunk_data,
             chunk_data_len,
+            chunk_data_cap
         }
     }
 }
@@ -767,8 +775,10 @@ pub struct FFIProcessedFileData {
     pub veri_hash: *mut [u8; 64],
     pub chunks: *mut FFIChunk,
     pub chunks_len: usize,
+    pub chunks_cap: usize,
     pub file_data: *mut u8,
-    pub file_data_len: usize
+    pub file_data_len: usize,
+    pub file_data_cap: usize,
 }
 
 /// FFI-safe struct to pass progress information from Rust to a C caller.
@@ -892,6 +902,7 @@ impl<H: Hashable> From<(H, (u64, u64))> for FFISeekChunkInfo<H> {
 pub struct FFISeekInfoArray<H> {
     pub chunks: *mut FFISeekChunkInfo<H>,
     pub chunks_len: usize,
+    pub chunks_cap: usize,
 }
 
 /// An `FFISeekInfoArray` specialized for `u64` hashes.
@@ -912,15 +923,17 @@ pub type FFISeekInfoArrayU128 = FFISeekInfoArray<u128>;
 
 //Converts a tuple containing a raw pointer to the seek info chunks and
 // their length into the FFI-safe `FFISeekInfoArray` struct.
-impl<H: Hashable> From<(*mut FFISeekChunkInfo<H>, usize)> for
+impl<H: Hashable> From<(*mut FFISeekChunkInfo<H>, usize, usize)> for
     FFISeekInfoArray<H> {
         fn from((
             chunks_ptr,
-            chunks_len
-        ): (*mut FFISeekChunkInfo<H>, usize)) -> Self {
+            chunks_len,
+            chunks_cap
+        ): (*mut FFISeekChunkInfo<H>, usize, usize)) -> Self {
             Self {
                 chunks: chunks_ptr,
                 chunks_len,
+                chunks_cap
             }
         }
 }
@@ -963,10 +976,13 @@ impl<H: Hashable> From<(*mut FFISeekChunkInfo<H>, usize)> for
 pub struct FFISerializedOutput<H> {
     pub ser_manifest_ptr: *mut FFIFileManifestParent<H>,
     pub ser_manifest_len: usize,
+    pub ser_manifest_cap: usize,
     pub ser_chunk_index_ptr: *mut FFIChunkIndexEntry<H>,
     pub ser_chunk_index_len: usize,
+    pub ser_chunk_index_cap: usize,
     pub sorted_hashes_ptr: *const H,
     pub sorted_hashes_len: usize,
+    pub sorted_hashes_cap: usize,
 }
 
 /// An `FFISerializedOutput` struct specialized for `u64` hashes.
@@ -990,32 +1006,44 @@ pub type FFISerializedOutputU128 = FFISerializedOutput<u128>;
 impl<H> From<(
     *mut FFIFileManifestParent<H>,
     usize,
+    usize,
     *mut FFIChunkIndexEntry<H>,
     usize,
+    usize,
     *const H,
+    usize,
     usize
 )> for FFISerializedOutput<H>{
     fn from((
         ser_manifest_ptr,
         ser_manifest_len,
+        ser_manifest_cap,
         ser_chunk_index_ptr,
         ser_chunk_index_len,
+        ser_chunk_index_cap,
         sorted_hashes_ptr,
-        sorted_hashes_len
+        sorted_hashes_len,
+        sorted_hashes_cap,
     ): (
         *mut FFIFileManifestParent<H>,
         usize,
+        usize,
         *mut FFIChunkIndexEntry<H>,
         usize,
+        usize,
         *const H,
+        usize,
         usize)) -> Self {
         Self {
             ser_manifest_ptr,
             ser_manifest_len,
+            ser_manifest_cap,
             ser_chunk_index_ptr,
             ser_chunk_index_len,
+            ser_chunk_index_cap,
             sorted_hashes_ptr,
-            sorted_hashes_len
+            sorted_hashes_len,
+            sorted_hashes_cap,
         }
     }
 }
@@ -1133,6 +1161,7 @@ pub struct FFIUserData(pub *mut c_void);
 pub struct FFIVecBytes {
     pub ptr: *mut u8,
     pub len: usize,
+    pub cap: usize,
 }
 
 /// Represents a single entry in a key-value map of filenames to their

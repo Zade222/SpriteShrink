@@ -16,10 +16,10 @@ use crate::ffi::ffi_error_handling::{
 };
 use crate::ffi::ffi_types::{
     FFIChunkDataArray, FFIChunkIndexEntry,
-    FFIFileManifestParent, 
+    FFIFileManifestParent,
     FFIFileManifestParentU64, FFIFileManifestParentU128,
     FFIKeyArray, FFIKeyArrayU64, FFIKeyArrayU128,
-    FFISerializedOutput, 
+    FFISerializedOutput,
     FFISerializedOutputU64, FFISerializedOutputU128,
     FFISSAChunkMeta,
 };
@@ -34,7 +34,7 @@ use crate::serialization::{serialize_uncompressed_data};
 /// This internal function serves as the core implementation for the public
 /// `serialize_uncompressed_data_ffi_*` functions. It orchestrates a complex
 /// data transformation process, preparing in-memory Rust data structures for
-/// the final archive-building step by converting them into a set of 
+/// the final archive-building step by converting them into a set of
 /// C-compatible, heap-allocated arrays.
 ///
 /// The process involves:
@@ -52,7 +52,7 @@ use crate::serialization::{serialize_uncompressed_data};
 ///
 /// # Type Parameters
 ///
-/// * `H`: The generic hash type (e.g., `u64`, `u128`), which must be 
+/// * `H`: The generic hash type (e.g., `u64`, `u128`), which must be
 ///   displayable, sortable, copyable, and hashable.
 ///
 /// # Arguments
@@ -81,7 +81,7 @@ use crate::serialization::{serialize_uncompressed_data};
 ///
 /// The public FFI function that calls this helper must guarantee that:
 /// - All input pointers are valid and non-null for the duration of this call.
-/// - The `manifest_len` accurately reflects the number of elements in the 
+/// - The `manifest_len` accurately reflects the number of elements in the
 ///   array.
 /// - The C callback function pointers are valid and point to functions with
 ///   the correct signatures.
@@ -95,17 +95,17 @@ fn serialize_uncompressed_data_ffi_internal<H>(
     manifest_len: usize,
     user_data: *mut c_void,
     get_keys_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
+        user_data: *mut c_void,
         out_keys: *mut FFIKeyArray<H>,
     ) -> FFICallbackStatus,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const H, 
+        user_data: *mut c_void,
+        hashes: *const H,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
     out_ptr: *mut *mut FFISerializedOutput<H>
-) -> FFIResult 
+) -> FFIResult
 where
     H: std::fmt::Display + std::cmp::Ord + std::marker::Copy + std::hash::Hash + 'static,
 {
@@ -117,11 +117,11 @@ where
         of the original serialize_uncompressed_data function, from C
         input.*/
         let ffi_manifests = slice::from_raw_parts(
-            manifest_array_ptr, 
+            manifest_array_ptr,
             manifest_len
         );
 
-        /*Since DashMap is not a supported type in C, the following 
+        /*Since DashMap is not a supported type in C, the following
         reconstructs it for use by the library.*/
 
         /*Reconstruct the file_manifest DashMap via the following
@@ -142,8 +142,9 @@ where
 
     let get_keys_closure = || -> Result<Vec<H>, SpriteShrinkError> {
         let mut ffi_keys_array = FFIKeyArray {
-            ptr: std::ptr::null_mut(), 
-            len: 0
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
         };
 
         let status = unsafe {
@@ -156,9 +157,9 @@ where
         //Take ownership of the C-allocated array
         let keys = unsafe {
             Vec::from_raw_parts(
-                ffi_keys_array.ptr, 
-                ffi_keys_array.len, 
-                ffi_keys_array.len
+                ffi_keys_array.ptr,
+                ffi_keys_array.len,
+                ffi_keys_array.cap
             )
         };
 
@@ -166,7 +167,7 @@ where
     };
 
     let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
-        let mut ffi_chunks_array = FFIChunkDataArray { ptr: std::ptr::null_mut(), len: 0 };
+        let mut ffi_chunks_array = FFIChunkDataArray { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
         let status = unsafe {
             get_chunks_cb(
                 user_data_addr as *mut c_void,
@@ -177,24 +178,24 @@ where
         };
         Result::from(status)?;
         let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr, 
+            ffi_chunks_array.ptr,
             ffi_chunks_array.len
         )};
 
         let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.len)}
+            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
         }).collect();
-        
+
         let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr, 
-            ffi_chunks_array.len, 
-            ffi_chunks_array.len)};
+            ffi_chunks_array.ptr,
+            ffi_chunks_array.len,
+            ffi_chunks_array.cap)};
         Ok(chunks)
     };
-    
+
     //Call the core Rust serialization logic.
     let (
-        ser_file_manifest,  
+        ser_file_manifest,
         chunk_index,
         sorted_hashes
     ) = match serialize_uncompressed_data::<_, SpriteShrinkError, H, _>(
@@ -207,11 +208,11 @@ where
     };
 
     //Convert the Rust results back into FFI-safe, heap-allocated C structures.
-    let mut ffi_manifests: Vec<FFIFileManifestParent<H>> = 
+    let mut ffi_manifests: Vec<FFIFileManifestParent<H>> =
         match ser_file_manifest
         .into_iter()
         .map(|fmp|  {
-            let mut chunk_meta_vec: Vec<FFISSAChunkMeta<H>> = 
+            let mut chunk_meta_vec: Vec<FFISSAChunkMeta<H>> =
                 fmp.chunk_metadata
                 .iter()
                 .map(|meta| FFISSAChunkMeta::from(*meta))
@@ -237,9 +238,10 @@ where
             Ok(v) => v,
             Err(status) => return status, //Propagate the error status
         };
-    
+
     let manifests_ptr = ffi_manifests.as_mut_ptr();
     let manifests_len = ffi_manifests.len();
+    let manifests_cap = ffi_manifests.capacity();
     //Give up ownership of the outer Vec
     std::mem::forget(ffi_manifests);
 
@@ -258,6 +260,7 @@ where
 
     let entries_ptr = entries.as_mut_ptr();
     let entries_len = entries.len();
+    let entries_cap = entries.capacity();
 
     //Give up ownership of the Vec so it doesn't get deallocated.
     std::mem::forget(entries);
@@ -265,10 +268,13 @@ where
     let output = Box::new(FFISerializedOutput::from((
         manifests_ptr,
         manifests_len,
+        manifests_cap,
         entries_ptr,
         entries_len,
+        entries_cap,
         sorted_hashes.as_ptr(),
         sorted_hashes.len(),
+        sorted_hashes.capacity(),
     )));
 
     std::mem::forget(sorted_hashes);
@@ -284,14 +290,14 @@ where
 /// On success, returns `FFIResult::Ok` and populates `out_ptr`.
 ///
 /// # Safety
-/// - All pointer arguments must be non-null and valid for their 
+/// - All pointer arguments must be non-null and valid for their
 ///   specified lengths.
 /// - `out_ptr` must be a valid, non-null pointer.
 /// - The memory allocated for `out_keys` in the `get_keys_cb` callback and for
 ///   `out_chunks` in the `get_chunks_cb` callback is owned by Rust upon return.
 ///   The C caller MUST NOT free this memory.
 /// - On success, the pointer written to `out_ptr` is owned by the C
-///   caller and MUST be freed by passing it to 
+///   caller and MUST be freed by passing it to
 ///   `free_serialized_output_u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u64(
@@ -299,18 +305,18 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u64(
     manifest_len: usize,
     user_data: *mut c_void,
     get_keys_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
+        user_data: *mut c_void,
         out_keys: *mut FFIKeyArrayU64,
     ) -> FFICallbackStatus,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const u64, 
+        user_data: *mut c_void,
+        hashes: *const u64,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
     out_ptr: *mut *mut FFISerializedOutputU64
 ) -> FFIResult {
-    if manifest_array_ptr.is_null() 
+    if manifest_array_ptr.is_null()
         || out_ptr.is_null() {
         return FFIResult::NullArgument;
     };
@@ -330,14 +336,14 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u64(
 /// On success, returns `FFIResult::Ok` and populates `out_ptr`.
 ///
 /// # Safety
-/// - All pointer arguments must be non-null and valid for their 
+/// - All pointer arguments must be non-null and valid for their
 ///   specified lengths.
 /// - `out_ptr` must be a valid, non-null pointer.
 /// - The memory allocated for `out_keys` in the `get_keys_cb` callback and for
 ///   `out_chunks` in the `get_chunks_cb` callback is owned by Rust upon return.
 ///   The C caller MUST NOT free this memory.
 /// - On success, the pointer written to `out_ptr` is owned by the C
-///   caller and MUST be freed by passing it to 
+///   caller and MUST be freed by passing it to
 ///   `free_serialized_output_u128`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u128(
@@ -345,18 +351,18 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u128(
     manifest_len: usize,
     user_data: *mut c_void,
     get_keys_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
+        user_data: *mut c_void,
         out_keys: *mut FFIKeyArrayU128,
     ) -> FFICallbackStatus,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const u128, 
+        user_data: *mut c_void,
+        hashes: *const u128,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
     out_ptr: *mut *mut FFISerializedOutputU128
 ) -> FFIResult {
-    if manifest_array_ptr.is_null() 
+    if manifest_array_ptr.is_null()
         || out_ptr.is_null() {
         return FFIResult::NullArgument;
     };
@@ -380,38 +386,38 @@ unsafe fn free_serialized_output_internal<H>(
         let ffi_manifests = Vec::from_raw_parts(
             output.ser_manifest_ptr,
             output.ser_manifest_len,
-            output.ser_manifest_len,
+            output.ser_manifest_cap,
         );
 
         for fmp in ffi_manifests {
             //Deallocate the CString for the filename.
             let _ = CString::from_raw(fmp.filename);
-            /*Reconstruct and deallocate the Vec for the chunk 
+            /*Reconstruct and deallocate the Vec for the chunk
             metadata.*/
             let _ = Vec::from_raw_parts(
                 fmp.chunk_metadata as *mut FFISSAChunkMeta<H>,
-                fmp.chunk_metadata_len as usize,
-                fmp.chunk_metadata_len as usize,
+                fmp.chunk_metadata_len,
+                fmp.chunk_metadata_cap,
             );
         }
 
         let _ = Vec::from_raw_parts(
-            output.ser_chunk_index_ptr, 
-            output.ser_chunk_index_len, 
-            output.ser_chunk_index_len);
+            output.ser_chunk_index_ptr,
+            output.ser_chunk_index_len,
+            output.ser_chunk_index_cap);
         let _ = Vec::from_raw_parts(
-            output.sorted_hashes_ptr as *mut H, 
-            output.sorted_hashes_len, 
-            output.sorted_hashes_len
+            output.sorted_hashes_ptr as *mut H,
+            output.sorted_hashes_len,
+            output.sorted_hashes_cap
         );
     }
 }
 
 /// Frees the memory allocated by `serialize_uncompressed_data_ffi_u64`.
 ///
-/// This function is responsible for deallocating the 
+/// This function is responsible for deallocating the
 /// `FFISerializedOutput` struct and all the memory blocks it points
-/// to. This includes the serialized manifest, data store, 
+/// to. This includes the serialized manifest, data store,
 /// chunk index, and sorted hashes.
 ///
 /// # Safety
@@ -433,9 +439,9 @@ pub unsafe extern "C" fn free_serialized_output_u64(
 
 /// Frees the memory allocated by `serialize_uncompressed_data_ffi_u128`.
 ///
-/// This function is responsible for deallocating the 
+/// This function is responsible for deallocating the
 /// `FFISerializedOutput` struct and all the memory blocks it points
-/// to. This includes the serialized manifest, data store, 
+/// to. This includes the serialized manifest, data store,
 /// chunk index, and sorted hashes.
 ///
 /// # Safety

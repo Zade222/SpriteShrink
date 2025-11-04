@@ -1,7 +1,7 @@
 //! FFI-safe processing functions for sprite-shrink archives.
 //!
 //! This module exposes the core data processing logic (chunking, hashing,
-//! verification) to C callers with robust error handling and memory 
+//! verification) to C callers with robust error handling and memory
 //! management.
 
 use std::{
@@ -21,17 +21,17 @@ use crate::ffi::ffi_error_handling::{
 use crate::ffi::ffi_types::{
     FFIChunk, FFIChunkDataArray,
     FFIFileManifestChunks,
-    FFIFileManifestChunksU64, FFIFileManifestChunksU128, 
+    FFIFileManifestChunksU64, FFIFileManifestChunksU128,
     FFIFileData, FFIFileManifestParent,
-    FFIFileManifestParentU64, FFIFileManifestParentU128, 
+    FFIFileManifestParentU64, FFIFileManifestParentU128,
     FFIHashedChunkData, FFIProcessedFileData,
-    FFISeekChunkInfo, FFISeekInfoArray, FFISSAChunkMeta, 
+    FFISeekChunkInfo, FFISeekInfoArray, FFISSAChunkMeta,
 };
 use crate::lib_error_handling::{
     IsCancelled, SpriteShrinkError
 };
 use crate::processing::{
-    create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory, 
+    create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory,
     verify_single_file, test_compression, Hashable};
 use crate::{FileData, FileManifestParent};
 
@@ -46,7 +46,7 @@ use crate::{FileData, FileManifestParent};
 ///
 /// The final FFI-safe struct, which contains multiple heap-allocated,
 /// C-compatible data structures, is itself allocated on the heap, and a
-/// pointer to it is returned via the `out_ptr` parameter, transferring 
+/// pointer to it is returned via the `out_ptr` parameter, transferring
 /// ownership to the caller.
 ///
 /// # Type Parameters
@@ -56,7 +56,7 @@ use crate::{FileData, FileManifestParent};
 ///
 /// # Arguments
 ///
-/// * `file_name_ptr`: A pointer to a null-terminated C string for the 
+/// * `file_name_ptr`: A pointer to a null-terminated C string for the
 ///   filename.
 /// * `file_data_array_ptr`: A pointer to the byte array of the file's content.
 /// * `file_data_len`: The length of the `file_data_array_ptr`.
@@ -74,14 +74,14 @@ use crate::{FileData, FileManifestParent};
 /// # Safety
 ///
 /// The public FFI function that calls this helper is responsible for ensuring:
-/// - All input pointers (`file_name_ptr`, `file_data_array_ptr`, 
+/// - All input pointers (`file_name_ptr`, `file_data_array_ptr`,
 ///   `chunks_array_ptr`, `out_ptr`) are valid and non-null.
 /// - The lengths (`file_data_len`, `chunks_len`) accurately correspond to
 ///   their respective arrays.
 /// - The caller takes full ownership of the memory allocated for the
 ///   `FFIFileManifestChunks` struct and all the nested pointers it contains
 ///   (filenames, chunk metadata, hashed chunk data). This memory **must** be
-///   deallocated by passing the pointer to the corresponding 
+///   deallocated by passing the pointer to the corresponding
 ///   `free_file_manifest_and_chunks_ffi_*` function to prevent significant
 ///   memory leaks.
 fn create_file_manifest_and_chunks_internal<H>(
@@ -91,33 +91,33 @@ fn create_file_manifest_and_chunks_internal<H>(
     chunks_array_ptr: *const FFIChunk,
     chunks_len: usize,
     out_ptr: *mut *mut FFIFileManifestChunks<H>
-) -> FFIResult 
+) -> FFIResult
 where
     H: Hashable,
 {
     let (file_name, file_data, chunks) = unsafe {
-            /*Prepare file_name, which is the first parameter of the original 
+            /*Prepare file_name, which is the first parameter of the original
             create_file_manifest_and_chunks function, from C input.*/
             let file_name = std::ffi::CStr::from_ptr(file_name_ptr)
                 .to_string_lossy()
                 .into_owned();
 
-            /*Prepare file_data, which is the second parameter of the original 
+            /*Prepare file_data, which is the second parameter of the original
             create_file_manifest_and_chunks function, from C input.*/
             let file_data = slice::from_raw_parts(
-                file_data_array_ptr, 
+                file_data_array_ptr,
                 file_data_len
             );
 
-            /*Prepare chunks, which is the third parameter of the original 
+            /*Prepare chunks, which is the third parameter of the original
             create_file_manifest_and_chunks function, from C input.*/
             let chunks = {
-                let chunk_slice = 
+                let chunk_slice =
                     slice::from_raw_parts(
-                        chunks_array_ptr, 
+                        chunks_array_ptr,
                         chunks_len
                     );
-                
+
                 chunk_slice.iter()
                     .map(|chunk| {
                         Chunk {
@@ -136,7 +136,7 @@ where
 
         /*Call original function to process data.*/
         let (fmp, hashed_chunks) = create_file_manifest_and_chunks(
-            &file_name, file_data, 
+            &file_name, file_data,
             &chunks
         );
 
@@ -145,6 +145,8 @@ where
             .map(|meta| FFISSAChunkMeta::from(*meta))
             .collect();
         let fmp_meta_ptr = ffi_chunk_metadata.as_mut_ptr();
+        let fmp_meta_len = ffi_chunk_metadata.len();
+        let fmp_meta_cap = ffi_chunk_metadata.capacity();
         std::mem::forget(ffi_chunk_metadata);
 
         let c_filename = match CString::new(fmp.filename.clone()) {
@@ -152,11 +154,12 @@ where
             Err(_) => return FFIResult::InvalidString,
         };
 
-        let ffi_fmp = FFIFileManifestParent::<H>::from((
-            fmp, 
-            c_filename, 
-            fmp_meta_ptr as *const FFISSAChunkMeta<H>
-        ));
+        let ffi_fmp = FFIFileManifestParent::<H> {
+            filename: c_filename,
+            chunk_metadata: fmp_meta_ptr,
+            chunk_metadata_len: fmp_meta_len,
+            chunk_metadata_cap: fmp_meta_cap,
+        };
 
         //Convert vector of hashed chunks
         let mut ffi_hashed_chunks: Vec<FFIHashedChunkData<H>> = hashed_chunks
@@ -164,27 +167,31 @@ where
             .map(|(hash, mut data_vec)| {
                 let data_ptr = data_vec.as_mut_ptr();
                 let data_len = data_vec.len();
+                let data_cap = data_vec.capacity();
 
-                /*data_vec is now owned and must be prevented from being 
+                /*data_vec is now owned and must be prevented from being
                 dropped at the end of this closure, as we are transferring its
                 allocation to the FFI caller.*/
-                std::mem::forget(data_vec); 
+                std::mem::forget(data_vec);
                 FFIHashedChunkData::from((
                     hash,
                     data_ptr,
-                    data_len
+                    data_len,
+                    data_cap
                 ))
             }).collect();
-        
+
         let hashed_chunks_ptr = ffi_hashed_chunks.as_mut_ptr();
         let hashed_chunks_len = ffi_hashed_chunks.len();
+        let hashed_chunks_cap = ffi_hashed_chunks.capacity();
         std::mem::forget(ffi_hashed_chunks);
 
         /*Prepare return data in struct.*/
         let output = Box::new(FFIFileManifestChunks::from((
             ffi_fmp,
             hashed_chunks_ptr,
-            hashed_chunks_len
+            hashed_chunks_len,
+            hashed_chunks_cap
         )));
 
         unsafe {
@@ -193,7 +200,7 @@ where
         FFIResult::Ok
 }
 
-/// Creates a file manifest and a list of u64 hashed data chunks via an 
+/// Creates a file manifest and a list of u64 hashed data chunks via an
 /// FFI-safe interface.
 ///
 /// # Safety
@@ -201,10 +208,10 @@ where
 /// from `create_file_manifest_and_chunks_ffi_u64`.
 ///
 /// Passing a null pointer, a pointer that has already been freed, or a
-/// pointer from any other source will result in 
+/// pointer from any other source will result in
 /// **undefined behavior**.
 /// This function must only be called once per pointer.
-#[unsafe(no_mangle)]    
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u64(
     file_name_ptr: *const c_char,
     file_data_array_ptr: *const u8,
@@ -214,6 +221,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u64(
     out_ptr: *mut *mut FFIFileManifestChunksU64
 ) -> FFIResult {
     if file_name_ptr.is_null() ||
+        file_data_array_ptr.is_null() ||
         chunks_array_ptr.is_null() ||
         out_ptr.is_null() {
             return FFIResult::NullArgument;
@@ -229,7 +237,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u64(
     )
 }
 
-/// Creates a file manifest and a list of u128 hashed data chunks via an 
+/// Creates a file manifest and a list of u128 hashed data chunks via an
 /// FFI-safe interface.
 ///
 /// # Safety
@@ -237,10 +245,10 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u64(
 /// from `create_file_manifest_and_chunks_ffi_u128`.
 ///
 /// Passing a null pointer, a pointer that has already been freed, or a
-/// pointer from any other source will result in 
+/// pointer from any other source will result in
 /// **undefined behavior**.
 /// This function must only be called once per pointer.
-#[unsafe(no_mangle)]    
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u128(
     file_name_ptr: *const c_char,
     file_data_array_ptr: *const u8,
@@ -250,6 +258,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u128(
     out_ptr: *mut *mut FFIFileManifestChunksU128
 ) -> FFIResult {
     if file_name_ptr.is_null() ||
+        file_data_array_ptr.is_null() ||
         chunks_array_ptr.is_null() ||
         out_ptr.is_null() {
             return FFIResult::NullArgument;
@@ -278,7 +287,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u128(
 /// 2. Reconstructing the `CString` for the `filename` to deallocate it.
 /// 3. Reconstructing the `Vec` for the `chunk_metadata` array.
 /// 4. Reconstructing the `Vec` for the `hashed_chunks` array.
-/// 5. Iterating through the `hashed_chunks` and reconstructing the inner 
+/// 5. Iterating through the `hashed_chunks` and reconstructing the inner
 ///    `Vec<u8>` for each chunk's data to deallocate them individually.
 ///
 /// # Type Parameters
@@ -315,24 +324,24 @@ fn free_file_manifest_and_chunks_ffi_internal<H>(
         //Reclaim and drop the Vec for the chunk metadata.
         let _ = Vec::from_raw_parts(
             output_box.fmp.chunk_metadata as *mut FFISSAChunkMeta<H>,
-            output_box.fmp.chunk_metadata_len as usize,
-            output_box.fmp.chunk_metadata_len as usize,
+            output_box.fmp.chunk_metadata_len,
+            output_box.fmp.chunk_metadata_cap,
         );
 
         //Deallocate the array of FFIHashedChunk and their inner data
         let hashed_chunks_vec = Vec::from_raw_parts(
             output_box.hashed_chunks,
             output_box.hashed_chunks_len,
-            output_box.hashed_chunks_len,
+            output_box.hashed_chunks_cap,
         );
 
-        /*Iterate through the chunks to deallocate the inner Vec<u8> 
+        /*Iterate through the chunks to deallocate the inner Vec<u8>
         data for each.*/
         for chunk in hashed_chunks_vec {
             let _ = Vec::from_raw_parts(
-                chunk.chunk_data, 
-                chunk.chunk_data_len, 
-                chunk.chunk_data_len);
+                chunk.chunk_data,
+                chunk.chunk_data_len,
+                chunk.chunk_data_cap);
         }
     }
 }
@@ -385,7 +394,7 @@ pub unsafe extern "C" fn free_file_manifest_and_chunks_ffi_u128(
 ///
 /// # Safety
 /// - `file_data` must be valid for reads. Its pointers must not be null.
-/// - `out_ptr` must be a valid, non-null pointer to a 
+/// - `out_ptr` must be a valid, non-null pointer to a
 ///   `*mut FFIProcessedFileData`.
 /// - On success, the pointer written to `out_ptr` is owned by the caller and
 ///   MUST be freed by passing it to `free_processed_file_data_ffi`.
@@ -395,48 +404,51 @@ pub unsafe extern "C" fn process_file_in_memory_ffi(
     window_size: u64,
     out_ptr: *mut *mut FFIProcessedFileData,
 ) -> FFIResult {
-    if file_data.filename.is_null() 
-        || file_data.file_data.is_null() 
+    if file_data.filename.is_null()
+        || file_data.file_data.is_null()
         || out_ptr.is_null() {
         return FFIResult::NullArgument;
     }
-    
+
     let native_file_data = unsafe{
         FileData {
             file_name: std::ffi::CStr::from_ptr(file_data.filename)
                 .to_string_lossy()
                 .into_owned(),
             file_data: slice::from_raw_parts(
-                file_data.file_data, 
+                file_data.file_data,
                 file_data.file_data_len
             ).to_vec()
         }
     };
 
-    
+
     let processed_data = match process_file_in_memory(
-        native_file_data, 
+        native_file_data,
         window_size){
         Some(data) => data,
-        None => return FFIResult::Ok, //No error, but no data to return
+        None => return FFIResult::NoDataToProcess,
     };
 
-    /*Convert filename String to *mut c_char to be compatible with return 
+    /*Convert filename String to *mut c_char to be compatible with return
     struct.*/
     let filename_cstring = CString::new(processed_data.file_name).unwrap();
     let filename_len = filename_cstring.as_bytes().len();
     let filename_ptr = filename_cstring.into_raw();
-        
-    /*Convert veri_hash [u8; 64] to *mut [u8; 64] to be compatible with return 
+
+    /*Convert veri_hash [u8; 64] to *mut [u8; 64] to be compatible with return
     struct.*/
     let veri_hash_ptr = Box::into_raw(Box::new(processed_data.veri_hash));
 
-    /*Convert file_data Vec<u8> to *mut u8 to be compatible with return 
+    /*Convert file_data Vec<u8> to *mut u8 to be compatible with return
     struct.*/
     let mut file_data_vec = processed_data.file_data;
     file_data_vec.shrink_to_fit();
-    let file_data_len = file_data_vec.len();
+
     let file_data_ptr = file_data_vec.as_mut_ptr();
+    let file_data_len = file_data_vec.len();
+    let file_data_cap = file_data_vec.capacity();
+
     std::mem::forget(file_data_vec); //Give up ownership, no longer needed
 
     /*Convert chunks Vec<Chunk> to *mut FFIChunk to be compatible with return
@@ -450,8 +462,11 @@ pub unsafe extern "C" fn process_file_in_memory_ffi(
         })
         .collect();
     chunks_vec.shrink_to_fit();
-    let chunks_len = chunks_vec.len();
+
     let chunks_ptr = chunks_vec.as_mut_ptr();
+    let chunks_len = chunks_vec.len();
+    let chunks_cap = chunks_vec.capacity();
+
     std::mem::forget(chunks_vec); //Give up ownership, no longer needed
 
     //Prepare and return FFIProcessedFileData
@@ -461,8 +476,10 @@ pub unsafe extern "C" fn process_file_in_memory_ffi(
         veri_hash: veri_hash_ptr,
         chunks: chunks_ptr,
         chunks_len,
+        chunks_cap,
         file_data: file_data_ptr,
         file_data_len,
+        file_data_cap,
     });
 
     unsafe {
@@ -485,7 +502,7 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
         return;
     }
 
-    /*Retake ownership of the main struct Box to deallocate it and retake 
+    /*Retake ownership of the main struct Box to deallocate it and retake
     ownership of each pointer within the struct to deallocate them*/
     unsafe{
         let output_box = Box::from_raw(ptr);
@@ -493,14 +510,14 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
         let _ = CString::from_raw(output_box.filename);
         let _ = Box::from_raw(output_box.veri_hash);
         let _ = Vec::from_raw_parts(
-            output_box.chunks, 
-            output_box.chunks_len, 
-            output_box.chunks_len
+            output_box.chunks,
+            output_box.chunks_len,
+            output_box.chunks_cap
         );
         let _ = Vec::from_raw_parts(
-            output_box.file_data, 
-            output_box.file_data_len, 
-            output_box.file_data_len
+            output_box.file_data,
+            output_box.file_data_len,
+            output_box.file_data_cap
         );
     }
 }
@@ -516,7 +533,7 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
 /// It orchestrates the file verification process by:
 /// 1.  Reconstructing the Rust `FileManifestParent` and verification hash from
 ///     raw pointers.
-/// 2.  Creating closures around the `get_chunks_cb` and `progress_cb` C 
+/// 2.  Creating closures around the `get_chunks_cb` and `progress_cb` C
 ///     functions, capturing the `user_data` pointer to maintain state across
 ///     the FFI boundary.
 /// 3.  Invoking the primary `verify_single_file` function with the prepared
@@ -544,7 +561,7 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` if the file is successfully reconstructed and its 
+/// * `FFIResult::Ok` if the file is successfully reconstructed and its
 ///   computed hash matches the expected hash.
 /// * `FFIResult::VerificationHashMismatch` if the computed hash does not
 ///   match.
@@ -566,8 +583,8 @@ fn verify_single_file_ffi_internal<E, H>(
     veri_hash_array_ptr: *const u8,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const H, 
+        user_data: *mut c_void,
+        hashes: *const H,
         hashes_len: usize
     ) -> FFIChunkDataArray,
     progress_cb: unsafe extern "C" fn(
@@ -583,15 +600,10 @@ where
         /*Dereference the main struct pointer and convert using from.*/
         let fmp = FileManifestParent::<H>::from(&*file_manifest_parent);
 
-        /*Prepare and reconstruct veri_hash, which is the fourth 
-        parameter of the original verify_single_file 
+        /*Prepare and reconstruct veri_hash, which is the fourth
+        parameter of the original verify_single_file
         function, from C input.*/
-        let veri_hash_slice = slice::from_raw_parts(
-            veri_hash_array_ptr, 
-            64
-        );
-
-        let veri_hash: [u8; 64] = veri_hash_slice.try_into().unwrap();
+        let veri_hash: [u8; 64] = *(veri_hash_array_ptr as *const [u8; 64]);
 
         (fmp, veri_hash)
     };
@@ -601,24 +613,24 @@ where
     let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, E> {
         let ffi_chunks_array = unsafe {
             get_chunks_cb(
-                user_data_addr as *mut c_void, 
-                hashes.as_ptr(), 
+                user_data_addr as *mut c_void,
+                hashes.as_ptr(),
                 hashes.len()
             )};
-        
+
         let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr, 
+            ffi_chunks_array.ptr,
             ffi_chunks_array.len
         )};
 
         let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.len)}
+            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
         }).collect();
-        
+
         let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr, 
-            ffi_chunks_array.len, 
-            ffi_chunks_array.len)};
+            ffi_chunks_array.ptr,
+            ffi_chunks_array.len,
+            ffi_chunks_array.cap)};
         Ok(chunks)
     };
 
@@ -640,7 +652,7 @@ where
 /// an FFI-safe interface for u64 hashes.
 ///
 /// # Safety
-/// All pointer arguments must be non-null and valid for their 
+/// All pointer arguments must be non-null and valid for their
 /// specified lengths.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn verify_single_file_ffi_u64(
@@ -648,8 +660,8 @@ pub unsafe extern "C" fn verify_single_file_ffi_u64(
     veri_hash_array_ptr: *const u8,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const u64, 
+        user_data: *mut c_void,
+        hashes: *const u64,
         hashes_len: usize
     ) -> FFIChunkDataArray,
     progress_cb: unsafe extern "C" fn(
@@ -677,7 +689,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u64(
 /// an FFI-safe interface for u128 hashes.
 ///
 /// # Safety
-/// All pointer arguments must be non-null and valid for their 
+/// All pointer arguments must be non-null and valid for their
 /// specified lengths.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn verify_single_file_ffi_u128(
@@ -685,8 +697,8 @@ pub unsafe extern "C" fn verify_single_file_ffi_u128(
     veri_hash_array_ptr: *const u8,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const u128, 
+        user_data: *mut c_void,
+        hashes: *const u128,
         hashes_len: usize
     ) -> FFIChunkDataArray,
     progress_cb: unsafe extern "C" fn(
@@ -726,7 +738,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u128(
 ///
 /// # Type Parameters
 ///
-/// * `H`: The generic hash type (e.g., `u64`, `u128`), which must be 
+/// * `H`: The generic hash type (e.g., `u64`, `u128`), which must be
 ///   debuggable, equatable, hashable, and thread-safe.
 ///
 /// # Arguments
@@ -735,7 +747,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u128(
 ///   uncompressed chunks.
 /// * `sorted_hashes_array_ptr`: A pointer to a sorted array of all unique
 ///   chunk hashes.
-/// * `sorted_hashes_len`: The number of elements in the 
+/// * `sorted_hashes_len`: The number of elements in the
 ///   `sorted_hashes_array_ptr`.
 /// * `worker_count`: The number of threads to use for the parallel compression
 ///   test.
@@ -775,22 +787,22 @@ fn test_compression_ffi_internal<H>(
     out_size: *mut u64,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const H, 
+        user_data: *mut c_void,
+        hashes: *const H,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
-) -> FFIResult 
-where 
+) -> FFIResult
+where
     H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
 {
     let sorted_hashes = unsafe {
         //Convert C inputs to Rust types
 
-        /*Prepare data_store, which is the second parameter of the 
+        /*Prepare data_store, which is the second parameter of the
         original test_compression function, from C input.*/
         slice::from_raw_parts(
-            sorted_hashes_array_ptr, 
+            sorted_hashes_array_ptr,
             sorted_hashes_len
         )
     };
@@ -798,7 +810,7 @@ where
     let user_data_addr = user_data as usize;
 
     let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
-        let mut ffi_chunks_array = FFIChunkDataArray { ptr: std::ptr::null_mut(), len: 0 };
+        let mut ffi_chunks_array = FFIChunkDataArray { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
         let status = unsafe {
             get_chunks_cb(
                 user_data_addr as *mut c_void,
@@ -809,26 +821,26 @@ where
         };
         Result::from(status)?;
         let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr, 
+            ffi_chunks_array.ptr,
             ffi_chunks_array.len
         )};
 
         let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.len)}
+            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
         }).collect();
-        
+
         let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr, 
-            ffi_chunks_array.len, 
-            ffi_chunks_array.len)};
+            ffi_chunks_array.ptr,
+            ffi_chunks_array.len,
+            ffi_chunks_array.cap)};
         Ok(chunks)
     };
 
     //Run test compression with received and converted data.
     match test_compression(
-        sorted_hashes, 
+        sorted_hashes,
         total_data_size,
-        worker_count, 
+        worker_count,
         dictionary_size,
         compression_level,
         get_chunks_closure
@@ -837,7 +849,7 @@ where
             unsafe {
                 *out_size = compressed_size as u64;
             }
-            
+
             FFIResult::Ok
         }
         Err(e) => e.into()
@@ -845,9 +857,9 @@ where
 }
 
 
-/// Estimates the compressed size of a data store when using 
+/// Estimates the compressed size of a data store when using
 /// u64 hashes.
-/// 
+///
 /// On success, returns `FFIResult::Ok` and populates `out_size`.
 ///
 /// # Safety
@@ -865,14 +877,15 @@ pub unsafe extern "C" fn test_compression_ffi_u64(
     out_size: *mut u64,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const u64, 
+        user_data: *mut c_void,
+        hashes: *const u64,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
 ) -> FFIResult {
-    if sorted_hashes_array_ptr.is_null(){
-        return FFIResult::NullArgument;
+    if sorted_hashes_array_ptr.is_null() ||
+        out_size.is_null() {
+            return FFIResult::NullArgument;
     };
 
     test_compression_ffi_internal::<u64>(
@@ -888,9 +901,9 @@ pub unsafe extern "C" fn test_compression_ffi_u64(
     )
 }
 
-/// Estimates the compressed size of a data store when using 
+/// Estimates the compressed size of a data store when using
 /// u128 hashes.
-/// 
+///
 /// On success, returns `FFIResult::Ok` and populates `out_size`.
 ///
 /// # Safety
@@ -908,14 +921,15 @@ pub unsafe extern "C" fn test_compression_ffi_u128(
     out_size: *mut u64,
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void, 
-        hashes: *const u128, 
+        user_data: *mut c_void,
+        hashes: *const u128,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
 ) -> FFIResult {
-    if sorted_hashes_array_ptr.is_null(){
-        return FFIResult::NullArgument;
+    if sorted_hashes_array_ptr.is_null() ||
+        out_size.is_null() {
+            return FFIResult::NullArgument;
     };
 
     test_compression_ffi_internal::<u128>(
@@ -972,16 +986,16 @@ pub unsafe extern "C" fn test_compression_ffi_u128(
 ///
 /// The public FFI function that calls this helper must guarantee that:
 /// - The `file_manifest_parent` and `out_ptr` pointers are valid and non-null.
-/// - The caller takes full ownership of the memory allocated for the 
+/// - The caller takes full ownership of the memory allocated for the
 ///   `FFISeekInfoArray` struct and its internal `chunks` array. This memory
-///   **must** be deallocated by passing the pointer to the corresponding 
+///   **must** be deallocated by passing the pointer to the corresponding
 ///   `free_seek_chunks_ffi_*` function to prevent a memory leak.
 fn get_seek_chunks_ffi_internal<H>(
     file_manifest_parent: *const FFIFileManifestParent<H>,
     seek_offset: u64,
     seek_length: u64,
     out_ptr: *mut *mut FFISeekInfoArray<H>,
-) -> FFIResult 
+) -> FFIResult
 where
     H: Copy + Eq + Hash + Hashable,
 {
@@ -991,12 +1005,12 @@ where
     };
 
     match get_seek_chunks::<H>(
-        &fmp, 
-        seek_offset, 
+        &fmp,
+        seek_offset,
         seek_length
     ){
         Ok(seek_info_vec) => {
-            let mut ffi_chunks: Vec<FFISeekChunkInfo<H>> = 
+            let mut ffi_chunks: Vec<FFISeekChunkInfo<H>> =
                 seek_info_vec
                     .into_iter()
                     .map(|(hash, (start, end))| {
@@ -1010,16 +1024,17 @@ where
 
             let chunks_ptr = ffi_chunks.as_mut_ptr();
             let chunks_len = ffi_chunks.len();
-
+            let chunks_cap = ffi_chunks.capacity();
             // Give up ownership so memory isn't freed here
-            std::mem::forget(ffi_chunks); 
+            std::mem::forget(ffi_chunks);
 
-            /*Create the final struct that holds the array pointer 
+            /*Create the final struct that holds the array pointer
             and length*/
             let output = Box::new({
                 FFISeekInfoArray::from((
                     chunks_ptr,
                     chunks_len,
+                    chunks_cap,
                 ))
             });
 
@@ -1038,10 +1053,10 @@ where
 ///
 /// # Safety
 /// - `file_manifest_parent` must be a valid, non-null pointer.
-/// - `out_ptr` must be a valid pointer to a 
+/// - `out_ptr` must be a valid pointer to a
 ///   `*mut FFISeekInfoArray...`.
-/// - On success, the pointer written to `out_ptr` is owned by the C 
-///   caller and MUST be freed by passing it to the 
+/// - On success, the pointer written to `out_ptr` is owned by the C
+///   caller and MUST be freed by passing it to the
 ///   `free_seek_chunks_ffi_u64` function.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_seek_chunks_ffi_u64(
@@ -1067,10 +1082,10 @@ pub unsafe extern "C" fn get_seek_chunks_ffi_u64(
 ///
 /// # Safety
 /// - `file_manifest_parent` must be a valid, non-null pointer.
-/// - `out_ptr` must be a valid pointer to a 
+/// - `out_ptr` must be a valid pointer to a
 ///   `*mut FFISeekInfoArray...`.
-/// - On success, the pointer written to `out_ptr` is owned by the C 
-///   caller and MUST be freed by passing it to the 
+/// - On success, the pointer written to `out_ptr` is owned by the C
+///   caller and MUST be freed by passing it to the
 ///   `free_seek_chunks_ffi_u128` function.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn get_seek_chunks_ffi_u128(
@@ -1093,7 +1108,7 @@ pub unsafe extern "C" fn get_seek_chunks_ffi_u128(
 
 /// A generic helper to deallocate an `FFISeekInfoArray` from an FFI handle.
 ///
-/// This internal function provides the core logic for safely freeing the 
+/// This internal function provides the core logic for safely freeing the
 /// memory that was allocated by `get_seek_chunks_ffi_internal` and passed to a
 /// C caller. It takes the raw pointer, reconstructs the `Box` for the outer
 /// struct, and then reconstructs the `Vec` for the inner array of
@@ -1130,7 +1145,7 @@ fn free_seek_chunks_ffi_internal<H>(
             let _ = Vec::from_raw_parts(
                 output_box.chunks,
                 output_box.chunks_len,
-                output_box.chunks_len,
+                output_box.chunks_cap,
             );
         }
 }
@@ -1138,9 +1153,9 @@ fn free_seek_chunks_ffi_internal<H>(
 /// Frees the memory allocated by a `get_seek_chunks_ffi` function.
 ///
 /// # Safety
-/// The `ptr` must be a non-null pointer returned from a successful 
+/// The `ptr` must be a non-null pointer returned from a successful
 /// call to the `get_seek_chunks_ffi_u64` function.
-/// Calling this with a null pointer or a pointer that has already 
+/// Calling this with a null pointer or a pointer that has already
 /// been freed will lead to undefined behavior.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_seek_chunks_ffi_u64(
@@ -1156,9 +1171,9 @@ pub unsafe extern "C" fn free_seek_chunks_ffi_u64(
 /// Frees the memory allocated by a `get_seek_chunks_ffi` function.
 ///
 /// # Safety
-/// The `ptr` must be a non-null pointer returned from a successful 
+/// The `ptr` must be a non-null pointer returned from a successful
 /// call to the `get_seek_chunks_ffi_u128` function.
-/// Calling this with a null pointer or a pointer that has already 
+/// Calling this with a null pointer or a pointer that has already
 /// been freed will lead to undefined behavior.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_seek_chunks_ffi_u128(
