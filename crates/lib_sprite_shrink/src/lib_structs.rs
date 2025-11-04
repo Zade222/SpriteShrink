@@ -43,9 +43,9 @@ pub struct ChunkLocation {
 /// * `magic_num`: A 4-byte array to identify the file as a valid archive.
 /// * `file_version`: The version number of the archive format.
 /// * `file_count`: The total number of files stored in the archive.
-/// * `algorithm`: Numerical value representing the compression used on the 
+/// * `algorithm`: Numerical value representing the compression used on the
 ///   compressed data.
-/// * `hash_type`: Numerical value representing the hash type used when 
+/// * `hash_type`: Numerical value representing the hash type used when
 ///   the data was hashed. 1 = xxhash3_64, 2 = xxhash3_128
 /// * `pad`: Empty data padding to keep data aligned. Must be all zeros.
 /// * `man_offset`: The byte offset where the file manifest begins.
@@ -62,7 +62,7 @@ pub struct FileHeader {
     pub file_version:   u32,
     pub file_count:     u32,
     pub algorithm:      u16,
-    pub hash_type:      u8, 
+    pub hash_type:      u8,
     pub pad:            [u8; 5],
     pub man_offset:     u64,
     pub man_length:     u64,
@@ -186,4 +186,3 @@ pub struct SSAChunkMeta<H>{
     pub offset: u64,
     pub length: u32,
 }
-

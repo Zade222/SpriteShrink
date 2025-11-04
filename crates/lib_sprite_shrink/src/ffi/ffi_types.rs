@@ -127,7 +127,7 @@ pub struct FFIArchiveData {
 /// * `offset`: The starting byte position of this chunk within the original,
 ///   uncompressed source file.
 /// * `length`: The total length of the chunk in bytes.
-#[derive(Clone, Copy)]
+#[repr(C)]
 pub struct FFIChunk{
     /// Gear hash value as of the end of the chunk.
     pub hash: u64,
@@ -212,8 +212,6 @@ impl<H> From<(H, ChunkLocation)> for FFIChunkIndexEntry<H> {
 /// this struct is returned to Rust, the Rust side takes ownership of all this
 /// memory and will deallocate it. The C caller **must not** free this memory
 /// after the function call returns.
-/// FFI-safe equivalent of `ChunkLocation`, representing a slice of the
-/// archive.
 #[repr(C)]
 pub struct FFIChunkDataArray {
     pub ptr: *mut FFIVecBytes,
@@ -437,7 +435,8 @@ impl<H> From<(
 pub struct FFIFileManifestParent<H> {
     pub filename: *mut c_char,
     pub chunk_metadata: *const FFISSAChunkMeta<H>,
-    pub chunk_metadata_len: u64,
+    pub chunk_metadata_len: usize,
+    pub chunk_metadata_cap: usize,
 }
 
 /// An `FFIFileManifestParent` specialized for `u64` hashes.
@@ -492,7 +491,8 @@ impl<H> From<(
         Self {
             filename,
             chunk_metadata,
-            chunk_metadata_len: fmp.chunk_count,
+            chunk_metadata_len: fmp.chunk_count as usize,
+            chunk_metadata_cap: fmp.chunk_metadata.capacity(),
         }
     }
 }
@@ -528,7 +528,7 @@ where
             and length.*/
             let chunk_metadata_slice = slice::from_raw_parts(
                 fmp.chunk_metadata,
-                fmp.chunk_metadata_len as usize
+                fmp.chunk_metadata_len
             );
 
             /*Convert each FFI-safe `FFISSAChunkMeta` in the slice to its
@@ -542,7 +542,7 @@ where
             FileManifestParent {
                 filename,
                 chunk_metadata,
-                chunk_count: fmp.chunk_metadata_len
+                chunk_count: fmp.chunk_metadata_len as u64
             }
         }
     }
@@ -577,7 +577,7 @@ where
 /// appropriate free function (e.g., `free_file_manifest_and_chunks_ffi_*`),
 /// which handles the cleanup of all nested data.
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct FFIHashedChunkData<H> {
     pub hash: H,
     pub chunk_data: *mut u8,
@@ -638,6 +638,7 @@ impl<H> From<(H, *mut u8, usize)> for FFIHashedChunkData<H> {
 pub struct FFIParsedChunkIndexArray<H> {
     pub entries: *mut FFIChunkIndexEntry<H>,
     pub entries_len: usize,
+    pub entries_cap: usize,
 }
 
 /// An `FFIParsedChunkIndexArray` specialized for `u64` hashes.
@@ -656,12 +657,13 @@ pub type FFIParsedChunkIndexArrayU128 = FFIParsedChunkIndexArray<u128>;
 
 // Converts a tuple containing a raw pointer to the entries and their length
 // into the FFI-safe `FFIParsedChunkIndexArray` struct.
-impl<H> From<(*mut FFIChunkIndexEntry<H>, usize)> for
+impl<H> From<(*mut FFIChunkIndexEntry<H>, usize, usize)> for
 FFIParsedChunkIndexArray<H> {
-    fn from(parts: (*mut FFIChunkIndexEntry<H>, usize)) -> Self {
+    fn from(parts: (*mut FFIChunkIndexEntry<H>, usize, usize)) -> Self {
         Self {
             entries: parts.0,
             entries_len: parts.1,
+            entries_cap: parts.2,
         }
     }
 }
@@ -696,7 +698,8 @@ FFIParsedChunkIndexArray<H> {
 #[repr(C)]
 pub struct FFIParsedManifestArray<H> {
     pub manifests: *mut FFIFileManifestParent<H>,
-    pub manifests_len: usize
+    pub manifests_len: usize,
+    pub manifests_cap: usize,
 }
 
 /// An `FFIParsedManifestArray` specialized for `u64` hashes.
@@ -715,11 +718,13 @@ pub type FFIParsedManifestArrayU128 = FFIParsedManifestArray<u128>;
 
 // Converts a tuple containing a raw pointer to the manifests and their
 // length into the FFI-safe `FFIParsedManifestArray` struct.
-impl<H> From<(*mut FFIFileManifestParent<H>, usize)> for FFIParsedManifestArray<H> {
-    fn from(parts: (*mut FFIFileManifestParent<H>, usize)) -> Self {
+impl<H> From<(*mut FFIFileManifestParent<H>, usize, usize)> for
+FFIParsedManifestArray<H> {
+    fn from(parts: (*mut FFIFileManifestParent<H>, usize, usize)) -> Self {
         Self {
             manifests: parts.0,
             manifests_len: parts.1,
+            manifests_cap: parts.2,
         }
     }
 }
@@ -792,13 +797,13 @@ pub struct FFIProgress {
 ///
 /// This enum is used within the [`FFIProgress`] struct to signal which phase
 /// of the archive-building process is currently active.
-#[repr(C)]
+#[repr(i32)]
 pub enum FFIProgressType {
-    GeneratingDictionary,
-    DictionaryDone,
-    Compressing,
-    ChunkCompressed,
-    Finalizing,
+    GeneratingDictionary = 0,
+    DictionaryDone = 1,
+    Compressing = 2,
+    ChunkCompressed = 3,
+    Finalizing = 4,
 }
 
 /// Contains the necessary information to read a specific byte range from a
