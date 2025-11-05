@@ -486,19 +486,21 @@ pub type FFIKeyArrayU128 = FFIKeyArray<u128>;
 impl<H> From<(
     FileManifestParent<H>,
     *mut std::os::raw::c_char,
-    *const FFISSAChunkMeta<H>
+    *const FFISSAChunkMeta<H>,
+    usize,
 )> for FFIFileManifestParent<H> {
     fn from(parts: (
         FileManifestParent<H>,
         *mut std::os::raw::c_char,
-        *const FFISSAChunkMeta<H>
+        *const FFISSAChunkMeta<H>,
+        usize,
     )) -> Self {
-        let (fmp, filename, chunk_metadata) = parts;
+        let (fmp, filename, chunk_metadata, chunk_metadata_cap) = parts;
         Self {
             filename,
             chunk_metadata,
             chunk_metadata_len: fmp.chunk_count as usize,
-            chunk_metadata_cap: fmp.chunk_metadata.capacity(),
+            chunk_metadata_cap,
         }
     }
 }

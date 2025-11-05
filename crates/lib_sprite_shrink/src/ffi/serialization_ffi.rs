@@ -208,7 +208,7 @@ where
     };
 
     //Convert the Rust results back into FFI-safe, heap-allocated C structures.
-    let mut ffi_manifests: Vec<FFIFileManifestParent<H>> =
+    /*let mut ffi_manifests: Vec<FFIFileManifestParent<H>> =
         match ser_file_manifest
         .into_iter()
         .map(|fmp|  {
@@ -220,6 +220,8 @@ where
 
             let chunk_meta_ptr = chunk_meta_vec
                 .as_mut_ptr();
+            let chunk_meta_cap = chunk_meta_vec.capacity();
+
             //Give up ownership so it doesn't deallocate it
             std::mem::forget(chunk_meta_vec);
 
@@ -228,22 +230,71 @@ where
                 Err(_) => return Err(FFIResult::InvalidString),
             };
 
-            Ok(FFIFileManifestParent::from((
-                fmp,
-                c_filename,
-                chunk_meta_ptr as *const FFISSAChunkMeta<H>,
-            )))
+            Ok(FFIFileManifestParent {
+                filename: c_filename,
+                chunk_metadata: chunk_meta_ptr,
+                chunk_metadata_len: fmp.chunk_count as usize,
+                chunk_metadata_cap: chunk_meta_cap,
+            })
         })
         .collect() {
             Ok(v) => v,
             Err(status) => return status, //Propagate the error status
+        };*/
+
+    let mut ffi_manifests_vec: Vec<FFIFileManifestParent<H>> =
+           Vec::with_capacity(ser_file_manifest.len());
+
+    for fmp in ser_file_manifest {
+        let mut chunk_meta_vec: Vec<FFISSAChunkMeta<H>> = fmp
+            .chunk_metadata
+            .iter()
+            .map(|meta| FFISSAChunkMeta::from(*meta))
+            .collect();
+
+        let chunk_meta_ptr = chunk_meta_vec.as_mut_ptr();
+        let chunk_meta_cap = chunk_meta_vec.capacity();
+        std::mem::forget(chunk_meta_vec);
+
+        let c_filename = match CString::new(fmp.filename.clone()) {
+            Ok(s) => s.into_raw(),
+            Err(_) => {
+                unsafe {
+                    let _ = Vec::from_raw_parts(
+                        chunk_meta_ptr,
+                        fmp.chunk_count as usize,
+                        chunk_meta_cap,
+                    );
+                }
+
+                for fmp_to_free in ffi_manifests_vec {
+                    unsafe {
+                        let _ = CString::from_raw(fmp_to_free.filename);
+                        let _ = Vec::from_raw_parts(
+                            fmp_to_free.chunk_metadata as *mut FFISSAChunkMeta<H>,
+                            fmp_to_free.chunk_metadata_len,
+                            fmp_to_free.chunk_metadata_cap,
+                        );
+                    }
+                }
+
+                return FFIResult::InvalidString;
+            }
         };
 
-    let manifests_ptr = ffi_manifests.as_mut_ptr();
-    let manifests_len = ffi_manifests.len();
-    let manifests_cap = ffi_manifests.capacity();
+        ffi_manifests_vec.push(FFIFileManifestParent {
+            filename: c_filename,
+            chunk_metadata: chunk_meta_ptr as *const FFISSAChunkMeta<H>,
+            chunk_metadata_len: fmp.chunk_count as usize,
+            chunk_metadata_cap: chunk_meta_cap,
+        });
+    }
+
+    let manifests_ptr = ffi_manifests_vec.as_mut_ptr();
+    let manifests_len = ffi_manifests_vec.len();
+    let manifests_cap = ffi_manifests_vec.capacity();
     //Give up ownership of the outer Vec
-    std::mem::forget(ffi_manifests);
+    std::mem::forget(ffi_manifests_vec);
 
     let mut entries: Vec<FFIChunkIndexEntry<H>> = chunk_index
         .into_iter()
