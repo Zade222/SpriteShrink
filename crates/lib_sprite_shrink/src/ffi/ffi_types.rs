@@ -207,11 +207,20 @@ impl<H> From<(H, ChunkLocation)> for FFIChunkIndexEntry<H> {
 ///
 /// # Memory Management
 ///
-/// The C caller is responsible for allocating the memory for both the array of
-/// `FFIVecBytes` and the underlying byte buffers for each chunk's data. When
-/// this struct is returned to Rust, the Rust side takes ownership of all this
-/// memory and will deallocate it. The C caller **must not** free this memory
-/// after the function call returns.
+/// The memory management contract for this struct is context-dependent,
+/// as it is used in different patterns across the FFI layer.
+///
+/// 1.  **Rust Takes Ownership**: In some functions (e.g., serialization),
+///     the C caller allocates memory for this struct and its contents, and
+///     Rust takes ownership, freeing the memory when it's done.
+/// 2.  **Caller Retains Ownership**: In other functions (e.g., archive building),
+///     the C caller allocates the memory and also remains responsible for
+///     freeing it, usually via a dedicated `free_...` callback provided to Rust.
+///
+/// **Warning:** Always refer to the documentation of the specific FFI
+/// function you are calling to understand the correct memory management
+/// policy. Assuming the wrong model will lead to memory leaks or
+/// double-free errors.
 #[repr(C)]
 pub struct FFIChunkDataArray {
     pub ptr: *mut FFIVecBytes,
@@ -457,6 +466,28 @@ pub type FFIFileManifestParentU64 = FFIFileManifestParent<u64>;
 pub type FFIFileManifestParentU128 = FFIFileManifestParent<u128>;
 
 /// FFI-safe struct for passing an array of keys from C to Rust.
+///
+/// * `ptr`: A pointer to the first element of a contiguous array of keys.
+/// * `len`: Number of elements in the array.
+/// * `cap`: Capacity of the allocated array.
+///
+/// # Memory Management
+///
+/// The C caller allocates the array and the key values.  When this struct is
+/// passed to Rust, Rust takes ownership of the buffer and will deallocate
+/// it when the `FFIKeyArray` is dropped.  The caller must **not** free the
+/// memory after the FFI call returns.
+///
+/// # Type Parameters
+///
+/// * `H` – hash type (`u64`, `u128`, …).  The key type is generic so the
+///   struct can be specialized for any hash size.
+///
+/// # Usage
+///
+/// In the serialization FFI, `get_keys_cb` fills a `FFIKeyArray` and the
+/// Rust side consumes it with `Vec::from_raw_parts`, yielding a `Vec<H>`
+/// that is automatically dropped.  If `len` is zero, `ptr` may be null.
 #[repr(C)]
 pub struct FFIKeyArray<H> {
     pub ptr: *mut H,
@@ -1155,10 +1186,20 @@ pub struct FFIUserData(pub *mut c_void);
 ///
 /// # Memory Management
 ///
-/// When a C callback returns this struct to Rust, Rust takes full ownership
-/// of the memory pointed to by `ptr`. Rust will deallocate this memory using
-/// `Vec::from_raw_parts` when it is no longer needed. The C caller **must
-/// not** free this memory after returning it to Rust.
+/// The memory management contract for this struct is context-dependent,
+/// as it is used in different patterns across the FFI layer.
+///
+/// 1.  **Rust Takes Ownership**: In some functions (e.g., serialization),
+///     the C caller allocates memory for this struct and its contents, and
+///     Rust takes ownership, freeing the memory when it's done.
+/// 2.  **Caller Retains Ownership**: In other functions (e.g., archive building),
+///     the C caller allocates the memory and also remains responsible for
+///     freeing it, usually via a dedicated `free_...` callback provided to Rust.
+///
+/// **Warning:** Always refer to the documentation of the specific FFI
+/// function you are calling to understand the correct memory management
+/// policy. Assuming the wrong model will lead to memory leaks or
+   /// double-free errors.
 #[repr(C)]
 pub struct FFIVecBytes {
     pub ptr: *mut u8,

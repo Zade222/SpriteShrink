@@ -200,17 +200,40 @@ where
         FFIResult::Ok
 }
 
-/// Creates a file manifest and a list of u64 hashed data chunks via an
-/// FFI-safe interface.
+/// Creates a file manifest and a list of data chunks via an FFI‑safe interface.
+///
+/// The function parses the supplied file name, data slice, and chunk
+/// descriptors and produces an `FFIFileManifestChunksU64` that the C
+/// caller can consume.  The returned object owns all memory needed for the
+/// manifest and the chunks; the caller must free it with
+/// `free_file_manifest_and_chunks_ffi_u64`.
+///
+/// # Arguments
+///
+/// * `file_name_ptr` – pointer to a null‑terminated C string that
+///   contains the file name.
+/// * `file_data_array_ptr` – pointer to the raw file data.
+/// * `file_data_len` – length of `file_data_array_ptr` in bytes.
+/// * `chunks_array_ptr` – pointer to an array of `FFIChunk` structs
+///   describing the file’s chunk metadata.
+/// * `chunks_len` – number of elements in `chunks_array_ptr`
+/// * `out_ptr` – non‑null pointer to a mutable `*mut
+///   FFIFileManifestChunksU64` where the result will be stored.
+///
+/// # Returns
+///
+/// * `FFIResult::Ok` – `*out_ptr` now points to a valid `FFIFileManifestChunksU64`
+/// * `FFIResult::NullArgument` – any of the pointers above were `NULL`
 ///
 /// # Safety
-/// The caller MUST ensure `ptr` is a valid pointer previously returned
-/// from `create_file_manifest_and_chunks_ffi_u64`.
 ///
-/// Passing a null pointer, a pointer that has already been freed, or a
-/// pointer from any other source will result in
-/// **undefined behavior**.
-/// This function must only be called once per pointer.
+/// The caller must guarantee that:
+/// * All pointers refer to valid, readable memory for the stated lengths.
+/// * `out_ptr` is a valid, non‑null pointer that the caller will read after
+///   the call.
+/// * The returned struct and all nested data are allocated on the heap; the
+///   caller is responsible for freeing it with
+///   `free_file_manifest_and_chunks_ffi_u64` to avoid leaks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u64(
     file_name_ptr: *const c_char,
@@ -237,17 +260,37 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u64(
     )
 }
 
-/// Creates a file manifest and a list of u128 hashed data chunks via an
-/// FFI-safe interface.
+/// Creates a file manifest and a list of data chunks via an FFI‑safe interface
+/// for 128‑bit hash keys.
+///
+/// The arguments and semantics are identical to
+/// `create_file_manifest_and_chunks_ffi_u64`, but the resulting struct is
+/// `FFIFileManifestChunksU128`.  The caller must free the returned value
+/// with `free_file_manifest_and_chunks_ffi_u128`.
+///
+/// # Arguments
+///
+/// * `file_name_ptr` – pointer to a null‑terminated C string that
+///   contains the file name.
+/// * `file_data_array_ptr` – pointer to the raw file data.
+/// * `file_data_len` – length of `file_data_array_ptr` in bytes.
+/// * `chunks_array_ptr` – pointer to an array of `FFIChunk` structs
+///   describing the file’s chunk metadata.
+/// * `chunks_len` – number of elements in `chunks_array_ptr`
+/// * `out_ptr` – non‑null pointer to a mutable `*mut
+///   FFIFileManifestChunksU128` where the result will be stored.
+///
+/// # Returns
+///
+/// * `FFIResult::Ok` – `*out_ptr` now points to a valid `FFIFileManifestChunksU128`
+/// * `FFIResult::NullArgument` – any of the pointers above were `NULL`
 ///
 /// # Safety
-/// The caller MUST ensure `ptr` is a valid pointer previously returned
-/// from `create_file_manifest_and_chunks_ffi_u128`.
 ///
-/// Passing a null pointer, a pointer that has already been freed, or a
-/// pointer from any other source will result in
-/// **undefined behavior**.
-/// This function must only be called once per pointer.
+/// As with the u64 variant:
+/// * All pointers must be non‑null and point to valid memory.
+/// * The returned struct owns all heap‑allocated data; free it with
+///   `free_file_manifest_and_chunks_ffi_u128` to avoid leaks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u128(
     file_name_ptr: *const c_char,
@@ -554,8 +597,11 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
 ///   original SHA-512 verification hash of the file.
 /// * `user_data`: An opaque `void` pointer provided by the C caller, which is
 ///   passed back to the C callbacks.
-/// * `get_chunks_cb`: A C function pointer that the verification logic will
-///   call to request the data for a set of chunk hashes.
+/// * `get_chunks_cb` – C callback that receives a slice of chunk hashes
+///   and returns an `FFIChunkDataArray`.  The C side is responsible for
+///   allocating the `FFIChunkDataArray` and each `FFIVecBytes` buffer it
+///   points to; Rust takes ownership of the returned struct and frees all
+///   nested buffers once the closure finishes.
 /// * `progress_cb`: A C function pointer that is called periodically to report
 ///   the number of bytes processed.
 ///
@@ -758,8 +804,15 @@ pub unsafe extern "C" fn verify_single_file_ffi_u128(
 ///   bytes will be written on success.
 /// * `user_data`: An opaque `void` pointer that will be passed back to the
 ///   `get_chunks_cb` callback.
-/// * `get_chunks_cb`: A C function pointer that the function will call to
-///   request the raw data for a given set of hashes.
+/// * `get_chunks_cb`: C callback that receives the `user_data` pointer,
+///   a slice of hash values (`hashes` & `hashes_len`) and writes an
+///   `FFIChunkDataArray` into the supplied `out_chunks` argument.
+///   The C side must allocate an `FFIChunkDataArray` whose `ptr` field
+///   points to an array of `FFIVecBytes`.  Rust then converts this
+///   array to `Vec<Vec<u8>>`, takes ownership of each `FFIVecBytes`,
+///   and finally frees the original `FFIChunkDataArray`.  Consequently
+///   the caller must **not** free any part of the array after the call
+///   returns.
 ///
 /// # Returns
 ///

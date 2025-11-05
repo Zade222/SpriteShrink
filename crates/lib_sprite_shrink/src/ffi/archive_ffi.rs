@@ -94,8 +94,12 @@ where
 /// * `user_data`: An opaque pointer provided by the C caller, which is passed
 ///   back to the C callbacks to allow them to access their own context or
 ///   state.
-/// * `get_chunks_cb`: A C function pointer that the `ArchiveBuilder` will call
-///   via the returned closure to request uncompressed chunk data.
+/// * `get_chunks_cb`: callback that receives the user data, an array of hash
+///   values, the length of that array, and an output pointer that will be
+///   populated with a `FFIChunkDataArray`.
+/// * `free_chunks_cb` – callback to free the array returned by
+///   `get_chunks_cb`. It receives the same `user_data` and the
+///   `FFIChunkDataArray` that was just returned.
 /// * `write_comp_data_cb`: A C function pointer that the `ArchiveBuilder` will
 ///   call via the returned closure to write out the final compressed archive
 ///   data.
@@ -236,6 +240,8 @@ fn setup_builder_closures<H: 'static>(
 ///   callbacks, allowing the C side to maintain state.
 /// * `get_chunks_cb`: A C function pointer that the builder will call to
 ///   request the raw data for a given set of hashes.
+/// * `free_chunks_cb` – callback that frees the array returned by
+///   `get_chunks_cb`
 /// * `write_comp_data_cb`: A C function pointer that the builder will call to
 ///   write out the compressed archive data as it is generated.
 /// * `out_ptr`: A pointer to a `*mut ArchiveBuilderU64` where the handle to
@@ -251,18 +257,27 @@ fn setup_builder_closures<H: 'static>(
 /// # Safety
 ///
 /// The caller is responsible for ensuring the following invariants:
-/// - All pointer arguments (`manifest_array_ptr`, `sorted_hashes_array_ptr`,
-///   `out_ptr`) must be non-null and point to valid memory.
-/// - The `manifest_len` and `sorted_hashes_len` arguments must accurately
-///   reflect the number of elements in their respective arrays.
-/// - The `user_data` pointer and the C callback function pointers
-///   (`get_chunks_cb`, `write_comp_data_cb`) must be valid for the entire
-///   lifetime of the builder, until it is consumed by
-///   `archive_builder_build_u64` or freed by `archive_builder_free_u64`.
-/// - The `ArchiveBuilderU64` handle returned via `out_ptr` is owned by the C
-///   caller and **must** be passed to either `archive_builder_build_u64` to
-///   consume it and build the archive, or `archive_builder_free_u64` to
-///   deallocate its memory if the build process is aborted. Failure to do so
+/// * All pointer arguments (`manifest_array_ptr`, `sorted_hashes_array_ptr`,
+///   `out_ptr`) must be non‑null and point to valid memory.
+/// * `manifest_len` and `sorted_hashes_len` must accurately reflect the number
+///   of elements in the respective arrays.
+/// * `user_data` must remain valid for the entire lifetime of the builder.
+/// * The C callback functions `get_chunks_cb` and `write_comp_data_cb` must
+///   be valid and must not store or otherwise out‑live the `user_data`
+///   pointer.
+/// * `get_chunks_cb` **does not transfer ownership** of the returned
+///   `FFICChunkDataArray` to Rust.  The data is owned by the C side and must
+///   be freed by the caller via `free_chunks_cb`.  Rust simply copies the
+///   contents into a `Vec<Vec<u8>>` and then calls `free_chunks_cb` before
+///   returning.  Therefore, the caller must ensure that `free_chunks_cb` is
+///   able to free the memory that was returned.
+/// * `free_chunks_cb` must not free memory that was not allocated by
+///   `get_chunks_cb`; it is called with the exact array that `get_chunks_cb`
+///   returned.
+/// * The `ArchiveBuilderU64` handle returned via `out_ptr` is owned by the
+///   C caller and **must** be passed to either `archive_builder_build_u64`
+///   to consume it and build the archive, or `archive_builder_free_u64` to
+///   deallocate its memory if the build process is aborted.  Failure to do so
 ///   will result in a memory leak.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_new_u64(
@@ -373,6 +388,8 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 ///   callbacks, allowing the C side to maintain state.
 /// * `get_chunks_cb`: A C function pointer that the builder will call to
 ///   request the raw data for a given set of hashes.
+/// * `free_chunks_cb` – callback that frees the array returned by
+///   `get_chunks_cb`
 /// * `write_comp_data_cb`: A C function pointer that the builder will call to
 ///   write out the compressed archive data as it is generated.
 /// * `out_ptr`: A pointer to a `*mut ArchiveBuilderU128` where the handle to
@@ -388,18 +405,27 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 /// # Safety
 ///
 /// The caller is responsible for ensuring the following invariants:
-/// - All pointer arguments (`manifest_array_ptr`, `sorted_hashes_array_ptr`,
-///   `out_ptr`) must be non-null and point to valid memory.
-/// - The `manifest_len` and `sorted_hashes_len` arguments must accurately
-///   reflect the number of elements in their respective arrays.
-/// - The `user_data` pointer and the C callback function pointers
-///   (`get_chunks_cb`, `write_comp_data_cb`) must be valid for the entire
-///   lifetime of the builder, until it is consumed by
-///   `archive_builder_build_u128` or freed by `archive_builder_free_u128`.
-/// - The `ArchiveBuilderU128` handle returned via `out_ptr` is owned by the C
-///   caller and **must** be passed to either `archive_builder_build_u128` to
-///   consume it and build the archive, or `archive_builder_free_u128` to
-///   deallocate its memory if the build process is aborted. Failure to do so
+/// * All pointer arguments (`manifest_array_ptr`, `sorted_hashes_array_ptr`,
+///   `out_ptr`) must be non‑null and point to valid memory.
+/// * `manifest_len` and `sorted_hashes_len` must accurately reflect the number
+///   of elements in the respective arrays.
+/// * `user_data` must remain valid for the entire lifetime of the builder.
+/// * The C callback functions `get_chunks_cb` and `write_comp_data_cb` must
+///   be valid and must not store or otherwise out‑live the `user_data`
+///   pointer.
+/// * `get_chunks_cb` **does not transfer ownership** of the returned
+///   `FFICChunkDataArray` to Rust.  The data is owned by the C side and must
+///   be freed by the caller via `free_chunks_cb`.  Rust simply copies the
+///   contents into a `Vec<Vec<u8>>` and then calls `free_chunks_cb` before
+///   returning.  Therefore, the caller must ensure that `free_chunks_cb` is
+///   able to free the memory that was returned.
+/// * `free_chunks_cb` must not free memory that was not allocated by
+///   `get_chunks_cb`; it is called with the exact array that `get_chunks_cb`
+///   returned.
+/// * The `ArchiveBuilderU128` handle returned via `out_ptr` is owned by the
+///   C caller and **must** be passed to either `archive_builder_build_u128`
+///   to consume it and build the archive, or `archive_builder_free_u128` to
+///   deallocate its memory if the build process is aborted.  Failure to do so
 ///   will result in a memory leak.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_new_u128(

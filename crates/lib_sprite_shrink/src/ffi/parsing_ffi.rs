@@ -293,37 +293,45 @@ pub unsafe extern "C" fn free_file_header_ffi(ptr: *mut FileHeader) {
     }
 }
 
-/// A generic helper to deallocate an `FFIParsedChunkIndexArray` from an FFI
-/// handle.
-///
-/// This internal function provides the core logic for safely freeing the
-/// memory that was allocated by `parse_file_chunk_index_internal` and passed
-/// to a C caller. It takes the raw pointer, reconstructs the `Box` for the
-/// outer struct, and then reconstructs the `Vec` for the inner array of
-/// entries. This allows Rust's memory manager to properly take back ownership
-/// and deallocate all associated memory.
-///
-/// # Type Parameters
-///
-/// * `H`: The generic hash type (e.g., `u64`, `u128`) to ensure the pointer is
-///   cast and deallocated correctly.
+/// Parses a serialized file‑manifest byte slice and converts it into an
+/// FFI‑safe `FFIParsedManifestArray` that can be handed back to C.
 ///
 /// # Arguments
+/// * `manifest_data`: a byte slice that contains the binary encoding of
+///   the file‑manifest.  The caller must ensure that this slice points to
+///   valid, readable memory for `manifest_data.len()` bytes.
+/// * `out_ptr`: a non‑null pointer to a mutable
+///   `*mut FFIParsedManifestArray<H>` where the resulting array will be
+///   written.
 ///
-/// * `ptr`: The raw pointer to the `FFIParsedChunkIndexArray` struct to be
-///   freed.
+/// On success, `*out_ptr` will point to an opaque `FFIParsedManifestArray<H>`
+/// containing an array of `FFIFileManifestParent<H>` structs, each of which
+/// holds a C string (`*mut c_char`) for the file name and a pointer to a
+/// slice of `FFISSAChunkMeta<H>` describing the chunk locations in that
+/// file.
+///
+/// # Returns
+///
+/// * `FFIResult::Ok` – `out_ptr` now points to a valid array.
+/// * `FFIResult::ManifestDecodeError` – the input data could not be decoded
+///   into a `FileManifestParent<H>` chain.
+/// * `FFIResult::InvalidString` – a filename could not be converted into a
+///   C string.  The caller should treat this as a fatal error.
 ///
 /// # Safety
 ///
-/// The public FFI function that calls this helper is responsible for ensuring
-/// that:
-/// - The `ptr` is a valid, non-null pointer that was originally returned from
-///   a successful call to a `parse_file_chunk_index_ffi_*` function.
-/// - The pointer has not already been freed.
-/// - The pointer will not be used again after this function is called.
-///
-/// Passing a null, invalid, or double-freed pointer will result in undefined
-/// behavior.
+/// * `manifest_data` must point to a valid slice of length
+///   `manifest_data.len()`.
+/// * `out_ptr` must be non‑null and point to a valid memory location that
+///   the caller will read after the call.
+/// * The returned array and all embedded strings/chunks are allocated on the
+///   heap; the C caller is responsible for freeing them by passing the
+///   pointer to `free_parsed_manifest_ffi_u64` /
+///   `free_parsed_manifest_ffi_u128`.
+/// * `H` must implement `Copy` and `serde::Deserialize`, as required by the
+///   underlying `parse_file_metadata` implementation.
+/// * The function does not take ownership of `manifest_data`; the caller
+///   retains ownership until the returned data is freed.
 fn parse_file_metadata_internal<H>(
     manifest_data: &[u8],
     out_ptr: *mut *mut FFIParsedManifestArray<H>,

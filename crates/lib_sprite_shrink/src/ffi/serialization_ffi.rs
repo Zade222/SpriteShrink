@@ -72,7 +72,7 @@ use crate::serialization::{serialize_uncompressed_data};
 /// # Returns
 ///
 /// * `FFIResult::Ok` on success, with `out_ptr` pointing to the output struct.
-/// * `FFIResult::SerializationMissingChunkError` if a chunk required by the
+/// * `FFIResult::SerializationMissingChunk` if a chunk required by the
 ///   manifest is not available from the `get_chunks_cb`.
 /// * `FFIResult::InvalidString` if a filename in the manifest cannot be
 ///   converted to a C-string.
@@ -428,6 +428,42 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u128(
     )
 }
 
+/// Reconstructs each vector that was originally created in
+/// `serialize_uncompressed_data_ffi_internal`:
+/// * The top‑level `FFISerializedOutput` box is recovered with
+///   `Box::from_raw(ptr)`.
+/// * The arrays for file manifests, chunk indices and sorted hashes are
+///   reconstructed with `Vec::from_raw_parts` and then dropped, which
+///   releases the underlying memory.
+/// * Each `FFIFileManifestParent` inside the manifest array has its
+///   `filename` (`CString`) and `chunk_metadata` (`Vec<FFISSAChunkMeta>`) freed
+///   as well.
+/// * No further action is required by the caller; the function guarantees
+///   that every allocation performed by the serialization routine is
+///   returned to Rust’s allocator.
+/// # Arguments
+///
+/// * `ptr` – pointer to an `FFISerializedOutput<H>` that was returned by
+///   `serialize_uncompressed_data_ffi_*`.  The pointer is opaque to the
+///   caller and must not be used after this function returns.
+///
+/// # Returns
+///
+/// No value is returned; the function performs in‑place deallocation.
+///
+/// # Safety
+///
+/// * `ptr` must be a non‑null pointer to a valid `FFISerializedOutput<H>`
+///   that was allocated by `serialize_uncompressed_data_ffi_internal`
+///   (via `Box::into_raw`).  Passing a null or invalid pointer
+///   results in undefined behaviour.
+/// * The function assumes that all inner pointers (`ser_manifest_ptr`,
+///   `ser_chunk_index_ptr`, `sorted_hashes_ptr`) and the embedded C
+///   strings and `FFISSAChunkMeta` arrays were allocated by the
+///   serialization routine and have not yet been freed.
+/// * After the function returns, the caller may no longer use the
+///   `FFISerializedOutput` pointer.  All memory owned by that struct
+///   has been reclaimed.
 unsafe fn free_serialized_output_internal<H>(
     ptr: *mut FFISerializedOutput<H>
 ) {
