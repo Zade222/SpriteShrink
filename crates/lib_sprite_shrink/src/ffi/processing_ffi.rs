@@ -38,7 +38,7 @@ use crate::{FileData, FileManifestParent};
 /// A generic helper to create a file manifest and hashed chunks from C data.
 ///
 /// This internal function serves as the core implementation for the public
-/// `create_file_manifest_and_chunks_ffi_*` functions. It orchestrates the
+/// `create_file_manifest_and_chunks_*` functions. It orchestrates the
 /// conversion of C-style data (raw pointers and lengths) into Rust-native
 /// types, invokes the primary `create_file_manifest_and_chunks` function to
 /// perform the main processing logic, and then converts the resulting Rust
@@ -82,7 +82,7 @@ use crate::{FileData, FileManifestParent};
 ///   `FFIFileManifestChunks` struct and all the nested pointers it contains
 ///   (filenames, chunk metadata, hashed chunk data). This memory **must** be
 ///   deallocated by passing the pointer to the corresponding
-///   `free_file_manifest_and_chunks_ffi_*` function to prevent significant
+///   `free_file_manifest_and_chunks_*` function to prevent significant
 ///   memory leaks.
 fn create_file_manifest_and_chunks_internal<H>(
     file_name_ptr: *const c_char,
@@ -206,7 +206,7 @@ where
 /// descriptors and produces an `FFIFileManifestChunksU64` that the C
 /// caller can consume.  The returned object owns all memory needed for the
 /// manifest and the chunks; the caller must free it with
-/// `free_file_manifest_and_chunks_ffi_u64`.
+/// `free_file_manifest_and_chunks_u64`.
 ///
 /// # Arguments
 ///
@@ -233,9 +233,9 @@ where
 ///   the call.
 /// * The returned struct and all nested data are allocated on the heap; the
 ///   caller is responsible for freeing it with
-///   `free_file_manifest_and_chunks_ffi_u64` to avoid leaks.
+///   `free_file_manifest_and_chunks_u64` to avoid leaks.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u64(
+pub unsafe extern "C" fn create_file_manifest_and_chunks_u64(
     file_name_ptr: *const c_char,
     file_data_array_ptr: *const u8,
     file_data_len: usize,
@@ -264,9 +264,9 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u64(
 /// for 128‑bit hash keys.
 ///
 /// The arguments and semantics are identical to
-/// `create_file_manifest_and_chunks_ffi_u64`, but the resulting struct is
+/// `create_file_manifest_and_chunks_u128`, but the resulting struct is
 /// `FFIFileManifestChunksU128`.  The caller must free the returned value
-/// with `free_file_manifest_and_chunks_ffi_u128`.
+/// with `free_file_manifest_and_chunks_u128`.
 ///
 /// # Arguments
 ///
@@ -290,9 +290,9 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u64(
 /// As with the u64 variant:
 /// * All pointers must be non‑null and point to valid memory.
 /// * The returned struct owns all heap‑allocated data; free it with
-///   `free_file_manifest_and_chunks_ffi_u128` to avoid leaks.
+///   `free_file_manifest_and_chunks_u128` to avoid leaks.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u128(
+pub unsafe extern "C" fn create_file_manifest_and_chunks_u128(
     file_name_ptr: *const c_char,
     file_data_array_ptr: *const u8,
     file_data_len: usize,
@@ -346,14 +346,14 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_ffi_u128(
 ///
 /// The public FFI function that calls this helper must guarantee that:
 /// - The `ptr` is a valid, non-null pointer originally returned from a
-///   successful call to a `create_file_manifest_and_chunks_ffi_*` function.
+///   successful call to a `create_file_manifest_and_chunks_*` function.
 /// - The pointer has not already been freed.
 /// - The pointer, and any pointers contained within its structures, will not
 ///   be used again after this function is called.
 ///
 /// Failure to uphold these conditions will result in undefined behavior, such
 /// as double-freeing memory or use-after-free vulnerabilities.
-fn free_file_manifest_and_chunks_ffi_internal<H>(
+fn free_file_manifest_and_chunks_internal<H>(
     ptr: *mut FFIFileManifestChunks<H>
 ) {
     unsafe {
@@ -389,44 +389,44 @@ fn free_file_manifest_and_chunks_ffi_internal<H>(
     }
 }
 
-/// Frees the memory allocated by `create_file_manifest_and_chunks_ffi_u64`
+/// Frees the memory allocated by `create_file_manifest_and_chunk_u64`
 /// for a u64 hash.
 ///
 /// # Safety
 /// The caller MUST ensure that `ptr` is a valid pointer returned from
-/// `create_file_manifest_and_chunks_ffi_u64` and that it is not used
+/// `create_file_manifest_and_chunks_u64` and that it is not used
 /// after this call. This function should only be called once for any
 /// given pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_file_manifest_and_chunks_ffi_u64(
+pub unsafe extern "C" fn free_file_manifest_and_chunks_u64(
     ptr: *mut FFIFileManifestChunksU64
 ) {
     if ptr.is_null() {
         return;
     }
 
-    free_file_manifest_and_chunks_ffi_internal::<u64>(
+    free_file_manifest_and_chunks_internal::<u64>(
         ptr
     );
 }
 
-/// Frees the memory allocated by `create_file_manifest_and_chunks_ffi_u128`
+/// Frees the memory allocated by `create_file_manifest_and_chunks_u128`
 /// for a u128 hash.
 ///
 /// # Safety
 /// The caller MUST ensure that `ptr` is a valid pointer returned from
-/// `create_file_manifest_and_chunks_ffi_u128` and that it is not used
+/// `create_file_manifest_and_chunks_u128` and that it is not used
 /// after this call. This function should only be called once for any
 /// given pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_file_manifest_and_chunks_ffi_u128(
+pub unsafe extern "C" fn free_file_manifest_and_chunks_u128(
     ptr: *mut FFIFileManifestChunksU128
 ) {
     if ptr.is_null() {
         return;
     }
 
-    free_file_manifest_and_chunks_ffi_internal::<u128>(
+    free_file_manifest_and_chunks_internal::<u128>(
         ptr
     );
 }
@@ -569,7 +569,7 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
 /// retrieval.
 ///
 /// This internal function serves as the core implementation for the public
-/// `verify_single_file_ffi_*` functions. It bridges the FFI boundary by
+/// `verify_single_file_*` functions. It bridges the FFI boundary by
 /// converting C-style inputs into Rust-native types and wrapping C function
 /// pointers into Rust closures.
 ///
@@ -624,7 +624,7 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
 ///   duration of this call.
 /// - The C callback function pointers (`get_chunks_cb`, `progress_cb`) are
 ///   valid and point to functions with the correct signatures.
-fn verify_single_file_ffi_internal<E, H>(
+fn verify_single_file_internal<E, H>(
     file_manifest_parent: *const FFIFileManifestParent<H>,
     veri_hash_array_ptr: *const u8,
     user_data: *mut c_void,
@@ -701,7 +701,7 @@ where
 /// All pointer arguments must be non-null and valid for their
 /// specified lengths.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn verify_single_file_ffi_u64(
+pub unsafe extern "C" fn verify_single_file_u64(
     file_manifest_parent: *const FFIFileManifestParentU64,
     veri_hash_array_ptr: *const u8,
     user_data: *mut c_void,
@@ -722,7 +722,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u64(
         return FFIResult::NullArgument;
     }
 
-    verify_single_file_ffi_internal::<SpriteShrinkError, u64>(
+    verify_single_file_internal::<SpriteShrinkError, u64>(
         file_manifest_parent,
         veri_hash_array_ptr,
         user_data,
@@ -738,7 +738,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u64(
 /// All pointer arguments must be non-null and valid for their
 /// specified lengths.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn verify_single_file_ffi_u128(
+pub unsafe extern "C" fn verify_single_file_u128(
     file_manifest_parent: *const FFIFileManifestParentU128,
     veri_hash_array_ptr: *const u8,
     user_data: *mut c_void,
@@ -759,7 +759,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u128(
         return FFIResult::NullArgument;
     }
 
-    verify_single_file_ffi_internal::<SpriteShrinkError, u128>(
+    verify_single_file_internal::<SpriteShrinkError, u128>(
         file_manifest_parent,
         veri_hash_array_ptr,
         user_data,
@@ -771,7 +771,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u128(
 /// A generic helper to estimate the compressed size of a data store via FFI.
 ///
 /// This internal function serves as the core implementation for the public
-/// `test_compression_ffi_*` functions. It provides a way to run a simulated
+/// `test_compression_*` functions. It provides a way to run a simulated
 /// compression cycle on a set of unique data chunks to estimate the final
 /// archive size without writing any data to disk.
 ///
@@ -830,7 +830,7 @@ pub unsafe extern "C" fn verify_single_file_ffi_u128(
 ///   array.
 /// - The `get_chunks_cb` function pointer is valid and points to a function
 ///   with the correct signature.
-fn test_compression_ffi_internal<H>(
+fn test_compression_internal<H>(
     total_data_size: u64,
     sorted_hashes_array_ptr: *const H,
     sorted_hashes_len: usize,
@@ -920,7 +920,7 @@ where
 ///   lengths.
 /// - `out_size` must be a valid, non-null pointer to a `u64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn test_compression_ffi_u64(
+pub unsafe extern "C" fn test_compression_u64(
     total_data_size: u64,
     sorted_hashes_array_ptr: *const u64,
     sorted_hashes_len: usize,
@@ -941,7 +941,7 @@ pub unsafe extern "C" fn test_compression_ffi_u64(
             return FFIResult::NullArgument;
     };
 
-    test_compression_ffi_internal::<u64>(
+    test_compression_internal::<u64>(
         total_data_size,
         sorted_hashes_array_ptr,
         sorted_hashes_len,
@@ -964,7 +964,7 @@ pub unsafe extern "C" fn test_compression_ffi_u64(
 ///   lengths.
 /// - `out_size` must be a valid, non-null pointer to a `u64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn test_compression_ffi_u128(
+pub unsafe extern "C" fn test_compression_u128(
     total_data_size: u64,
     sorted_hashes_array_ptr: *const u128,
     sorted_hashes_len: usize,
@@ -985,7 +985,7 @@ pub unsafe extern "C" fn test_compression_ffi_u128(
             return FFIResult::NullArgument;
     };
 
-    test_compression_ffi_internal::<u128>(
+    test_compression_internal::<u128>(
         total_data_size,
         sorted_hashes_array_ptr,
         sorted_hashes_len,
@@ -1002,7 +1002,7 @@ pub unsafe extern "C" fn test_compression_ffi_u128(
 /// operation.
 ///
 /// This internal function serves as the core implementation for the public
-/// `get_seek_chunks_ffi_*` functions. It takes an FFI-safe file manifest and
+/// `get_seek_chunks_*` functions. It takes an FFI-safe file manifest and
 /// seek parameters (offset and length), converts the manifest into a
 /// Rust-native type, and then calls the primary `get_seek_chunks` function to
 /// determine which chunks are needed to fulfill the read request.
@@ -1042,8 +1042,8 @@ pub unsafe extern "C" fn test_compression_ffi_u128(
 /// - The caller takes full ownership of the memory allocated for the
 ///   `FFISeekInfoArray` struct and its internal `chunks` array. This memory
 ///   **must** be deallocated by passing the pointer to the corresponding
-///   `free_seek_chunks_ffi_*` function to prevent a memory leak.
-fn get_seek_chunks_ffi_internal<H>(
+///   `free_seek_chunks_*` function to prevent a memory leak.
+fn get_seek_chunks_internal<H>(
     file_manifest_parent: *const FFIFileManifestParent<H>,
     seek_offset: u64,
     seek_length: u64,
@@ -1110,9 +1110,9 @@ where
 ///   `*mut FFISeekInfoArray...`.
 /// - On success, the pointer written to `out_ptr` is owned by the C
 ///   caller and MUST be freed by passing it to the
-///   `free_seek_chunks_ffi_u64` function.
+///   `free_seek_chunks_u64` function.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn get_seek_chunks_ffi_u64(
+pub unsafe extern "C" fn get_seek_chunks_u64(
     file_manifest_parent: *const FFIFileManifestParent<u64>,
     seek_offset: u64,
     seek_length: u64,
@@ -1122,7 +1122,7 @@ pub unsafe extern "C" fn get_seek_chunks_ffi_u64(
         return FFIResult::NullArgument;
     };
 
-    get_seek_chunks_ffi_internal::<u64>(
+    get_seek_chunks_internal::<u64>(
         file_manifest_parent,
         seek_offset,
         seek_length,
@@ -1139,9 +1139,9 @@ pub unsafe extern "C" fn get_seek_chunks_ffi_u64(
 ///   `*mut FFISeekInfoArray...`.
 /// - On success, the pointer written to `out_ptr` is owned by the C
 ///   caller and MUST be freed by passing it to the
-///   `free_seek_chunks_ffi_u128` function.
+///   `free_seek_chunks_u128` function.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn get_seek_chunks_ffi_u128(
+pub unsafe extern "C" fn get_seek_chunks_u128(
     file_manifest_parent: *const FFIFileManifestParent<u128>,
     seek_offset: u64,
     seek_length: u64,
@@ -1151,7 +1151,7 @@ pub unsafe extern "C" fn get_seek_chunks_ffi_u128(
         return FFIResult::NullArgument;
     };
 
-    get_seek_chunks_ffi_internal::<u128>(
+    get_seek_chunks_internal::<u128>(
         file_manifest_parent,
         seek_offset,
         seek_length,
@@ -1162,7 +1162,7 @@ pub unsafe extern "C" fn get_seek_chunks_ffi_u128(
 /// A generic helper to deallocate an `FFISeekInfoArray` from an FFI handle.
 ///
 /// This internal function provides the core logic for safely freeing the
-/// memory that was allocated by `get_seek_chunks_ffi_internal` and passed to a
+/// memory that was allocated by `get_seek_chunks_internal` and passed to a
 /// C caller. It takes the raw pointer, reconstructs the `Box` for the outer
 /// struct, and then reconstructs the `Vec` for the inner array of
 /// `FFISeekChunkInfo` entries. This allows Rust's memory manager to properly
@@ -1181,13 +1181,13 @@ pub unsafe extern "C" fn get_seek_chunks_ffi_u128(
 ///
 /// The public FFI function that calls this helper must guarantee that:
 /// - The `ptr` is a valid, non-null pointer that was originally returned from
-///   a successful call to a `get_seek_chunks_ffi_*` function.
+///   a successful call to a `get_seek_chunks_*` function.
 /// - The pointer has not already been freed.
 /// - The pointer will not be used again after this function is called.
 ///
 /// Passing a null, invalid, or double-freed pointer will result in undefined
 /// behavior.
-fn free_seek_chunks_ffi_internal<H>(
+fn free_seek_chunks_internal<H>(
     ptr: *mut FFISeekInfoArray<H>
 ) {
     unsafe{
@@ -1203,38 +1203,38 @@ fn free_seek_chunks_ffi_internal<H>(
         }
 }
 
-/// Frees the memory allocated by a `get_seek_chunks_ffi` function.
+/// Frees the memory allocated by the `get_seek_chunks_u64` function.
 ///
 /// # Safety
 /// The `ptr` must be a non-null pointer returned from a successful
-/// call to the `get_seek_chunks_ffi_u64` function.
+/// call to the `get_seek_chunks_u64` function.
 /// Calling this with a null pointer or a pointer that has already
 /// been freed will lead to undefined behavior.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_seek_chunks_ffi_u64(
+pub unsafe extern "C" fn free_seek_chunks_u64(
     ptr: *mut FFISeekInfoArray<u64>
 ) {
     if ptr.is_null() {
         return;
     };
 
-    free_seek_chunks_ffi_internal::<u64>(ptr);
+    free_seek_chunks_internal::<u64>(ptr);
 }
 
-/// Frees the memory allocated by a `get_seek_chunks_ffi` function.
+/// Frees the memory allocated by a `get_seek_chunks_u128` function.
 ///
 /// # Safety
 /// The `ptr` must be a non-null pointer returned from a successful
-/// call to the `get_seek_chunks_ffi_u128` function.
+/// call to the `get_seek_chunks_u128` function.
 /// Calling this with a null pointer or a pointer that has already
 /// been freed will lead to undefined behavior.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_seek_chunks_ffi_u128(
+pub unsafe extern "C" fn free_seek_chunks_u128(
     ptr: *mut FFISeekInfoArray<u128>
 ) {
     if ptr.is_null() {
         return;
     };
 
-    free_seek_chunks_ffi_internal::<u128>(ptr);
+    free_seek_chunks_internal::<u128>(ptr);
 }

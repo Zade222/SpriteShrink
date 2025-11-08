@@ -32,7 +32,7 @@ use crate::serialization::{serialize_uncompressed_data};
 /// A generic helper to serialize archive metadata into an FFI-safe structure.
 ///
 /// This internal function serves as the core implementation for the public
-/// `serialize_uncompressed_data_ffi_*` functions. It orchestrates a complex
+/// `serialize_uncompressed_data_*` functions. It orchestrates a complex
 /// data transformation process, preparing in-memory Rust data structures for
 /// the final archive-building step by converting them into a set of
 /// C-compatible, heap-allocated arrays.
@@ -90,7 +90,7 @@ use crate::serialization::{serialize_uncompressed_data};
 ///   This memory **must** be deallocated by passing the pointer to the
 ///   corresponding `free_serialized_output_*` function to prevent significant
 ///   memory leaks.
-fn serialize_uncompressed_data_ffi_internal<H>(
+fn serialize_uncompressed_data_internal<H>(
     manifest_array_ptr: *const FFIFileManifestParent<H>,
     manifest_len: usize,
     user_data: *mut c_void,
@@ -351,7 +351,7 @@ where
 ///   caller and MUST be freed by passing it to
 ///   `free_serialized_output_u64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u64(
+pub unsafe extern "C" fn serialize_uncompressed_data_u64(
     manifest_array_ptr: *const FFIFileManifestParentU64,
     manifest_len: usize,
     user_data: *mut c_void,
@@ -372,7 +372,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u64(
         return FFIResult::NullArgument;
     };
 
-    serialize_uncompressed_data_ffi_internal::<u64>(
+    serialize_uncompressed_data_internal::<u64>(
         manifest_array_ptr,
         manifest_len,
         user_data,
@@ -397,7 +397,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u64(
 ///   caller and MUST be freed by passing it to
 ///   `free_serialized_output_u128`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u128(
+pub unsafe extern "C" fn serialize_uncompressed_data_u128(
     manifest_array_ptr: *const FFIFileManifestParentU128,
     manifest_len: usize,
     user_data: *mut c_void,
@@ -418,7 +418,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u128(
         return FFIResult::NullArgument;
     };
 
-    serialize_uncompressed_data_ffi_internal::<u128>(
+    serialize_uncompressed_data_internal::<u128>(
         manifest_array_ptr,
         manifest_len,
         user_data,
@@ -429,7 +429,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u128(
 }
 
 /// Reconstructs each vector that was originally created in
-/// `serialize_uncompressed_data_ffi_internal`:
+/// `serialize_uncompressed_data_internal`:
 /// * The top‑level `FFISerializedOutput` box is recovered with
 ///   `Box::from_raw(ptr)`.
 /// * The arrays for file manifests, chunk indices and sorted hashes are
@@ -444,7 +444,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u128(
 /// # Arguments
 ///
 /// * `ptr` – pointer to an `FFISerializedOutput<H>` that was returned by
-///   `serialize_uncompressed_data_ffi_*`.  The pointer is opaque to the
+///   `serialize_uncompressed_data_*`.  The pointer is opaque to the
 ///   caller and must not be used after this function returns.
 ///
 /// # Returns
@@ -454,7 +454,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_ffi_u128(
 /// # Safety
 ///
 /// * `ptr` must be a non‑null pointer to a valid `FFISerializedOutput<H>`
-///   that was allocated by `serialize_uncompressed_data_ffi_internal`
+///   that was allocated by `serialize_uncompressed_data_internal`
 ///   (via `Box::into_raw`).  Passing a null or invalid pointer
 ///   results in undefined behaviour.
 /// * The function assumes that all inner pointers (`ser_manifest_ptr`,
@@ -500,7 +500,7 @@ unsafe fn free_serialized_output_internal<H>(
     }
 }
 
-/// Frees the memory allocated by `serialize_uncompressed_data_ffi_u64`.
+/// Frees the memory allocated by `serialize_uncompressed_data_u64`.
 ///
 /// This function is responsible for deallocating the
 /// `FFISerializedOutput` struct and all the memory blocks it points
@@ -510,7 +510,7 @@ unsafe fn free_serialized_output_internal<H>(
 /// # Safety
 ///
 /// The `ptr` must be a non-null pointer returned from a successful
-/// to `serialize_uncompressed_data_ffi_u64`.
+/// to `serialize_uncompressed_data_u64`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_serialized_output_u64(
     ptr: *mut FFISerializedOutputU64
@@ -524,7 +524,7 @@ pub unsafe extern "C" fn free_serialized_output_u64(
     )}
 }
 
-/// Frees the memory allocated by `serialize_uncompressed_data_ffi_u128`.
+/// Frees the memory allocated by `serialize_uncompressed_data_u128`.
 ///
 /// This function is responsible for deallocating the
 /// `FFISerializedOutput` struct and all the memory blocks it points
@@ -534,7 +534,7 @@ pub unsafe extern "C" fn free_serialized_output_u64(
 /// # Safety
 ///
 /// The `ptr` must be a non-null pointer returned from a successful
-/// to `serialize_uncompressed_data_ffi_u128`.
+/// to `serialize_uncompressed_data_u128`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn free_serialized_output_u128(
     ptr: *mut FFISerializedOutputU128

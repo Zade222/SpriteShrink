@@ -337,7 +337,7 @@ pub struct FFIFileData {
 /// A composite FFI structure that bundles a file's manifest with its
 /// associated hashed chunk data.
 ///
-/// This struct is returned by the `create_file_manifest_and_chunks_ffi_*`
+/// This struct is returned by the `create_file_manifest_and_chunks_*`
 /// functions. It contains all the necessary information generated from
 /// processing a single file: the metadata needed for reconstruction (the
 /// manifest) and the list of unique, hashed chunks that compose the file's
@@ -362,7 +362,7 @@ pub struct FFIFileData {
 /// The C caller takes full ownership of the memory for this struct and all
 /// the nested data it points to. To prevent significant memory leaks, the
 /// top-level pointer to this struct **must** be passed to the corresponding
-/// `free_file_manifest_and_chunks_ffi_*` function. This free function will
+/// `free_file_manifest_and_chunks_*` function. This free function will
 /// correctly deallocate the `fmp`'s internal data, the `hashed_chunks` array,
 /// and the raw data buffer for each individual chunk.
 #[repr(C)]
@@ -375,16 +375,16 @@ pub struct FFIFileManifestChunks<H> {
 
 /// An `FFIFileManifestChunks` struct specialized for `u64` hashes.
 ///
-/// This type is returned by [`create_file_manifest_and_chunks_ffi_u64`] and
-/// is the expected input for [`free_file_manifest_and_chunks_ffi_u64`]. It
+/// This type is returned by [`create_file_manifest_and_chunks_u64`] and
+/// is the expected input for [`free_file_manifest_and_chunks_u64`]. It
 /// bundles the file manifest and its chunk data when the hash algorithm
 /// produces a 64-bit integer.
 pub type FFIFileManifestChunksU64 = FFIFileManifestChunks<u64>;
 
 /// An `FFIFileManifestChunks` struct specialized for `u128` hashes.
 ///
-/// This type is returned by [`create_file_manifest_and_chunks_ffi_u128`] and
-/// is the expected input for [`free_file_manifest_and_chunks_ffi_u128`]. It
+/// This type is returned by [`create_file_manifest_and_chunks_u128`] and
+/// is the expected input for [`free_file_manifest_and_chunks_u128`]. It
 /// bundles the file manifest and its chunk data when the hash algorithm
 /// produces a 128-bit integer.
 pub type FFIFileManifestChunksU128 = FFIFileManifestChunks<u128>;
@@ -443,8 +443,8 @@ impl<H> From<(
 /// When this struct is created by Rust and passed to C, the C caller takes
 /// ownership of the memory pointed to by `filename` and `chunk_metadata`.
 /// This memory must be deallocated by calling the appropriate free function
-/// (e.g., `free_parsed_manifest_ffi_*` or
-/// `free_file_manifest_and_chunks_ffi_*`) to prevent memory leaks.
+/// (e.g., `free_parsed_manifest_*` or
+/// `free_file_manifest_and_chunks_*`) to prevent memory leaks.
 #[repr(C)]
 pub struct FFIFileManifestParent<H> {
     pub filename: *mut c_char,
@@ -591,7 +591,7 @@ where
 ///
 /// This struct is used to pass the fundamental components of a file's content
 /// from Rust to a C caller. An array of these structs is a key output of the
-/// `create_file_manifest_and_chunks_ffi_*` functions, providing the C
+/// `create_file_manifest_and_chunks_*` functions, providing the C
 /// application with a complete set of all data chunks from a processed file,
 /// each paired with its deduplication hash.
 ///
@@ -613,7 +613,7 @@ where
 /// When this struct is created by Rust and passed to C, the C caller takes
 /// full ownership of the memory pointed to by `chunk_data`. To prevent a
 /// memory leak, this memory **must** be deallocated by calling the
-/// appropriate free function (e.g., `free_file_manifest_and_chunks_ffi_*`),
+/// appropriate free function (e.g., `free_file_manifest_and_chunks_*`),
 /// which handles the cleanup of all nested data.
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -653,7 +653,7 @@ impl<H> From<(H, *mut u8, usize, usize)> for FFIHashedChunkData<H> {
 
 /// Holds the result of parsing a serialized chunk index from an archive.
 ///
-/// This struct is returned by the `parse_file_chunk_index_ffi_*` functions.
+/// This struct is returned by the `parse_file_chunk_index_*` functions.
 /// It provides a C-compatible representation of the entire chunk index, which
 /// maps every unique chunk hash to its location within the archive's data
 /// section.
@@ -674,7 +674,7 @@ impl<H> From<(H, *mut u8, usize, usize)> for FFIHashedChunkData<H> {
 /// The C caller takes full ownership of the memory for this struct and the
 /// `entries` array it points to. To prevent a memory leak, the top-level
 /// pointer to this struct **must** be passed to the corresponding
-/// `free_parsed_chunk_index_ffi_*` function once it is no longer needed.
+/// `free_parsed_chunk_index_*` function once it is no longer needed.
 #[repr(C)]
 pub struct FFIParsedChunkIndexArray<H> {
     pub entries: *mut FFIChunkIndexEntry<H>,
@@ -684,15 +684,15 @@ pub struct FFIParsedChunkIndexArray<H> {
 
 /// An `FFIParsedChunkIndexArray` specialized for `u64` hashes.
 ///
-/// This type is returned by [`parse_file_chunk_index_ffi_u64`] and is the
-/// expected input for [`free_parsed_chunk_index_ffi_u64`]. It represents a
+/// This type is returned by [`parse_file_chunk_index_u64`] and is the
+/// expected input for [`free_parsed_chunk_index_u64`]. It represents a
 /// complete chunk index where each chunk is identified by a 64-bit hash.
 pub type FFIParsedChunkIndexArrayU64 = FFIParsedChunkIndexArray<u64>;
 
 /// An `FFIParsedChunkIndexArray` specialized for `u128` hashes.
 ///
-/// This type is returned by [`parse_file_chunk_index_ffi_u128`] and is the
-/// expected input for [`free_parsed_chunk_index_ffi_u128`]. It represents a
+/// This type is returned by [`parse_file_chunk_index_u128`] and is the
+/// expected input for [`free_parsed_chunk_index_u128`]. It represents a
 /// complete chunk index where each chunk is identified by a 128-bit hash.
 pub type FFIParsedChunkIndexArrayU128 = FFIParsedChunkIndexArray<u128>;
 
@@ -711,7 +711,7 @@ FFIParsedChunkIndexArray<H> {
 
 /// Holds the result of parsing a serialized file manifest from an archive.
 ///
-/// This struct is returned by the `parse_file_metadata_ffi_*` functions and
+/// This struct is returned by the `parse_file_metadata_*` functions and
 /// provides a C-compatible representation of the entire file manifest. It
 /// contains an array of [`FFIFileManifestParent`] structs, each describing a
 /// single file within the archive.
@@ -734,7 +734,7 @@ FFIParsedChunkIndexArray<H> {
 /// nested data it points to (the `manifests` array, and the internal pointers
 /// for filenames and chunk metadata within each manifest). To prevent
 /// significant memory leaks, the top-level pointer to this struct **must** be
-/// passed to the corresponding `free_parsed_manifest_ffi_*` function once it
+/// passed to the corresponding `free_parsed_manifest_*` function once it
 /// is no longer needed.
 #[repr(C)]
 pub struct FFIParsedManifestArray<H> {
@@ -745,15 +745,15 @@ pub struct FFIParsedManifestArray<H> {
 
 /// An `FFIParsedManifestArray` specialized for `u64` hashes.
 ///
-/// This type is returned by [`parse_file_metadata_ffi_u64`] and is the
-/// expected input for [`free_parsed_manifest_ffi_u64`]. It represents a
+/// This type is returned by [`parse_file_metadata_u64`] and is the
+/// expected input for [`free_parsed_manifest_u64`]. It represents a
 /// complete file manifest where each chunk is identified by a 64-bit hash.
 pub type FFIParsedManifestArrayU64 = FFIParsedManifestArray<u64>;
 
 /// An `FFIParsedManifestArray` specialized for `u128` hashes.
 ///
-/// This type is returned by [`parse_file_metadata_ffi_u128`] and is the
-/// expected input for [`free_parsed_manifest_ffi_u128`]. It represents a
+/// This type is returned by [`parse_file_metadata_u128`] and is the
+/// expected input for [`free_parsed_manifest_u128`]. It represents a
 /// complete file manifest where each chunk is identified by a 128-bit hash.
 pub type FFIParsedManifestArrayU128 = FFIParsedManifestArray<u128>;
 

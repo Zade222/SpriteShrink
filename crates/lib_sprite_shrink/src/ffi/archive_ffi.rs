@@ -939,7 +939,7 @@ pub unsafe extern "C" fn archive_builder_build_u128(
     }
 }
 
-// A generic helper to deallocate an `ArchiveBuilder` from an FFI handle.
+/// A generic helper to deallocate an `ArchiveBuilder` from an FFI handle.
 ///
 /// This private function contains the core logic for safely freeing the memory
 /// of an `ArchiveBuilder` instance that is owned by the C caller. It

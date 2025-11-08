@@ -32,7 +32,7 @@ use crate::parsing::{
 /// FFI-safe format.
 ///
 /// This internal function serves as the core logic for the public
-/// `parse_file_chunk_index_ffi_*` functions. It takes a raw byte slice
+/// `parse_file_chunk_index_*` functions. It takes a raw byte slice
 /// containing the serialized chunk index data, calls the primary
 /// `parse_file_chunk_index` function to deserialize it into a Rust `HashMap`,
 /// and then transforms the result into a C-compatible array structure.
@@ -68,7 +68,7 @@ use crate::parsing::{
 /// - The caller takes ownership of the memory allocated for the
 ///   `FFIParsedChunkIndexArray` and its internal `entries` array. This memory
 ///   **must** be deallocated by passing the pointer back to the corresponding
-///   `free_parsed_chunk_index_ffi_*` function to prevent a memory leak.
+///   `free_parsed_chunk_index_*` function to prevent a memory leak.
 fn parse_file_chunk_index_internal<H>(
     chunk_index_data: &[u8],
     out_ptr: *mut *mut FFIParsedChunkIndexArray<H>,
@@ -123,9 +123,9 @@ where
 ///   FFIParsedChunkIndexArrayU64`.
 /// - On success, the pointer written to `out_ptr` is owned by the C
 ///   caller and MUST be freed by passing it to
-///   `free_parsed_chunk_index_ffi_u64` to avoid memory leaks.
+///   `free_parsed_chunk_index_u64` to avoid memory leaks.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn parse_file_chunk_index_ffi_u64(
+pub unsafe extern "C" fn parse_file_chunk_index_u64(
     chunk_index_array_ptr: *const u8,
     chunk_index_len: usize,
     out_ptr: *mut *mut FFIParsedChunkIndexArrayU64,
@@ -157,9 +157,9 @@ pub unsafe extern "C" fn parse_file_chunk_index_ffi_u64(
 ///   FFIParsedChunkIndexArrayU128`.
 /// - On success, the pointer written to `out_ptr` is owned by the C
 ///   caller and MUST be freed by passing it to
-///   `free_parsed_chunk_index_ffi_u128` to avoid memory leaks.
+///   `free_parsed_chunk_index_u128` to avoid memory leaks.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn parse_file_chunk_index_ffi_u128(
+pub unsafe extern "C" fn parse_file_chunk_index_u128(
     chunk_index_array_ptr: *const u8,
     chunk_index_len: usize,
     out_ptr: *mut *mut FFIParsedChunkIndexArrayU128,
@@ -199,13 +199,13 @@ fn free_parsed_chunk_index_ffi_internal<H>(
     }
 }
 
-/// Frees the memory allocated by `parse_file_chunk_index_ffi_u64`.
+/// Frees the memory allocated by `parse_file_chunk_index_u64`.
 ///
 /// # Safety
 /// The `ptr` must be a non-null pointer from a successful call to
-/// `parse_file_chunk_index_ffi_u64`.
+/// `parse_file_chunk_index_u64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_parsed_chunk_index_ffi_u64(
+pub unsafe extern "C" fn free_parsed_chunk_index_u64(
     ptr: *mut FFIParsedChunkIndexArrayU64
 ) {
     if ptr.is_null() {
@@ -221,9 +221,9 @@ pub unsafe extern "C" fn free_parsed_chunk_index_ffi_u64(
 ///
 /// # Safety
 /// The `ptr` must be a non-null pointer from a successful call to
-/// `parse_file_chunk_index_ffi_u128`.
+/// `parse_file_chunk_index_u128`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_parsed_chunk_index_ffi_u128(
+pub unsafe extern "C" fn free_parsed_chunk_index_u128(
     ptr: *mut FFIParsedChunkIndexArrayU128
 ) {
     if ptr.is_null() {
@@ -283,7 +283,7 @@ pub unsafe extern "C" fn parse_file_header_ffi(
 /// `parse_file_header_ffi`. Calling this function with a null pointer or a
 /// pointer that has already been freed will lead to undefined behavior.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_file_header_ffi(ptr: *mut FileHeader) {
+pub unsafe extern "C" fn free_file_header(ptr: *mut FileHeader) {
     unsafe{
         if !ptr.is_null() {
             /*Retake ownership of the pointer from C and drop it, freeing the
@@ -326,8 +326,8 @@ pub unsafe extern "C" fn free_file_header_ffi(ptr: *mut FileHeader) {
 ///   the caller will read after the call.
 /// * The returned array and all embedded strings/chunks are allocated on the
 ///   heap; the C caller is responsible for freeing them by passing the
-///   pointer to `free_parsed_manifest_ffi_u64` /
-///   `free_parsed_manifest_ffi_u128`.
+///   pointer to `free_parsed_manifest_u64` /
+///   `free_parsed_manifest_u128`.
 /// * `H` must implement `Copy` and `serde::Deserialize`, as required by the
 ///   underlying `parse_file_metadata` implementation.
 /// * The function does not take ownership of `manifest_data`; the caller
@@ -413,9 +413,9 @@ where
 /// - `out_ptr` must be a valid pointer to a `*mut
 ///   FFIParsedManifestArrayU64`.
 /// - The pointer returned via `out_ptr` is owned by the caller and
-///   MUST be freed by passing it to `free_parsed_manifest_ffi_u64`.
+///   MUST be freed by passing it to `free_parsed_manifest_u64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn parse_file_metadata_ffi_u64(
+pub unsafe extern "C" fn parse_file_metadata_u64(
     manifest_data_array_ptr: *const u8,
     manifest_data_len: usize,
     out_ptr: *mut *mut FFIParsedManifestArrayU64
@@ -445,9 +445,9 @@ pub unsafe extern "C" fn parse_file_metadata_ffi_u64(
 /// - `out_ptr` must be a valid pointer to a `*mut
 ///   FFIParsedManifestArrayU128`.
 /// - The pointer returned via `out_ptr` is owned by the caller and
-///   MUST be freed by passing it to `free_parsed_manifest_ffi_u128`.
+///   MUST be freed by passing it to `free_parsed_manifest_u128`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn parse_file_metadata_ffi_u128(
+pub unsafe extern "C" fn parse_file_metadata_u128(
     manifest_data_array_ptr: *const u8,
     manifest_data_len: usize,
     out_ptr: *mut *mut FFIParsedManifestArrayU128
@@ -501,7 +501,7 @@ pub unsafe extern "C" fn parse_file_metadata_ffi_u128(
 ///
 /// Failure to uphold these conditions will result in undefined behavior, such
 /// as double-freeing memory or use-after-free vulnerabilities.
-fn free_parsed_manifest_ffi_internal<H>(
+fn free_parsed_manifest_internal<H>(
     ptr: *mut FFIParsedManifestArray<H>
 ) {
     unsafe {
@@ -530,38 +530,38 @@ fn free_parsed_manifest_ffi_internal<H>(
     }
 }
 
-/// Frees the memory allocated by `parse_file_metadata_ffi_u64`.
+/// Frees the memory allocated by `parse_file_metadata_u64`.
 ///
 /// # Safety
 /// The `ptr` must be a non-null pointer returned from a successful
 /// call to `parse_file_metadata_ffi_u64`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_parsed_manifest_ffi_u64(
+pub unsafe extern "C" fn free_parsed_manifest_u64(
     ptr: *mut FFIParsedManifestArrayU64
 ) {
     if ptr.is_null() {
         return;
     }
 
-    free_parsed_manifest_ffi_internal::<u64>(
+    free_parsed_manifest_internal::<u64>(
         ptr
     );
 }
 
-/// Frees the memory allocated by `parse_file_metadata_ffi_u128`.
+/// Frees the memory allocated by `parse_file_metadata_u128`.
 ///
 /// # Safety
 /// The `ptr` must be a non-null pointer returned from a successful
-/// call to `parse_file_metadata_ffi_u128`.
+/// call to `parse_file_metadata_u128`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn free_parsed_manifest_ffi_u128(
+pub unsafe extern "C" fn free_parsed_manifest_u128(
     ptr: *mut FFIParsedManifestArrayU128
 ) {
     if ptr.is_null() {
         return;
     }
 
-    free_parsed_manifest_ffi_internal::<u128>(
+    free_parsed_manifest_internal::<u128>(
         ptr
     );
 }
