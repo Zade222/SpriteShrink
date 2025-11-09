@@ -15,7 +15,7 @@ use crate::ffi::ffi_error_handling::{
 };
 use crate::ffi::ffi_types::{
     ArchiveBuilderU64, ArchiveBuilderU128,
-    FFIArchiveData, FFIChunkDataArray,
+    BuilderCallbacks, FFIArchiveData, FFIChunkDataArray,
     FFIFileManifestParentU64, FFIFileManifestParentU128,
     FFIProgress
 };
@@ -139,16 +139,7 @@ fn setup_builder_closures<H: 'static>(
         data_len: usize,
         is_flush: bool
     ) -> FFICallbackStatus,
-) -> (
-    impl Fn(&[H]) -> Result<
-        Vec<Vec<u8>>,
-        SpriteShrinkError
-    > + Send + Sync + 'static,
-    impl FnMut(&[u8], bool) -> Result<
-        (),
-        SpriteShrinkError
-    > + Send + Sync + 'static,
-) {
+) -> BuilderCallbacks<H> {
     let user_data_addr = user_data as usize;
 
     let get_chunks_closure = move |
@@ -209,7 +200,10 @@ fn setup_builder_closures<H: 'static>(
 
     };
 
-    (get_chunks_closure, write_data_closure)
+    BuilderCallbacks {
+        get_chunks: Box::new(get_chunks_closure),
+        write_data: Box::new(write_data_closure),
+    }
 }
 
 /// Creates and initializes a new `ArchiveBuilder` for u64 hashes.
@@ -329,8 +323,7 @@ pub unsafe extern "C" fn archive_builder_new_u64(
     .map(FileManifestParent::<u64>::from) // Use the From trait
     .collect();
 
-    let (get_chunks_closure, write_data_closure) =
-    setup_builder_closures::<u64>(
+    let callbacks = setup_builder_closures::<u64>(
         user_data,
         get_chunks_cb,
         free_chunks_cb,
@@ -343,8 +336,8 @@ pub unsafe extern "C" fn archive_builder_new_u64(
         file_count,
         1,
         total_size,
-        get_chunks_closure,
-        write_data_closure
+        callbacks.get_chunks,
+        callbacks.write_data
     );
 
     let builder_trait_object: Box<dyn ArchiveBuilderTrait<u64>> = Box::new(
@@ -477,8 +470,7 @@ pub unsafe extern "C" fn archive_builder_new_u128(
     .map(FileManifestParent::<u128>::from) // Use the From trait
     .collect();
 
-    let (get_chunks_closure, write_data_closure) =
-    setup_builder_closures::<u128>(
+    let callbacks = setup_builder_closures::<u128>(
         user_data,
         get_chunks_cb,
         free_chunks_cb,
@@ -491,8 +483,8 @@ pub unsafe extern "C" fn archive_builder_new_u128(
         file_count,
         2,
         total_size,
-        get_chunks_closure,
-        write_data_closure
+        callbacks.get_chunks,
+        callbacks.write_data
     );
 
     let builder_trait_object: Box<dyn ArchiveBuilderTrait<u128>> = Box::new(

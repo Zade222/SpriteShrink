@@ -20,6 +20,10 @@ use std::{
 
 use libc::c_char;
 
+use crate::lib_error_handling::{
+    SpriteShrinkError
+};
+
 use crate::lib_structs::{
     ChunkLocation, FileManifestParent, SSAChunkMeta
 };
@@ -85,6 +89,59 @@ pub struct ArchiveBuilderU64 { _private: [u8; 0] }
 /// undefined behavior.
 #[repr(C)]
 pub struct ArchiveBuilderU128 { _private: [u8; 0] }
+
+/// A container that holds the two FFI‑level callbacks required by
+/// [`ArchiveBuilder`] when it is used from C.
+///
+/// The archive builder needs to:
+/// 1. Retrieve raw chunk data for a set of hash values supplied by the
+///    builder. This is performed via the `get_chunks` callback.
+/// 2. Write out the compressed archive stream as it is generated. This is
+///    performed via the `write_data` callback.
+///
+/// By boxing the callbacks (`CallbackGetChunks` and `CallbackWriteData`) we hide
+/// the concrete closure types behind trait objects, which makes the struct
+/// FFI‑safe (it contains only heap‑allocated pointers) and easy to pass across
+/// the language boundary.
+///
+/// # Generic parameters
+///
+/// * `H` – The hash type used by the archive (e.g. `u64` or `u128`). It is
+///   forwarded to the `CallbackGetChunks` alias, which expects a slice of `H`.
+///
+/// # Fields
+///
+/// * `get_chunks` – A boxed closure of type `CallbackGetChunks<H>`.
+///   It receives a slice of hashes (`&[H]`) and must return a `Result`
+///   containing a `Vec<Vec<u8>>` (the raw chunk bytes) or a
+///   `SpriteShrinkError` if something goes wrong.
+///
+/// * `write_data` – A boxed closure of type `CallbackWriteData`.
+///   It receives a byte slice to write and a `bool` indicating whether the
+///   caller is requesting a flush. It returns `Result<(), SpriteShrinkError>`
+///   propagating any I/O‑related error.
+pub struct BuilderCallbacks<H> {
+    pub get_chunks: CallbackGetChunks<H>,
+    pub write_data: CallbackWriteData,
+}
+
+/// Type alias for the “get‑chunks” callback used by the FFI layer.
+///
+/// The boxed `dyn Fn` trait object hides the concrete closure type, allowing the
+/// callback to be stored in a struct that is safe to pass across the FFI boundary.
+/// It takes a slice of hash values (`&[H]`) and returns a `Result` containing the
+/// chunk data (`Vec<Vec<u8>>`) or a `SpriteShrinkError`.
+pub type CallbackGetChunks<H> = Box<dyn Fn(&[H]) -> Result<Vec<Vec<u8>>,
+    SpriteShrinkError> + Send + Sync + 'static>;
+
+/// Type alias for the “write‑data” callback used by the FFI layer.
+///
+/// This boxed `dyn FnMut` trait object hides the concrete closure type, allowing the
+/// callback to be stored in a struct that is safe to pass across the FFI boundary.
+/// It takes a slice of bytes to write and a `bool` indicating whether this is a
+/// flush operation, and returns a `Result<(), SpriteShrinkError>`.
+pub type CallbackWriteData = Box<dyn FnMut(&[u8], bool) -> Result<(),
+    SpriteShrinkError> + Send + Sync + 'static>;
 
 /// Represents a buffer containing the final, compressed archive data.
 ///
