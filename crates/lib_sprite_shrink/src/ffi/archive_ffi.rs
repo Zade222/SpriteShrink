@@ -15,8 +15,8 @@ use crate::ffi::ffi_error_handling::{
 };
 use crate::ffi::ffi_types::{
     ArchiveBuilderU64, ArchiveBuilderU128,
+    ArchiveBuilderParamU64, ArchiveBuilderParamU128,
     BuilderCallbacks, FFIArchiveData, FFIChunkDataArray,
-    FFIFileManifestParentU64, FFIFileManifestParentU128,
     FFIProgress
 };
 use crate::lib_error_handling::{
@@ -219,25 +219,8 @@ fn setup_builder_closures<H: 'static>(
 ///
 /// # Arguments
 ///
-/// * `manifest_array_ptr`: A pointer to the start of an array of
-///   `FFIFileManifestParentU64` structs, representing the metadata for all
-///   files to be included in the archive.
-/// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
-/// * `sorted_hashes_array_ptr`: A pointer to a sorted array of all unique
-///   `u64` chunk hashes that make up the data for all files.
-/// * `sorted_hashes_len`: The number of elements in the
-///   `sorted_hashes_array_ptr` array.
-/// * `file_count`: The total number of files being added to the archive.
-/// * `total_size`: The total combined size in bytes of all unique,
-///   uncompressed chunks.
-/// * `user_data`: An opaque `void` pointer that will be passed back to the C
-///   callbacks, allowing the C side to maintain state.
-/// * `get_chunks_cb`: A C function pointer that the builder will call to
-///   request the raw data for a given set of hashes.
-/// * `free_chunks_cb` – callback that frees the array returned by
-///   `get_chunks_cb`
-/// * `write_comp_data_cb`: A C function pointer that the builder will call to
-///   write out the compressed archive data as it is generated.
+/// * `params`: Struct for all the necessary data for initializing the archive
+///   creation process.
 /// * `out_ptr`: A pointer to a `*mut ArchiveBuilderU64` where the handle to
 ///   the newly created builder will be written.
 ///
@@ -275,46 +258,24 @@ fn setup_builder_closures<H: 'static>(
 ///   will result in a memory leak.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_new_u64(
-    manifest_array_ptr: *const FFIFileManifestParentU64,
-    manifest_len: usize,
-    sorted_hashes_array_ptr: *const u64,
-    sorted_hashes_len: usize,
-    file_count: u32,
-    total_size: u64,
-    user_data: *mut c_void,
-    get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        hashes: *const u64,
-        hashes_len: usize,
-        out_chunks: *mut FFIChunkDataArray,
-    ) -> FFICallbackStatus,
-    free_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        chunks: FFIChunkDataArray
-    ),
-    write_comp_data_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        data: *const u8,
-        data_len: usize,
-        is_flush: bool
-    ) -> FFICallbackStatus,
+    params: *const ArchiveBuilderParamU64,
     out_ptr: *mut *mut ArchiveBuilderU64,
 ) -> FFIResult {
-    if manifest_array_ptr.is_null() ||
-        sorted_hashes_array_ptr.is_null() ||
-        out_ptr.is_null() {
-            return FFIResult::NullArgument;
+    if params.is_null() || out_ptr.is_null() {
+        return FFIResult::NullArgument;
     }
 
+    let builder_params = unsafe{&*params};
+
     let sorted_hashes = unsafe{slice::from_raw_parts(
-        sorted_hashes_array_ptr,
-        sorted_hashes_len
+        builder_params.sorted_hashes_array_ptr,
+        builder_params.sorted_hashes_len
     )};
 
     let ffi_manifests = unsafe {
         slice::from_raw_parts(
-            manifest_array_ptr,
-            manifest_len
+            builder_params.manifest_array_ptr,
+            builder_params.manifest_len
         )
     };
 
@@ -324,18 +285,18 @@ pub unsafe extern "C" fn archive_builder_new_u64(
     .collect();
 
     let callbacks = setup_builder_closures::<u64>(
-        user_data,
-        get_chunks_cb,
-        free_chunks_cb,
-        write_comp_data_cb
+        builder_params.user_data,
+        builder_params.get_chunks_cb,
+        builder_params.free_chunks_cb,
+        builder_params.write_comp_data_cb
     );
 
     let builder = ArchiveBuilder::new(
         ser_file_manifest,
         sorted_hashes,
-        file_count,
+        builder_params.file_count,
         1,
-        total_size,
+        builder_params.total_size,
         callbacks.get_chunks,
         callbacks.write_data
     );
@@ -366,25 +327,8 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 ///
 /// # Arguments
 ///
-/// * `manifest_array_ptr`: A pointer to the start of an array of
-///   `FFIFileManifestParentU128` structs, representing the metadata for all
-///   files to be included in the archive.
-/// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
-/// * `sorted_hashes_array_ptr`: A pointer to a sorted array of all unique
-///   `u128` chunk hashes that make up the data for all files.
-/// * `sorted_hashes_len`: The number of elements in the
-///   `sorted_hashes_array_ptr` array.
-/// * `file_count`: The total number of files being added to the archive.
-/// * `total_size`: The total combined size in bytes of all unique,
-///   uncompressed chunks.
-/// * `user_data`: An opaque `void` pointer that will be passed back to the C
-///   callbacks, allowing the C side to maintain state.
-/// * `get_chunks_cb`: A C function pointer that the builder will call to
-///   request the raw data for a given set of hashes.
-/// * `free_chunks_cb` – callback that frees the array returned by
-///   `get_chunks_cb`
-/// * `write_comp_data_cb`: A C function pointer that the builder will call to
-///   write out the compressed archive data as it is generated.
+/// * `params`: Struct for all the necessary data for initializing the archive
+///   creation process.
 /// * `out_ptr`: A pointer to a `*mut ArchiveBuilderU128` where the handle to
 ///   the newly created builder will be written.
 ///
@@ -422,46 +366,24 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 ///   will result in a memory leak.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_new_u128(
-    manifest_array_ptr: *const FFIFileManifestParentU128,
-    manifest_len: usize,
-    sorted_hashes_array_ptr: *const u128,
-    sorted_hashes_len: usize,
-    file_count: u32,
-    total_size: u64,
-    user_data: *mut c_void,
-    get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        hashes: *const u128,
-        hashes_len: usize,
-        out_chunks: *mut FFIChunkDataArray,
-    ) -> FFICallbackStatus,
-    free_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        chunks: FFIChunkDataArray
-    ),
-    write_comp_data_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        data: *const u8,
-        data_len: usize,
-        is_flush: bool
-    ) -> FFICallbackStatus,
+    params: *const ArchiveBuilderParamU128,
     out_ptr: *mut *mut ArchiveBuilderU128,
 ) -> FFIResult {
-    if manifest_array_ptr.is_null() ||
-        sorted_hashes_array_ptr.is_null() ||
-        out_ptr.is_null() {
-            return FFIResult::NullArgument;
+    if params.is_null() || out_ptr.is_null() {
+        return FFIResult::NullArgument;
     }
 
+    let builder_params = unsafe{&*params};
+
     let sorted_hashes = unsafe{slice::from_raw_parts(
-        sorted_hashes_array_ptr,
-        sorted_hashes_len
+        builder_params.sorted_hashes_array_ptr,
+        builder_params.sorted_hashes_len
     )};
 
     let ffi_manifests = unsafe {
         slice::from_raw_parts(
-            manifest_array_ptr,
-            manifest_len
+            builder_params.manifest_array_ptr,
+            builder_params.manifest_len
         )
     };
 
@@ -471,18 +393,18 @@ pub unsafe extern "C" fn archive_builder_new_u128(
     .collect();
 
     let callbacks = setup_builder_closures::<u128>(
-        user_data,
-        get_chunks_cb,
-        free_chunks_cb,
-        write_comp_data_cb
+        builder_params.user_data,
+        builder_params.get_chunks_cb,
+        builder_params.free_chunks_cb,
+        builder_params.write_comp_data_cb
     );
 
     let builder = ArchiveBuilder::new(
         ser_file_manifest,
         sorted_hashes,
-        file_count,
+        builder_params.file_count,
         2,
-        total_size,
+        builder_params.total_size,
         callbacks.get_chunks,
         callbacks.write_data
     );

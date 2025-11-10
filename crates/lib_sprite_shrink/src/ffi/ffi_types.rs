@@ -94,6 +94,130 @@ pub struct ArchiveBuilderU64 { _private: [u8; 0] }
 #[repr(C)]
 pub struct ArchiveBuilderU128 { _private: [u8; 0] }
 
+/// Bundles all parameters for creating a new `ArchiveBuilder` with `u64`
+/// hashes.
+///
+/// This struct is passed by pointer to `archive_builder_new_u64` to provide
+/// all the necessary data for initializing the archive creation process,
+/// including file metadata, chunk hashes, and C callbacks for data handling.
+///
+/// # Fields
+///
+/// * `manifest_array_ptr`: Pointer to an array of [`FFIFileManifestParentU64`]
+///   struct entries.
+/// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
+/// * `sorted_hashes_array_ptr`: Pointer to a sorted array of all unique `u64`
+///   chunk hashes.
+/// * `sorted_hashes_len`: The number of elements in the
+///   `sorted_hashes_array_ptr` array.
+/// * `file_count`: The total number of files being added to the archive.
+/// * `total_size`: The total combined size, in bytes, of all unique
+///   uncompressed chunks.
+/// * `user_data`: An opaque `void` pointer passed back to the C callbacks,
+///   allowing the C side to maintain state.
+/// * `get_chunks_cb`: A C function pointer that the builder calls to request
+///   raw data for a set of hashes.
+/// * `free_chunks_cb`: A C function pointer to free the data array returned by
+///   `get_chunks_cb`.
+/// * `write_comp_data_cb`: A C function pointer that the builder calls to
+///   write out the compressed archive data.
+///
+/// # Safety
+///
+/// The C caller is responsible for ensuring that all pointers within this struct
+/// are non-null and point to valid memory for the duration of the
+/// `archive_builder_new_u64` call. The `user_data` and callback function
+/// pointers must remain valid for the entire lifetime of the `ArchiveBuilder`
+/// that is created.
+#[repr(C)]
+pub struct ArchiveBuilderParamU64 {
+    pub manifest_array_ptr: *const FFIFileManifestParentU64,
+    pub manifest_len: usize,
+    pub sorted_hashes_array_ptr: *const u64,
+    pub sorted_hashes_len: usize,
+    pub file_count: u32,
+    pub total_size: u64,
+    pub user_data: *mut c_void,
+    pub get_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        hashes: *const u64,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+    pub free_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        chunks: FFIChunkDataArray
+    ),
+    pub write_comp_data_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        data: *const u8,
+        data_len: usize,
+        is_flush: bool
+    ) -> FFICallbackStatus,
+}
+
+/// Bundles all parameters for creating a new `ArchiveBuilder` with `u128`
+/// hashes.
+///
+/// This struct is passed by pointer to `archive_builder_new_u128` to provide
+/// all the necessary data for initializing the archive creation process,
+/// including file metadata, chunk hashes, and C callbacks for data handling.
+///
+/// # Fields
+///
+/// * `manifest_array_ptr`: Pointer to an array of
+///   [`FFIFileManifestParentU128`]  structs.
+/// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
+/// * `sorted_hashes_array_ptr`: Pointer to a sorted array of all unique `u128`
+///   chunk hashes.
+/// * `sorted_hashes_len`: The number of elements in the
+///   `sorted_hashes_array_ptr` array.
+/// * `file_count`: The total number of files being added to the archive.
+/// * `total_size`: The total combined size, in bytes, of all unique
+///   uncompressed chunks.
+/// * `user_data`: An opaque `void` pointer passed back to the C callbacks,
+///   allowing the C side to maintain state.
+/// * `get_chunks_cb`: A C function pointer that the builder calls to request
+///   raw data for a set of hashes.
+/// * `free_chunks_cb`: A C function pointer to free the data array returned by
+///   `get_chunks_cb`.
+/// * `write_comp_data_cb`: A C function pointer that the builder calls to
+///   write out the compressed archive data.
+///
+/// # Safety
+///
+/// The C caller is responsible for ensuring that all pointers within this struct
+/// are non-null and point to valid memory for the duration of the
+/// `archive_builder_new_u128` call. The `user_data` and callback function
+/// pointers must remain valid for the entire lifetime of the `ArchiveBuilder`
+/// that is created.
+#[repr(C)]
+pub struct ArchiveBuilderParamU128 {
+    pub manifest_array_ptr: *const FFIFileManifestParentU128,
+    pub manifest_len: usize,
+    pub sorted_hashes_array_ptr: *const u128,
+    pub sorted_hashes_len: usize,
+    pub file_count: u32,
+    pub total_size: u64,
+    pub user_data: *mut c_void,
+    pub get_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        hashes: *const u128,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+    pub free_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        chunks: FFIChunkDataArray
+    ),
+    pub write_comp_data_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        data: *const u8,
+        data_len: usize,
+        is_flush: bool
+    ) -> FFICallbackStatus,
+}
+
 /// A container that holds the two FFI‑level callbacks required by
 /// [`ArchiveBuilder`] when it is used from C.
 ///
