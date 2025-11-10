@@ -20,6 +20,10 @@ use std::{
 
 use libc::c_char;
 
+use crate::ffi::ffi_error_handling::{
+    FFICallbackStatus
+};
+
 use crate::lib_error_handling::{
     SpriteShrinkError
 };
@@ -1316,26 +1320,74 @@ pub struct FFIVeriHashesEntry {
 #[derive(Clone, Copy)]
 pub struct ThreadSafeUserData(pub *mut c_void);
 
-// This unsafe implementation marks `ThreadSafeUserData` as `Send`, allowing it
-// to be transferred across thread boundaries.
-//
-// # Safety
-//
-// This is a contract with the Rust compiler. The C caller MUST ensure that
-// the underlying `*mut c_void` pointer is safe to send to another thread.
-// This typically means the data it points to is either immutable or managed
-// by thread-safe mechanisms (like mutexes) on the C side.
+/// This unsafe implementation marks `ThreadSafeUserData` as `Send`, allowing it
+/// to be transferred across thread boundaries.
+///
+/// # Safety
+///
+/// This is a contract with the Rust compiler. The C caller MUST ensure that
+/// the underlying `*mut c_void` pointer is safe to send to another thread.
+/// This typically means the data it points to is either immutable or managed
+/// by thread-safe mechanisms (like mutexes) on the C side.
 unsafe impl Send for ThreadSafeUserData {}
 
-// This unsafe implementation marks `ThreadSafeUserData` as `Sync`, allowing it
-// to be accessed from multiple threads simultaneously (via a shared reference).
-//
-// # Safety
-//
-// This is a contract with the Rust compiler. The C caller MUST ensure that
-// the underlying `*mut c_void` pointer is safe to be accessed concurrently.
-// This means the data it points to must be protected against data races.
-// For example, the C code might use its own mutex to protect the data
-// pointed to by this `void` pointer. Failure to ensure this will result in
-// undefined behavior.
+/// This unsafe implementation marks `ThreadSafeUserData` as `Sync`, allowing it
+/// to be accessed from multiple threads simultaneously (via a shared reference).
+///
+/// # Safety
+///
+/// This is a contract with the Rust compiler. The C caller MUST ensure that
+/// the underlying `*mut c_void` pointer is safe to be accessed concurrently.
+/// This means the data it points to must be protected against data races.
+/// For example, the C code might use its own mutex to protect the data
+/// pointed to by this `void` pointer. Failure to ensure this will result in
+/// undefined behavior.
 unsafe impl Sync for ThreadSafeUserData {}
+
+/// A Rust-internal struct for holding the arguments for the `test_compression`
+/// logic.
+///
+/// This struct is not FFI-safe and is only used as a helper on the Rust side
+/// to bundle the many parameters that are passed from the public
+/// `test_compression_*` FFI functions to the internal implementation. It is
+/// constructed in Rust and never crosses the FFI boundary.
+///
+/// # Fields
+///
+/// * `total_data_size`: The total combined size in bytes of all unique
+///   chunks.
+/// * `sorted_hashes_array_ptr`: Pointer to a contiguous array of sorted hash values.
+/// * `sorted_hashes_len`: Number of hash entries in the
+///   `sorted_hashes_array_ptr` array.
+/// * `worker_count`: The number of threads to use for parallel compression.
+/// * `dictionary_size`: Desired size (in bytes) of the temporary dictionary.
+/// * `compression_level`: The Zstandard compression level to be used by the
+///   worker threads. When testing a maximum value of 7 is used.
+/// * `out_size`: Pointer to a `u64` where the estimated compressed size will
+///   be stored on success.
+/// * `user_data`: Opaque user‑supplied context that will be passed back to
+///   the `get_chunks_cb` callback.
+/// * `get_chunks_cb`: A C-style callback function pointer to retrieve raw
+///   chunk data.
+///   The callback receives:
+///   - `user_data`: the opaque pointer supplied above,
+///   - `hashes`: pointer to the requested hash slice,
+///   - `hashes_len`: length of that slice,
+///   - `out_chunks`: pointer to an `FFIChunkDataArray` that the callback must
+///     fill
+pub struct TestCompressionArgs<H> {
+    pub total_data_size: u64,
+    pub sorted_hashes_array_ptr: *const H,
+    pub sorted_hashes_len: usize,
+    pub worker_count: usize,
+    pub dictionary_size: usize,
+    pub compression_level: i32,
+    pub out_size: *mut u64,
+    pub user_data: *mut c_void,
+    pub get_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        hashes: *const H,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+}

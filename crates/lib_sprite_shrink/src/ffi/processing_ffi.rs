@@ -26,6 +26,7 @@ use crate::ffi::ffi_types::{
     FFIFileManifestParentU64, FFIFileManifestParentU128,
     FFIHashedChunkData, FFIProcessedFileData,
     FFISeekChunkInfo, FFISeekInfoArray, FFISSAChunkMeta,
+    TestCompressionArgs
 };
 use crate::lib_error_handling::{
     IsCancelled, SpriteShrinkError
@@ -789,30 +790,10 @@ pub unsafe extern "C" fn verify_single_file_u128(
 ///
 /// # Arguments
 ///
-/// * `total_data_size`: The total combined size in bytes of all unique,
-///   uncompressed chunks.
-/// * `sorted_hashes_array_ptr`: A pointer to a sorted array of all unique
-///   chunk hashes.
-/// * `sorted_hashes_len`: The number of elements in the
-///   `sorted_hashes_array_ptr`.
-/// * `worker_count`: The number of threads to use for the parallel compression
-///   test.
-/// * `dictionary_size`: The target size in bytes for the temporary dictionary.
-/// * `compression_level`: The Zstandard compression level to be used by the
-///   worker threads. When testing a maximum value of 7 is used.
-/// * `out_size`: A pointer to a `u64` where the estimated compressed size in
-///   bytes will be written on success.
-/// * `user_data`: An opaque `void` pointer that will be passed back to the
-///   `get_chunks_cb` callback.
-/// * `get_chunks_cb`: C callback that receives the `user_data` pointer,
-///   a slice of hash values (`hashes` & `hashes_len`) and writes an
-///   `FFIChunkDataArray` into the supplied `out_chunks` argument.
-///   The C side must allocate an `FFIChunkDataArray` whose `ptr` field
-///   points to an array of `FFIVecBytes`.  Rust then converts this
-///   array to `Vec<Vec<u8>>`, takes ownership of each `FFIVecBytes`,
-///   and finally frees the original `FFIChunkDataArray`.  Consequently
-///   the caller must **not** free any part of the array after the call
-///   returns.
+/// * `args`: A `TestCompressionArgs` struct containing all the necessary
+///   parameters, pointers, and callbacks provided by the public FFI functions.
+///   See the documentation for `TestCompressionArgs` for details on each
+///   field.
 ///
 /// # Returns
 ///
@@ -831,20 +812,7 @@ pub unsafe extern "C" fn verify_single_file_u128(
 /// - The `get_chunks_cb` function pointer is valid and points to a function
 ///   with the correct signature.
 fn test_compression_internal<H>(
-    total_data_size: u64,
-    sorted_hashes_array_ptr: *const H,
-    sorted_hashes_len: usize,
-    worker_count: usize,
-    dictionary_size: usize,
-    compression_level: i32,
-    out_size: *mut u64,
-    user_data: *mut c_void,
-    get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        hashes: *const H,
-        hashes_len: usize,
-        out_chunks: *mut FFIChunkDataArray,
-    ) -> FFICallbackStatus,
+    args: TestCompressionArgs<H>
 ) -> FFIResult
 where
     H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
@@ -855,17 +823,17 @@ where
         /*Prepare data_store, which is the second parameter of the
         original test_compression function, from C input.*/
         slice::from_raw_parts(
-            sorted_hashes_array_ptr,
-            sorted_hashes_len
+            args.sorted_hashes_array_ptr,
+            args.sorted_hashes_len
         )
     };
 
-    let user_data_addr = user_data as usize;
+    let user_data_addr = args.user_data as usize;
 
     let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
         let mut ffi_chunks_array = FFIChunkDataArray { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
         let status = unsafe {
-            get_chunks_cb(
+            (args.get_chunks_cb)(
                 user_data_addr as *mut c_void,
                 hashes.as_ptr(),
                 hashes.len(),
@@ -892,15 +860,15 @@ where
     //Run test compression with received and converted data.
     match test_compression(
         sorted_hashes,
-        total_data_size,
-        worker_count,
-        dictionary_size,
-        compression_level,
+        args.total_data_size,
+        args.worker_count,
+        args.dictionary_size,
+        args.compression_level,
         get_chunks_closure
     ) {
         Ok(compressed_size) => {
             unsafe {
-                *out_size = compressed_size as u64;
+                *args.out_size = compressed_size as u64;
             }
 
             FFIResult::Ok
@@ -941,7 +909,7 @@ pub unsafe extern "C" fn test_compression_u64(
             return FFIResult::NullArgument;
     };
 
-    test_compression_internal::<u64>(
+    let args = TestCompressionArgs::<u64> {
         total_data_size,
         sorted_hashes_array_ptr,
         sorted_hashes_len,
@@ -951,6 +919,10 @@ pub unsafe extern "C" fn test_compression_u64(
         out_size,
         user_data,
         get_chunks_cb
+    };
+
+    test_compression_internal::<u64>(
+        args
     )
 }
 
@@ -985,7 +957,7 @@ pub unsafe extern "C" fn test_compression_u128(
             return FFIResult::NullArgument;
     };
 
-    test_compression_internal::<u128>(
+    let args = TestCompressionArgs::<u128> {
         total_data_size,
         sorted_hashes_array_ptr,
         sorted_hashes_len,
@@ -995,6 +967,10 @@ pub unsafe extern "C" fn test_compression_u128(
         out_size,
         user_data,
         get_chunks_cb
+    };
+
+    test_compression_internal::<u128>(
+        args
     )
 }
 
