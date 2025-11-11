@@ -271,6 +271,43 @@ pub type CallbackGetChunks<H> = Box<dyn Fn(&[H]) -> Result<Vec<Vec<u8>>,
 pub type CallbackWriteData = Box<dyn FnMut(&[u8], bool) -> Result<(),
     SpriteShrinkError> + Send + Sync + 'static>;
 
+/// Arguments used by the `create_file_manifest_and_chunks_u64`
+/// and `create_file_manifest_and_chunks_u128`FFI functions.
+///
+/// This struct is a plain‑old‑data (POD) container that can be safely passed
+/// across the FFI boundary. It bundles the raw pointers and lengths required
+/// to construct a file manifest together with the list of chunk descriptors
+/// supplied by the caller.
+///
+/// # Fields
+///
+/// * `file_name_ptr`: Pointer to a null‑terminated C string (`*const c_char`)
+///   containing the file name. The caller must guarantee that the string is
+///   valid for the lifetime of the call.
+/// * `file_data_array_ptr`: Pointer to the start of the file’s raw byte data
+///   (`*const u8`). The slice represented by this pointer must be at least
+///   `file_data_len` bytes long.
+/// * `file_data_len`: Length, in bytes, of the data slice pointed to by
+///   `file_data_array_ptr`. Must be exactly the size of the file’s contents.
+/// * `chunks_array_ptr`: Pointer to an array of `FFIChunk` structs that
+///   describe the individual chunks (hash, offset, length) belonging to the
+///   file.
+/// * `chunks_len`: Number of `FFIChunk` entries in the `chunks_array_ptr`
+///   array.
+///
+/// The struct does not own any memory; ownership is transferred to the
+/// internal Rust implementation when the arguments are dereferenced. After
+/// the call, the caller is responsible for freeing the returned
+/// `FFIFileManifestChunksU*` object via the matching
+/// `free_file_manifest_and_chunks_*` function.
+pub struct CreateFileManifestAndChunksArgs{
+    pub file_name_ptr: *const c_char,
+    pub file_data_array_ptr: *const u8,
+    pub file_data_len: usize,
+    pub chunks_array_ptr: *const FFIChunk,
+    pub chunks_len: usize,
+}
+
 /// Represents a buffer containing the final, compressed archive data.
 ///
 /// This struct is returned by a successful build operation (e.g., from

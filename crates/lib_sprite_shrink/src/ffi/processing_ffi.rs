@@ -19,7 +19,7 @@ use crate::ffi::ffi_error_handling::{
     FFICallbackStatus, FFIResult
 };
 use crate::ffi::ffi_types::{
-    FFIChunk, FFIChunkDataArray,
+    CreateFileManifestAndChunksArgs, FFIChunk, FFIChunkDataArray,
     FFIFileManifestChunks,
     FFIFileManifestChunksU64, FFIFileManifestChunksU128,
     FFIFileData, FFIFileManifestParent,
@@ -201,7 +201,8 @@ where
         FFIResult::Ok
 }
 
-/// Creates a file manifest and a list of data chunks via an FFI‑safe interface.
+/// Creates a file manifest and a list of data chunks via an FFI‑safe interface
+/// for 64‑bit hash keys.
 ///
 /// The function parses the supplied file name, data slice, and chunk
 /// descriptors and produces an `FFIFileManifestChunksU64` that the C
@@ -211,20 +212,16 @@ where
 ///
 /// # Arguments
 ///
-/// * `file_name_ptr` – pointer to a null‑terminated C string that
-///   contains the file name.
-/// * `file_data_array_ptr` – pointer to the raw file data.
-/// * `file_data_len` – length of `file_data_array_ptr` in bytes.
-/// * `chunks_array_ptr` – pointer to an array of `FFIChunk` structs
-///   describing the file’s chunk metadata.
-/// * `chunks_len` – number of elements in `chunks_array_ptr`
-/// * `out_ptr` – non‑null pointer to a mutable `*mut
+/// * `args`: A POD container that bundles a C‑string file name, a raw data
+///   slice, and an array of `FFIChunk` descriptors  and their lengths)
+/// * `out_ptr`: non‑null pointer to a mutable `*mut
 ///   FFIFileManifestChunksU64` where the result will be stored.
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` – `*out_ptr` now points to a valid `FFIFileManifestChunksU64`
-/// * `FFIResult::NullArgument` – any of the pointers above were `NULL`
+/// * `FFIResult::Ok` - `*out_ptr` now points to a valid
+///   `FFIFileManifestChunksU64`
+/// * `FFIResult::NullArgument` - any of the pointers above were `NULL`
 ///
 /// # Safety
 ///
@@ -237,26 +234,29 @@ where
 ///   `free_file_manifest_and_chunks_u64` to avoid leaks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_file_manifest_and_chunks_u64(
-    file_name_ptr: *const c_char,
-    file_data_array_ptr: *const u8,
-    file_data_len: usize,
-    chunks_array_ptr: *const FFIChunk,
-    chunks_len: usize,
+    args: *const CreateFileManifestAndChunksArgs,
     out_ptr: *mut *mut FFIFileManifestChunksU64
 ) -> FFIResult {
-    if file_name_ptr.is_null() ||
-        file_data_array_ptr.is_null() ||
-        chunks_array_ptr.is_null() ||
+    if args.is_null() ||
         out_ptr.is_null() {
             return FFIResult::NullArgument;
     };
 
+    let args_int = unsafe{&*args};
+
+    if args_int.file_name_ptr.is_null() ||
+        args_int.file_data_array_ptr.is_null() ||
+        args_int.chunks_array_ptr.is_null() {
+            return FFIResult::NullArgument;
+    }
+
+
     create_file_manifest_and_chunks_internal::<u64>(
-        file_name_ptr,
-        file_data_array_ptr,
-        file_data_len,
-        chunks_array_ptr,
-        chunks_len,
+        args_int.file_name_ptr,
+        args_int.file_data_array_ptr,
+        args_int.file_data_len,
+        args_int.chunks_array_ptr,
+        args_int.chunks_len,
         out_ptr
     )
 }
@@ -265,55 +265,56 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u64(
 /// for 128‑bit hash keys.
 ///
 /// The arguments and semantics are identical to
-/// `create_file_manifest_and_chunks_u128`, but the resulting struct is
+/// `create_file_manifest_and_chunks_u64`, but the resulting struct is
 /// `FFIFileManifestChunksU128`.  The caller must free the returned value
 /// with `free_file_manifest_and_chunks_u128`.
 ///
 /// # Arguments
 ///
-/// * `file_name_ptr` – pointer to a null‑terminated C string that
-///   contains the file name.
-/// * `file_data_array_ptr` – pointer to the raw file data.
-/// * `file_data_len` – length of `file_data_array_ptr` in bytes.
-/// * `chunks_array_ptr` – pointer to an array of `FFIChunk` structs
-///   describing the file’s chunk metadata.
-/// * `chunks_len` – number of elements in `chunks_array_ptr`
+/// * `args`: A POD container that bundles a C‑string file name, a raw data
+///   slice, and an array of `FFIChunk` descriptors  and their lengths).
 /// * `out_ptr` – non‑null pointer to a mutable `*mut
 ///   FFIFileManifestChunksU128` where the result will be stored.
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` – `*out_ptr` now points to a valid `FFIFileManifestChunksU128`
+/// * `FFIResult::Ok` – `*out_ptr` now points to a valid
+///   `FFIFileManifestChunksU128`
 /// * `FFIResult::NullArgument` – any of the pointers above were `NULL`
 ///
 /// # Safety
 ///
-/// As with the u64 variant:
-/// * All pointers must be non‑null and point to valid memory.
-/// * The returned struct owns all heap‑allocated data; free it with
+/// The caller must guarantee that:
+/// * All pointers refer to valid, readable memory for the stated lengths.
+/// * `out_ptr` is a valid, non‑null pointer that the caller will read after
+///   the call.
+/// * The returned struct and all nested data are allocated on the heap; the
+///   caller is responsible for freeing it with
 ///   `free_file_manifest_and_chunks_u128` to avoid leaks.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn create_file_manifest_and_chunks_u128(
-    file_name_ptr: *const c_char,
-    file_data_array_ptr: *const u8,
-    file_data_len: usize,
-    chunks_array_ptr: *const FFIChunk,
-    chunks_len: usize,
+    args: *const CreateFileManifestAndChunksArgs,
     out_ptr: *mut *mut FFIFileManifestChunksU128
 ) -> FFIResult {
-    if file_name_ptr.is_null() ||
-        file_data_array_ptr.is_null() ||
-        chunks_array_ptr.is_null() ||
+    if args.is_null() ||
         out_ptr.is_null() {
             return FFIResult::NullArgument;
     };
 
+    let args_int = unsafe{&*args};
+
+    if args_int.file_name_ptr.is_null() ||
+        args_int.file_data_array_ptr.is_null() ||
+        args_int.chunks_array_ptr.is_null() {
+            return FFIResult::NullArgument;
+    }
+
     create_file_manifest_and_chunks_internal::<u128>(
-        file_name_ptr,
-        file_data_array_ptr,
-        file_data_len,
-        chunks_array_ptr,
-        chunks_len,
+        args_int.file_name_ptr,
+        args_int.file_data_array_ptr,
+        args_int.file_data_len,
+        args_int.chunks_array_ptr,
+        args_int.chunks_len,
         out_ptr
     )
 }
