@@ -10,6 +10,7 @@ use std::{
     path::Path,
 };
 
+use dashmap::DashMap;
 use redb::{Database, Key, TableDefinition, Value};
 use serde::{Serialize, Deserialize};
 use tracing::{
@@ -18,7 +19,7 @@ use tracing::{
 };
 
 use sprite_shrink::{
-    Hashable, SSAChunkMeta
+    FileManifestParent, Hashable, SSAChunkMeta
 };
 
 /// A message containing a single data chunk and its hash.
@@ -40,7 +41,7 @@ pub struct ChunkMessage<H: Hashable> {
 /// A handle for accessing the application's temporary database.
 ///
 /// This struct encapsulates the shared database connection (`Arc<Database>`)
-/// and the table definition, providing a convenient way to pass database 
+/// and the table definition, providing a convenient way to pass database
 /// access information between different parts of the application.
 ///
 /// # Fields
@@ -55,7 +56,7 @@ pub struct DBInfo<'a, K: Key + 'static, V: Value + 'static>{
 /// A container for all metadata generated after processing a single file.
 ///
 /// This struct holds the complete results from the chunking and hashing stage
-/// for one file, including its verification hash and the metadata for all of 
+/// for one file, including its verification hash and the metadata for all of
 /// its constituent chunks.
 ///
 /// # Fields
@@ -72,6 +73,28 @@ pub struct FileCompleteData<H: Hashable> {
     pub verification_hash: [u8; 64],
     pub chunk_count: u64,
     pub chunk_meta: Vec<SSAChunkMeta<H>>
+}
+
+/// Holds all per‑file metadata that is produced by the chunking stage.
+///
+/// `process_files` returns a `Result<FileData<H>, CliError>`. The function
+///  builds two concurrent hash maps while it processes the input files.
+///
+/// * `file_manifest`: A dashmap that contains FileManifestParents and is used
+///   to describe the structure of each file within the archive.
+///
+/// * `veri_hashes`: maps a *file name* (`String`) to the SHA‑512
+///   verification hash (`[u8; 64]`) of the original file. After the
+///   archive is written the verification step reads this map to ensure the
+///   reconstructed file matches the original data.
+///
+/// Both maps are `DashMap`s, which means they can be written to from many
+/// worker threads without additional synchronization. The struct is generic
+/// over the hash type `H` (must implement `Hashable`) so that any supported
+/// hash algorithm can be used.
+pub struct FileData<H: Hashable>{
+    pub file_manifest: DashMap<String, FileManifestParent<H>>,
+    pub veri_hashes: DashMap<String, [u8; 64]>,
 }
 
 /// Defines cross-platform identifiers for the application.
@@ -97,9 +120,9 @@ pub static APPIDENTIFIER: ProjectIdentifier =  ProjectIdentifier {
 
 /// Represents the user-configurable settings for the SpriteShrink application.
 ///
-/// This struct is automatically serialized to and deserialized from a TOML 
-/// configuration file, allowing users to persist their preferred settings 
-/// across sessions. It holds all parameters related to compression, 
+/// This struct is automatically serialized to and deserialized from a TOML
+/// configuration file, allowing users to persist their preferred settings
+/// across sessions. It holds all parameters related to compression,
 /// performance, and output formatting.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -142,10 +165,10 @@ impl Default for SpriteShrinkConfig {
 /// A resource guard that ensures a temporary file is deleted when it goes out
 /// of scope.
 ///
-/// This struct implements the **RAII** (Resource Acquisition Is 
+/// This struct implements the **RAII** (Resource Acquisition Is
 /// Initialization) pattern. When an instance of `TempFileGuard` is created, it
-/// holds a reference to a temporary file's path. When the guard is dropped 
-/// (i.e., it goes out of scope), its `drop` implementation is automatically 
+/// holds a reference to a temporary file's path. When the guard is dropped
+/// (i.e., it goes out of scope), its `drop` implementation is automatically
 /// called, ensuring the temporary file is cleaned up from the filesystem.
 ///
 /// This is particularly useful for handling temporary data that should not
@@ -178,7 +201,7 @@ impl<'a> TempFileGuard<'a> {
 /// This method is called automatically when the `TempFileGuard` instance
 /// goes out of scope. It attempts to remove the temporary file at the
 /// stored path.
-/// 
+///
 /// /// # Arguments
 ///
 /// * `path`: A reference to the `Path` of the temporary file being managed.
@@ -193,17 +216,17 @@ impl<'a> Drop for TempFileGuard<'a> {
         if self.path.exists() {
             if let Err(e) = remove_file(self.path) {
                 error!(
-                    "Failed to remove temporary file at {:?}: {}", 
-                    self.path, 
+                    "Failed to remove temporary file at {:?}: {}",
+                    self.path,
                     e
                 );
             } else {
                 debug!(
-                    "Successfully removed temporary file: {:?}", 
+                    "Successfully removed temporary file: {:?}",
                     self.path
                 );
             }
-            
+
         }
     }
 }
