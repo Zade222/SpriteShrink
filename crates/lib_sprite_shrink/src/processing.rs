@@ -92,7 +92,7 @@ impl Hashable for u128 {
 /// # Arguments
 ///
 /// * `file_data`: A `FileData` struct with the in-memory file data.
-/// * `window_size`: 
+/// * `window_size`:
 ///
 /// # Returns
 ///
@@ -157,15 +157,15 @@ fn generate_sha_512(data: &[u8]) -> [u8; 64]{
 /// A `Result` which is:
 /// - `Vec<Chunk>` containing all the identified data chunks.
 fn chunk_data(
-    file_data: &FileData, 
-    seed: u64, 
+    file_data: &FileData,
+    seed: u64,
     window_size: u64
 ) -> Vec<Chunk> {
     let chunker = FastCDC::with_level_and_seed(
-        &file_data.file_data, 
-        (window_size/4) as u32, 
-        window_size as u32, 
-        (window_size*4) as u32, 
+        &file_data.file_data,
+        (window_size/4) as u32,
+        window_size as u32,
+        (window_size*4) as u32,
         Normalization::Level1, seed);
 
     chunker.collect()
@@ -198,7 +198,7 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
     let mut chunk_data_list = Vec::with_capacity(chunks.len());
 
     for chunk in chunks {
-        let chunk_data_slice = &file_data[chunk.offset..chunk.offset + 
+        let chunk_data_slice = &file_data[chunk.offset..chunk.offset +
             chunk.length];
         let data_hash = H::from_bytes_with_seed(chunk_data_slice);
 
@@ -227,7 +227,7 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 ///
 /// This function requests each chunk of a file by fetching each of its
 /// data chunks in order, feeding each chunk to a sha-512 hasing algorithm,
-/// and then computing a final verification hash. To optimize performance, 
+/// and then computing a final verification hash. To optimize performance,
 /// it uses a producer-consumer pattern:
 ///
 /// 1.  **Producer Thread**: A dedicated fetcher thread reads chunk hashes and
@@ -247,7 +247,7 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 ///   integrity check.
 /// * `get_chunk_data`: A callback function that takes a slice of chunk hashes
 ///   and each corresponding chunks byte data.
-/// * `progress_cb`: A callback function for reporting the amount of bytes 
+/// * `progress_cb`: A callback function for reporting the amount of bytes
 ///   processed back to the host application.
 ///
 /// # Returns
@@ -255,7 +255,7 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 /// A `Result` which is:
 /// - `Ok(())` if the file is successfully rebuilt and its computed hash
 ///   matches the `veri_hash`.
-/// - `Err(SpriteShrinkError)` if the computed hash does not match, or if a 
+/// - `Err(SpriteShrinkError)` if the computed hash does not match, or if a
 ///   thread panics during execution.
 ///
 /// # Type Parameters
@@ -277,7 +277,7 @@ where
     P: FnMut(u64) + Sync + Send + 'static,
 {
     /*A batch size of 64 provides a good balance between reducing the overhead
-    of the get_chunk_data callback and keeping memory usage low per 
+    of the get_chunk_data callback and keeping memory usage low per
     verification task.*/
     const BATCH_SIZE: usize = 64;
 
@@ -285,7 +285,7 @@ where
     let (to_hash_tx, to_hash_rx) = flume::bounded(4);
 
     /*Puts the list of all hashes for a file in an arc array.*/
-    let all_hashes: Arc<[H]> = fmp.chunk_metadata.iter().map(|meta| 
+    let all_hashes: Arc<[H]> = fmp.chunk_metadata.iter().map(|meta|
         meta.hash.clone()).collect();
 
     /*Encapsulates the get_chunk_data callback to be safely used by multiple
@@ -299,7 +299,7 @@ where
             for batch in hashes_clone.chunks(BATCH_SIZE) {
             match (get_chunk_data_arc)(batch) {
                 Ok(chunk_data_batch) => {
-                    /*If sending fails, the receiver has hung up, so we can 
+                    /*If sending fails, the receiver has hung up, so we can
                     stop.*/
                     if to_hash_tx.send(Ok(chunk_data_batch)).is_err() {
                         break;
@@ -394,12 +394,12 @@ where
 ///
 /// # Safety
 ///
-/// This function is safe because it upholds the contracts of the zstd-sys C 
+/// This function is safe because it upholds the contracts of the zstd-sys C
 /// functions:
 /// 1. `dict_buffer` is allocated with sufficient capacity (`max_dict_size`).
-/// 2. The pointers and lengths for `samples_buffer` and `sample_sizes` are 
+/// 2. The pointers and lengths for `samples_buffer` and `sample_sizes` are
 ///    valid as they are derived directly from Rust-managed Vecs and slices.
-/// 3. All potential errors from the C function are checked with 
+/// 3. All potential errors from the C function are checked with
 ///    `ZDICT_isError`.
 pub fn gen_zstd_opt_dict(
     samples_buffer: &[u8],
@@ -414,20 +414,20 @@ pub fn gen_zstd_opt_dict(
     let mut dict_buffer = Vec::with_capacity(max_dict_size);
 
     /*Set and store the ZDICT parameters to be used by the cover algorithm.
-    Any values marked as default are either not used by 
+    Any values marked as default are either not used by
     ZDICT_optimizeTrainFromBuffer_cover or is the default value that is
     used for the vast majority of applications.*/
-    let z_params = ZDICT_params_t { 
-        compressionLevel: compression_level, 
+    let z_params = ZDICT_params_t {
+        compressionLevel: compression_level,
         notificationLevel: 0, //Default
         dictID: 0 //Default
     };
-    /*params is declared mutable as the function tunes values as it 
+    /*params is declared mutable as the function tunes values as it
     processes.*/
     let mut params = zstd_sys::ZDICT_cover_params_t {
         k:          0, //Dynamically set by below function.
         d:          0, //Dynamically set by below function.
-        steps:      4, 
+        steps:      4,
         nbThreads:  workers as u32,
         splitPoint: 0.0, //Default
         shrinkDict: 0, //Default, not used
@@ -438,11 +438,11 @@ pub fn gen_zstd_opt_dict(
     //Run the C function with the defined paramters and prepared vectors.
     let dict_size = unsafe {
         zstd_sys::ZDICT_optimizeTrainFromBuffer_cover(
-            dict_buffer.as_mut_ptr() as *mut c_void, 
-            max_dict_size, 
-            samples_buffer.as_ptr() as *const c_void, 
-            sample_sizes.as_ptr(), 
-            sample_sizes.len() as u32, 
+            dict_buffer.as_mut_ptr() as *mut c_void,
+            max_dict_size,
+            samples_buffer.as_ptr() as *const c_void,
+            sample_sizes.as_ptr(),
+            sample_sizes.len() as u32,
             &mut params
         )
     };
@@ -456,7 +456,7 @@ pub fn gen_zstd_opt_dict(
         return Err(ProcessingError::DictionaryError(e.to_string()))
     }
 
-    /*Set final length of buffer so that Rust knows how much data is within 
+    /*Set final length of buffer so that Rust knows how much data is within
     it as the unsafe C function from zstd has written to it.*/
     unsafe {
         dict_buffer.set_len(dict_size);
@@ -468,16 +468,16 @@ pub fn gen_zstd_opt_dict(
 
 /// Prepares a vector of data samples for Zstandard dictionary training.
 ///
-/// The zstd compression algorithm can achieve better compression ratios if 
+/// The zstd compression algorithm can achieve better compression ratios if
 /// it's "trained" on a dictionary built from data similar to what it will
 /// compress. This function selects an optimal set of data chunks to be used
 /// as this training data.
 ///
 /// To ensure the dictionary training process is does not cause an overflow,
-/// zstd requires a sample data size of no more than 4 GB. This function 
+/// zstd requires a sample data size of no more than 4 GB. This function
 /// implements two strategies:
 ///
-/// 1.  If the total size of all unique chunks (`total_data_size`) is within 
+/// 1.  If the total size of all unique chunks (`total_data_size`) is within
 ///     the 4 GB limit, all chunks are used.
 /// 2.  If the total size exceeds the limit, a representative subset of chunks
 ///     is selected by stepping through the sorted list of hashes. This ensures
@@ -494,7 +494,7 @@ pub fn gen_zstd_opt_dict(
 ///
 /// * `sorted_hashes`: A sorted slice of all unique chunk hashes to process.
 /// * `total_data_size`: The total combined size in bytes of all unique chunks.
-/// * `get_chunk_data`: A callback function for retrieving a chunk's data by 
+/// * `get_chunk_data`: A callback function for retrieving a chunk's data by
 ///   its hash.
 ///
 /// # Returns
@@ -539,13 +539,13 @@ where
                 }
             })?
             .remove(0);
-            
+
             sample_sizes.push(sample.len());
             samples_buffer.extend_from_slice(sample);
         }
 
         let mut total_sizes: usize = 0;
-        
+
         sample_sizes.iter().for_each(|size|{
             total_sizes += size ;
         });
@@ -567,7 +567,7 @@ where
     let mut current_samples_size: usize = 0;
 
     /*Calculate a step value to sample evenly across all chunks.
-    This ensures we select chunks from the beginning, middle, and 
+    This ensures we select chunks from the beginning, middle, and
     end.*/
     let step = (total_data_size as f64 / MAX_SAMPLES_SIZE as f64).ceil() as u64;
     let step = step.max(1) as usize;
@@ -588,7 +588,7 @@ where
             let sample_size = sample.len();
 
             //Check if adding the next sample would exceed the limit.
-            if current_samples_size + (sample_size) > 
+            if current_samples_size + (sample_size) >
                 MAX_SAMPLES_SIZE {
                     break; //Stop if the size limit is exceeded.
                 }
@@ -624,7 +624,7 @@ where
 /// * `dictionary_size`: The target size for the temporary dictionary.
 /// * `compression_level`: The Zstandard compression level to be used by the
 ///   worker threads. When testing a maximum value of 7 is used.
-/// * `get_chunk_data`: A callback function for retrieving a chunk's data by 
+/// * `get_chunk_data`: A callback function for retrieving a chunk's data by
 ///   its hash.
 ///
 /// # Returns
@@ -647,8 +647,8 @@ where
 {
     //Prepare the samples for dictionary generation.
     let (samples_for_dict, sample_sizes) = build_train_samples(
-        sorted_hashes, 
-        total_data_size, 
+        sorted_hashes,
+        total_data_size,
         dictionary_size,
         &get_chunk_data
     )?;
@@ -661,10 +661,10 @@ where
         ).map_err(|e| ProcessingError::DictionaryError(e.to_string()))?;
 
     //Callback wrapper for getting chunk data from host application.
-    let get_chunk_data_wrapper = move |hashes: &[H]| -> 
+    let get_chunk_data_wrapper = move |hashes: &[H]| ->
         Result<Vec<(H, Vec<u8>)>, E> {
             let ret_chunks = get_chunk_data(hashes)?;
-            let mut chunk_pairs: Vec<(H, Vec<u8>)> = 
+            let mut chunk_pairs: Vec<(H, Vec<u8>)> =
                 Vec::with_capacity(ret_chunks.len());
 
             for (index, chunk) in ret_chunks.iter().enumerate(){
@@ -677,7 +677,7 @@ where
     //Arc(Mutex) for storing the total data size.
     let final_size = Arc::new(Mutex::new(0usize));
 
-    /*Callback that doesn't store but adds the size of the chunk to 
+    /*Callback that doesn't store but adds the size of the chunk to
     final_size.*/
     let write_chunk_data_cb = {
         let final_size_clone = Arc::clone(&final_size);
@@ -690,9 +690,9 @@ where
 
     //Run compression for data for test data.
     let _chunk_index = compress_chunks(
-        worker_count, 
-        &dictionary, 
-        sorted_hashes, 
+        worker_count,
+        &dictionary,
+        sorted_hashes,
         compression_level.max(7),
         get_chunk_data_wrapper,
         write_chunk_data_cb
@@ -700,23 +700,23 @@ where
 
     //Pull the finalize size from the Arc(Mutex)
     let final_size_val = *final_size.lock().unwrap();
-    
+
     Ok((dictionary.len() as usize) + final_size_val)
 }
 
-/// Calculates which chunks and what parts of them are needed to satisfy a 
+/// Calculates which chunks and what parts of them are needed to satisfy a
 /// seek request.
 ///
 /// # Arguments
 /// * `manifest`: The `FileManifestParent` for the specific file being read.
-/// * `seek_offset`: The starting byte offset within the original, 
+/// * `seek_offset`: The starting byte offset within the original,
 ///   uncompressed file.
 /// * `seek_length`: The number of bytes to read from the `seek_offset`.
 ///
 /// # Returns
 /// A `Result` containing a `Vec` where each entry is a tuple of:
 /// - The `hash` of a required chunk.
-/// - The `(start, end)` byte range to copy from that chunk *after* it has 
+/// - The `(start, end)` byte range to copy from that chunk *after* it has
 ///   been decompressed.
 pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     manifest: &FileManifestParent<H>,
@@ -736,7 +736,7 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
             "Seek request is outside the bounds of the original file.".to_string(),
         ).into());
     }
-    
+
     //Prepare the return vector
     let mut required_chunks: Vec<(H, (u64, u64))> = Vec::new();
 
@@ -751,15 +751,15 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
 
         //Check if a chunk is found within the desired range.
         if (chunk_start_offset < seek_end) && (chunk_end_offset > seek_offset){
-            /*Calculate and record the start offset within the chunk of the 
+            /*Calculate and record the start offset within the chunk of the
             desired data.
             If the seek offset is before the chunk offset it will be 0.*/
             let read_start_in_chunk = seek_offset
                 .saturating_sub(chunk_start_offset);
 
-            /*Calculate and record the end offset within the chunk of the 
+            /*Calculate and record the end offset within the chunk of the
             desired data.
-            If the seek offset is after the end of the chunk, it will be the 
+            If the seek offset is after the end of the chunk, it will be the
             data length of the chunk.*/
             let read_end_in_chunk = (seek_end - chunk_start_offset)
                 .min(chunk_meta.length
@@ -771,7 +771,7 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
                 (chunk_meta.hash, (read_start_in_chunk, read_end_in_chunk))
             )
         }
-        /*If a chunk is found beyond the end of the seek request, end the 
+        /*If a chunk is found beyond the end of the seek request, end the
         loop.*/
         else if chunk_start_offset >= seek_end {
             break;
