@@ -1429,6 +1429,115 @@ pub struct FFIVecBytes {
     pub cap: usize,
 }
 
+/// Arguments required to verify a single file using the verify_single_file_u64
+/// function.
+///
+/// This struct is passed by pointer to the `verify_single_file_u64` FFI entry
+/// point. All pointers must be valid for the duration of the call; the parent
+/// application will not take ownership of any of the data.
+///
+/// # Fields
+///
+/// * `file_manifest_parent` – Pointer to an `FFIFileManifestParentU64` that
+///   describes the file manifest (filename and related chunk metadata). Must
+///   be non‑null and point to a properly‑initialized struct that lives at least
+///   until the verification completes.
+/// * `veri_hash_array_ptr` – Pointer to a byte buffer that contains the
+///   expected verification hashes for the file. The buffer must be a length of
+///   64 (64 x 8 bytes).
+/// * `user_data` – Opaque pointer passed unchanged to the callback functions.
+///   It can be used by the caller to store context (e.g., a Rust
+///   `Arc<Mutex<…>>` or a raw pointer to a C struct). The parent application
+///   never dereferences this pointer; it is only handed back to the callbacks.
+/// * `get_chunks_cb` – Callback invoked by the verifier when it needs to
+///   retrieve the raw chunk data for a set of hash values.
+///   It must return an `FFIChunkDataArray` describing a contiguous buffer that
+///   contains the requested chunk data. The returned buffer is owned by the caller
+///   and must remain valid until the next callback invocation.
+///   The callback receives:
+///   - `user_data`: the same pointer passed in this struct,
+///   - `hashes`: pointer to an array of `u128` hash identifiers,
+///   - `hashes_len`: length of the `hashes` array.
+/// * `progress_cb` – Optional progress callback. It is called periodically with the
+///   number of bytes processed so far.
+///
+/// # Safety
+///
+/// This struct is used across the FFI boundary, so all pointers must be correctly
+/// aligned and point to memory that lives long enough. Supplying a dangling or
+/// incorrectly sized pointer results in undefined behaviour. The callbacks themselves
+/// must also obey the FFI safety contract: they may not unwind across the FFI boundary
+/// and must not dereference any pointers other than those provided to them.
+pub struct VerifySingleFileArgsU64{
+    pub file_manifest_parent: *const FFIFileManifestParentU64,
+    pub veri_hash_array_ptr: *const u8,
+    pub user_data: *mut c_void,
+    pub get_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        hashes: *const u64,
+        hashes_len: usize
+    ) -> FFIChunkDataArray,
+    pub progress_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        bytes_processed: u64
+    ),
+}
+
+/// Arguments required to verify a single file using the
+/// verify_single_file_u128 function.
+///
+/// This struct is passed by pointer to the `verify_single_file_u128` FFI entry
+/// point. All pointers must be valid for the duration of the call; the parent
+/// application will not take ownership of any of the data.
+///
+/// # Fields
+///
+/// * `file_manifest_parent` – Pointer to an `FFIFileManifestParentU128` that
+///   describes the file manifest (filename and related chunk metadata). Must
+///   be non‑null and point to a properly‑initialized struct that lives at least
+///   until the verification completes.
+/// * `veri_hash_array_ptr` – Pointer to a byte buffer that contains the
+///   expected verification hashes for the file. The buffer must be a length of
+///   64 (64 x 8 bytes).
+/// * `user_data` – Opaque pointer passed unchanged to the callback functions.
+///   It can be used by the caller to store context (e.g., a Rust
+///   `Arc<Mutex<…>>` or a raw pointer to a C struct). The parent application
+///   never dereferences this pointer; it is only handed back to the callbacks.
+/// * `get_chunks_cb` – Callback invoked by the verifier when it needs to
+///   retrieve the raw chunk data for a set of hash values.
+///   It must return an `FFIChunkDataArray` describing a contiguous buffer that
+///   contains the requested chunk data. The returned buffer is owned by the caller
+///   and must remain valid until the next callback invocation.
+///   The callback receives:
+///   - `user_data`: the same pointer passed in this struct,
+///   - `hashes`: pointer to an array of `u128` hash identifiers,
+///   - `hashes_len`: length of the `hashes` array.
+///
+/// * `progress_cb` – Optional progress callback. It is called periodically with the
+///   number of bytes processed so far.
+///
+/// # Safety
+///
+/// This struct is used across the FFI boundary, so all pointers must be correctly
+/// aligned and point to memory that lives long enough. Supplying a dangling or
+/// incorrectly sized pointer results in undefined behaviour. The callbacks themselves
+/// must also obey the FFI safety contract: they may not unwind across the FFI boundary
+/// and must not dereference any pointers other than those provided to them.
+pub struct VerifySingleFileArgsU128{
+    pub file_manifest_parent: *const FFIFileManifestParentU128,
+    pub veri_hash_array_ptr: *const u8,
+    pub user_data: *mut c_void,
+    pub get_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        hashes: *const u128,
+        hashes_len: usize
+    ) -> FFIChunkDataArray,
+    pub progress_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        bytes_processed: u64
+    ),
+}
+
 /// Represents a single entry in a key-value map of filenames to their
 /// SHA-512 verification hashes.
 ///

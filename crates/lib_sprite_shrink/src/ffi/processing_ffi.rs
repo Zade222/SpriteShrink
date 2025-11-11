@@ -26,6 +26,7 @@ use crate::ffi::ffi_types::{
     FFIFileManifestParentU64, FFIFileManifestParentU128,
     FFIHashedChunkData, FFIProcessedFileData,
     FFISeekChunkInfo, FFISeekInfoArray, FFISSAChunkMeta,
+    VerifySingleFileArgsU64, VerifySingleFileArgsU128,
     TestCompressionArgs
 };
 use crate::lib_error_handling::{
@@ -696,77 +697,105 @@ where
     }
 }
 
-/// Rebuilds a single file from chunks and verifies its integrity via
-/// an FFI-safe interface for u64 hashes.
+/// Verify a single file by reconstructing it from stored chunks and checking its
+/// verification hash.
+///
+/// This is the FFI‑exposed entry point for 64‑bit hash types. It expects a
+/// pointer to a `VerifySingleFileArgsU64` struct that bundles all required
+/// arguments and callbacks. The function is `unsafe` because it dereferences
+/// raw pointers that cross the FFI boundary.
+///
+/// # Parameters
+///
+/// * `args` – Pointer to a fully‑initialised `VerifySingleFileArgsU64`
+///   containing all required arguments.
 ///
 /// # Safety
-/// All pointer arguments must be non-null and valid for their
-/// specified lengths.
+///
+/// * All pointer arguments **must** be non‑null and point to valid memory that
+///   lives at least for the duration of the call.
+/// * The `get_chunks_cb` must not unwind across the FFI boundary and must return a
+///   correctly‑populated `FFIChunkDataArray`.
+///
+/// If any pointer is null, the function returns `FFIResult::NullArgument`.
+///
+/// # Return Value
+///
+/// Returns an `FFIResult` indicating success (`FFIResult::Ok`) or the type of
+/// failure (e.g., `NullArgument`, `InvalidArgument`, or an internal error).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn verify_single_file_u64(
-    file_manifest_parent: *const FFIFileManifestParentU64,
-    veri_hash_array_ptr: *const u8,
-    user_data: *mut c_void,
-    get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        hashes: *const u64,
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
-    progress_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        bytes_processed: u64
-    ),
+    args: *const VerifySingleFileArgsU64,
 ) -> FFIResult {
-     //Immediately check for null pointers to fail early.
-    if file_manifest_parent.is_null()
-        || veri_hash_array_ptr.is_null()
-    {
+    //Immediately check for null pointers to fail early.
+    if args.is_null() {
         return FFIResult::NullArgument;
+    }
+
+    let args_int = unsafe{&*args};
+
+    if args_int.file_manifest_parent.is_null() ||
+        args_int.veri_hash_array_ptr.is_null() {
+            return FFIResult::NullArgument;
     }
 
     verify_single_file_internal::<SpriteShrinkError, u64>(
-        file_manifest_parent,
-        veri_hash_array_ptr,
-        user_data,
-        get_chunks_cb,
-        progress_cb,
+        args_int.file_manifest_parent,
+        args_int.veri_hash_array_ptr,
+        args_int.user_data,
+        args_int.get_chunks_cb,
+        args_int.progress_cb,
     )
 }
 
-/// Rebuilds a single file from chunks and verifies its integrity via
-/// an FFI-safe interface for u128 hashes.
+/// Verify a single file by reconstructing it from stored chunks and checking
+/// its verification hash.
+///
+/// This is the FFI‑exposed entry point for 128‑bit hash types. It expects a
+/// pointer to a `VerifySingleFileArgsU128` struct (see `ffi_types.rs`) that
+/// bundles all required arguments and callbacks. The function is `unsafe`
+/// because it dereferences raw pointers that cross the FFI boundary.
+///
+/// # Parameters
+///
+/// * `args` – Pointer to a fully‑initialised `VerifySingleFileArgsU128`
+///   containing all required arguments.
 ///
 /// # Safety
-/// All pointer arguments must be non-null and valid for their
-/// specified lengths.
+///
+/// * All pointer arguments **must** be non‑null and point to valid memory that
+///   lives at least for the duration of the call.
+/// * The `get_chunks_cb` must not unwind across the FFI boundary and must
+///   return a correctly‑populated `FFIChunkDataArray`.
+///
+/// If any pointer is null, the function returns `FFIResult::NullArgument`.
+///
+/// # Return Value
+///
+/// Returns an `FFIResult` indicating success (`FFIResult::Ok`) or the type of
+/// failure (e.g., `NullArgument`, `InvalidArgument`, or an internal error).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn verify_single_file_u128(
-    file_manifest_parent: *const FFIFileManifestParentU128,
-    veri_hash_array_ptr: *const u8,
-    user_data: *mut c_void,
-    get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        hashes: *const u128,
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
-    progress_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        bytes_processed: u64
-    ),
+    args: *const VerifySingleFileArgsU128,
 ) -> FFIResult {
-     //Immediately check for null pointers to fail early.
-    if file_manifest_parent.is_null()
-        || veri_hash_array_ptr.is_null()
-    {
+    //Immediately check for null pointers to fail early.
+    if args.is_null() {
         return FFIResult::NullArgument;
     }
 
+    let args_int = unsafe{&*args};
+
+    if args_int.file_manifest_parent.is_null() ||
+        args_int.veri_hash_array_ptr.is_null() {
+            return FFIResult::NullArgument;
+    }
+
     verify_single_file_internal::<SpriteShrinkError, u128>(
-        file_manifest_parent,
-        veri_hash_array_ptr,
-        user_data,
-        get_chunks_cb,
-        progress_cb,
+        args_int.file_manifest_parent,
+        args_int.veri_hash_array_ptr,
+        args_int.user_data,
+        args_int.get_chunks_cb,
+        args_int.progress_cb,
     )
 }
 
