@@ -23,7 +23,6 @@ use crate::ffi::ffi_types::{
     FFIFileManifestChunks,
     FFIFileManifestChunksU64, FFIFileManifestChunksU128,
     FFIFileData, FFIFileManifestParent,
-    FFIFileManifestParentU64, FFIFileManifestParentU128,
     FFIHashedChunkData, FFIProcessedFileData,
     FFISeekChunkInfo, FFISeekInfoArray, FFISSAChunkMeta,
     VerifySingleFileArgsU64, VerifySingleFileArgsU128,
