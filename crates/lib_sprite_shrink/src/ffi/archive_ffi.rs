@@ -15,7 +15,7 @@ use crate::ffi::ffi_error_handling::{
 };
 use crate::ffi::ffi_types::{
     ArchiveBuilderU64, ArchiveBuilderU128,
-    ArchiveBuilderParamU64, ArchiveBuilderParamU128,
+    ArchiveBuilderArgsU64, ArchiveBuilderArgsU128,
     BuilderCallbacks, FFIArchiveData, FFIChunkDataArray,
     FFIProgress
 };
@@ -38,15 +38,15 @@ impl FFIBuilderHandle for ArchiveBuilderU128 {
 }
 
 trait ArchiveBuilderTrait<H> {
-        fn set_compression_algorithm(&mut self, algorithm: u16);
-        fn set_compression_level(&mut self, level: i32);
-        fn set_dictionary_size(&mut self, size: u64);
-        fn with_c_progress(&mut self, callback: extern "C" fn(FFIProgress, *mut c_void), user_data: *mut c_void);
-        fn set_worker_threads(&mut self, threads: usize);
-        fn set_optimize_dictionary(&mut self, optimize: bool);
+    fn set_compression_algorithm(&mut self, algorithm: u16);
+    fn set_compression_level(&mut self, level: i32);
+    fn set_dictionary_size(&mut self, size: u64);
+    fn with_c_progress(&mut self, callback: extern "C" fn(FFIProgress, *mut c_void), user_data: *mut c_void);
+    fn set_worker_threads(&mut self, threads: usize);
+    fn set_optimize_dictionary(&mut self, optimize: bool);
 
-        //This method consumes the builder
-        fn build(self: Box<Self>) -> Result<Vec<u8>, SpriteShrinkError>;
+    //This method consumes the builder
+    fn build(self: Box<Self>) -> Result<Vec<u8>, SpriteShrinkError>;
 }
 
 impl<'a, E, H, R, W> ArchiveBuilderTrait<H> for ArchiveBuilder<'a, E, H, R, W>
@@ -219,7 +219,7 @@ fn setup_builder_closures<H: 'static>(
 ///
 /// # Arguments
 ///
-/// * `params`: Struct for all the necessary data for initializing the archive
+/// * `args`: Struct for all the necessary data for initializing the archive
 ///   creation process.
 /// * `out_ptr`: A pointer to a `*mut ArchiveBuilderU64` where the handle to
 ///   the newly created builder will be written.
@@ -235,22 +235,8 @@ fn setup_builder_closures<H: 'static>(
 ///
 /// The caller is responsible for ensuring the following invariants:
 /// * All pointer arguments (`manifest_array_ptr`, `sorted_hashes_array_ptr`,
-///   `out_ptr`) must be non‑null and point to valid memory.
-/// * `manifest_len` and `sorted_hashes_len` must accurately reflect the number
-///   of elements in the respective arrays.
-/// * `user_data` must remain valid for the entire lifetime of the builder.
-/// * The C callback functions `get_chunks_cb` and `write_comp_data_cb` must
-///   be valid and must not store or otherwise out‑live the `user_data`
-///   pointer.
-/// * `get_chunks_cb` **does not transfer ownership** of the returned
-///   `FFICChunkDataArray` to Rust.  The data is owned by the C side and must
-///   be freed by the caller via `free_chunks_cb`.  Rust simply copies the
-///   contents into a `Vec<Vec<u8>>` and then calls `free_chunks_cb` before
-///   returning.  Therefore, the caller must ensure that `free_chunks_cb` is
-///   able to free the memory that was returned.
-/// * `free_chunks_cb` must not free memory that was not allocated by
-///   `get_chunks_cb`; it is called with the exact array that `get_chunks_cb`
-///   returned.
+///   `out_ptr`) in the `args` parameter must be non‑null and point to valid
+///   memory.
 /// * The `ArchiveBuilderU64` handle returned via `out_ptr` is owned by the
 ///   C caller and **must** be passed to either `archive_builder_build_u64`
 ///   to consume it and build the archive, or `archive_builder_free_u64` to
@@ -258,45 +244,50 @@ fn setup_builder_closures<H: 'static>(
 ///   will result in a memory leak.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_new_u64(
-    params: *const ArchiveBuilderParamU64,
+    args: *const ArchiveBuilderArgsU64,
     out_ptr: *mut *mut ArchiveBuilderU64,
 ) -> FFIResult {
-    if params.is_null() || out_ptr.is_null() {
+    if args.is_null() || out_ptr.is_null() {
         return FFIResult::NullArgument;
     }
 
-    let builder_params = unsafe{&*params};
+    let args_int = unsafe{&*args};
+
+    if args_int.manifest_array_ptr.is_null() ||
+        args_int.sorted_hashes_array_ptr.is_null() {
+            return FFIResult::NullArgument;
+    }
 
     let sorted_hashes = unsafe{slice::from_raw_parts(
-        builder_params.sorted_hashes_array_ptr,
-        builder_params.sorted_hashes_len
+        args_int.sorted_hashes_array_ptr,
+        args_int.sorted_hashes_len
     )};
 
     let ffi_manifests = unsafe {
         slice::from_raw_parts(
-            builder_params.manifest_array_ptr,
-            builder_params.manifest_len
+            args_int.manifest_array_ptr,
+            args_int.manifest_len
         )
     };
 
     let ser_file_manifest: Vec<FileManifestParent<u64>> = ffi_manifests
     .iter()
-    .map(FileManifestParent::<u64>::from) // Use the From trait
+    .map(FileManifestParent::<u64>::from)
     .collect();
 
     let callbacks = setup_builder_closures::<u64>(
-        builder_params.user_data,
-        builder_params.get_chunks_cb,
-        builder_params.free_chunks_cb,
-        builder_params.write_comp_data_cb
+        args_int.user_data,
+        args_int.get_chunks_cb,
+        args_int.free_chunks_cb,
+        args_int.write_comp_data_cb
     );
 
     let builder = ArchiveBuilder::new(
         ser_file_manifest,
         sorted_hashes,
-        builder_params.file_count,
+        args_int.file_count,
         1,
-        builder_params.total_size,
+        args_int.total_size,
         callbacks.get_chunks,
         callbacks.write_data
     );
@@ -327,7 +318,7 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 ///
 /// # Arguments
 ///
-/// * `params`: Struct for all the necessary data for initializing the archive
+/// * `args`: Struct for all the necessary data for initializing the archive
 ///   creation process.
 /// * `out_ptr`: A pointer to a `*mut ArchiveBuilderU128` where the handle to
 ///   the newly created builder will be written.
@@ -343,22 +334,8 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 ///
 /// The caller is responsible for ensuring the following invariants:
 /// * All pointer arguments (`manifest_array_ptr`, `sorted_hashes_array_ptr`,
-///   `out_ptr`) must be non‑null and point to valid memory.
-/// * `manifest_len` and `sorted_hashes_len` must accurately reflect the number
-///   of elements in the respective arrays.
-/// * `user_data` must remain valid for the entire lifetime of the builder.
-/// * The C callback functions `get_chunks_cb` and `write_comp_data_cb` must
-///   be valid and must not store or otherwise out‑live the `user_data`
-///   pointer.
-/// * `get_chunks_cb` **does not transfer ownership** of the returned
-///   `FFICChunkDataArray` to Rust.  The data is owned by the C side and must
-///   be freed by the caller via `free_chunks_cb`.  Rust simply copies the
-///   contents into a `Vec<Vec<u8>>` and then calls `free_chunks_cb` before
-///   returning.  Therefore, the caller must ensure that `free_chunks_cb` is
-///   able to free the memory that was returned.
-/// * `free_chunks_cb` must not free memory that was not allocated by
-///   `get_chunks_cb`; it is called with the exact array that `get_chunks_cb`
-///   returned.
+///   `out_ptr`) in the `args` parameter must be non‑null and point to valid
+///   memory.
 /// * The `ArchiveBuilderU128` handle returned via `out_ptr` is owned by the
 ///   C caller and **must** be passed to either `archive_builder_build_u128`
 ///   to consume it and build the archive, or `archive_builder_free_u128` to
@@ -366,45 +343,50 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 ///   will result in a memory leak.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_builder_new_u128(
-    params: *const ArchiveBuilderParamU128,
+    args: *const ArchiveBuilderArgsU128,
     out_ptr: *mut *mut ArchiveBuilderU128,
 ) -> FFIResult {
-    if params.is_null() || out_ptr.is_null() {
+    if args.is_null() || out_ptr.is_null() {
         return FFIResult::NullArgument;
     }
 
-    let builder_params = unsafe{&*params};
+    let args_int = unsafe{&*args};
+
+    if args_int.manifest_array_ptr.is_null() ||
+        args_int.sorted_hashes_array_ptr.is_null() {
+            return FFIResult::NullArgument;
+    }
 
     let sorted_hashes = unsafe{slice::from_raw_parts(
-        builder_params.sorted_hashes_array_ptr,
-        builder_params.sorted_hashes_len
+        args_int.sorted_hashes_array_ptr,
+        args_int.sorted_hashes_len
     )};
 
     let ffi_manifests = unsafe {
         slice::from_raw_parts(
-            builder_params.manifest_array_ptr,
-            builder_params.manifest_len
+            args_int.manifest_array_ptr,
+            args_int.manifest_len
         )
     };
 
     let ser_file_manifest: Vec<FileManifestParent<u128>> = ffi_manifests
     .iter()
-    .map(FileManifestParent::<u128>::from) // Use the From trait
+    .map(FileManifestParent::<u128>::from)
     .collect();
 
     let callbacks = setup_builder_closures::<u128>(
-        builder_params.user_data,
-        builder_params.get_chunks_cb,
-        builder_params.free_chunks_cb,
-        builder_params.write_comp_data_cb
+        args_int.user_data,
+        args_int.get_chunks_cb,
+        args_int.free_chunks_cb,
+        args_int.write_comp_data_cb
     );
 
     let builder = ArchiveBuilder::new(
         ser_file_manifest,
         sorted_hashes,
-        builder_params.file_count,
+        args_int.file_count,
         2,
-        builder_params.total_size,
+        args_int.total_size,
         callbacks.get_chunks,
         callbacks.write_data
     );

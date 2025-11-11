@@ -130,7 +130,7 @@ pub struct ArchiveBuilderU128 { _private: [u8; 0] }
 /// pointers must remain valid for the entire lifetime of the `ArchiveBuilder`
 /// that is created.
 #[repr(C)]
-pub struct ArchiveBuilderParamU64 {
+pub struct ArchiveBuilderArgsU64 {
     pub manifest_array_ptr: *const FFIFileManifestParentU64,
     pub manifest_len: usize,
     pub sorted_hashes_array_ptr: *const u64,
@@ -192,7 +192,7 @@ pub struct ArchiveBuilderParamU64 {
 /// pointers must remain valid for the entire lifetime of the `ArchiveBuilder`
 /// that is created.
 #[repr(C)]
-pub struct ArchiveBuilderParamU128 {
+pub struct ArchiveBuilderArgsU128 {
     pub manifest_array_ptr: *const FFIFileManifestParentU128,
     pub manifest_len: usize,
     pub sorted_hashes_array_ptr: *const u128,
