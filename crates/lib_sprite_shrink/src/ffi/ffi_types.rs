@@ -300,6 +300,7 @@ pub type CallbackWriteData = Box<dyn FnMut(&[u8], bool) -> Result<(),
 /// the call, the caller is responsible for freeing the returned
 /// `FFIFileManifestChunksU*` object via the matching
 /// `free_file_manifest_and_chunks_*` function.
+#[repr(C)]
 pub struct CreateFileManifestAndChunksArgs{
     pub file_name_ptr: *const c_char,
     pub file_data_array_ptr: *const u8,
@@ -1302,6 +1303,117 @@ impl<H> From<(
         }
     }
 }
+
+/// Arguments passed to the FFI entry point that serialises uncompressed sprite
+/// data using 64bit hash keys.
+///
+/// This struct is a thin, `#[repr(C)]`‑compatible container that carries
+/// pointers and callbacks required by the native (C) side of the library.
+/// The public function `serialize_uncompressed_data_u64` validates the
+/// pointers, then forwards the data to the generic implementation
+/// `serialize_uncompressed_data_internal::<u64>`.
+///
+/// # Fields
+///
+/// * `manifest_array_ptr` – Pointer to the first element of an array of
+///   `FFIFileManifestParentU64`. Each entry describes a file (its name and the
+///   list of chunk hashes that make up the file). The caller must guarantee
+///   that the array lives for the duration of the call and that the pointer is
+///   non‑null and properly aligned.
+/// * `manifest_len` – Number of elements in the `manifest_array_ptr` array.
+/// * `user_data` – Opaque pointer that is forwarded unchanged to the callbacks
+///   (`get_keys_cb` and `get_chunks_cb`). It can be used by the caller to
+///   store context such as a handle to a Rust object, a boxed closure, or any
+///   other state required by the callbacks. The pointer must be valid for the
+///   duration of the call and properly aligned.
+/// * `get_keys_cb` – Callback that the serializer invokes to obtain the list
+///   of hash keys (i.e., the set of unique 64bit hashes that will be
+///   looked up). The callback must fill `out_keys` with a `FFIKeyArrayU64`
+///   describing the keys and return `FFICallbackStatus::Ok` on success.
+/// * `get_chunks_cb` – Callback used to retrieve the actual chunk data for a
+///   batch of hashes supplied by the serializer.
+///   The caller should read `hashes_len` hashes from the `hashes` pointer,
+///   locate the corresponding chunk data, populate `out_chunks`, and return a
+///   status code.
+///
+/// # Safety
+///
+///   The fields contain raw pointers and unsafe callbacks. The caller must
+///   ensure that all pointers are non‑null, correctly aligned, and point to
+///   memory that remains valid for the entire duration of the FFI call.
+///   Violating these requirements may lead to undefined behavior.
+#[repr(C)]
+pub struct SerializeUncompressedDataArgsU64{
+    pub manifest_array_ptr: *const FFIFileManifestParentU64,
+    pub manifest_len: usize,
+    pub user_data: *mut c_void,
+    pub get_keys_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        out_keys: *mut FFIKeyArrayU64,
+    ) -> FFICallbackStatus,
+    pub get_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        hashes: *const u64,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+}
+
+/// Arguments passed to the FFI entry point that serialises uncompressed sprite
+/// data using 128bit hash keys.
+///
+/// This struct is a thin, `#[repr(C)]`‑compatible container that carries
+/// pointers and callbacks required by the native (C) side of the library.
+/// The public function `serialize_uncompressed_data_u128` validates the
+/// pointers, then forwards the data to the generic implementation
+/// `serialize_uncompressed_data_internal::<u128>`.
+///
+/// # Fields
+///
+/// * `manifest_array_ptr` – Pointer to the first element of an array of
+///   `FFIFileManifestParentU128`. Each entry describes a file (its name and
+///   the list of chunk hashes that make up the file). The caller must
+///   guarantee that the array lives for the duration of the call and that the
+///   pointer is non‑null and properly aligned.
+/// * `manifest_len` – Number of elements in the `manifest_array_ptr` array.
+/// * `user_data` – Opaque pointer that is forwarded unchanged to the callbacks
+///   (`get_keys_cb` and `get_chunks_cb`). It can be used by the caller to
+///   store context such as a handle to a Rust object, a boxed closure, or any
+///   other state required by the callbacks. The pointer must be valid for the
+///   duration of the call and properly aligned.
+/// * `get_keys_cb` – Callback that the serializer invokes to obtain the list
+///   of hash keys (i.e., the set of unique 128bit hashes that will be
+///   looked up). The callback must fill `out_keys` with a `FFIKeyArrayU128`
+///   describing the keys and return `FFICallbackStatus::Ok` on success.
+/// * `get_chunks_cb` – Callback used to retrieve the actual chunk data for a
+///   batch of hashes supplied by the serializer.
+///   The caller should read `hashes_len` hashes from the `hashes` pointer,
+///   locate the corresponding chunk data, populate `out_chunks`, and return a
+///   status code.
+///
+/// # Safety
+///
+///   The fields contain raw pointers and unsafe callbacks. The caller must
+///   ensure that all pointers are non‑null, correctly aligned, and point to
+///   memory that remains valid for the entire duration of the FFI call.
+///   Violating these requirements may lead to undefined behavior.
+#[repr(C)]
+pub struct SerializeUncompressedDataArgsU128{
+    pub manifest_array_ptr: *const FFIFileManifestParentU128,
+    pub manifest_len: usize,
+    pub user_data: *mut c_void,
+    pub get_keys_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        out_keys: *mut FFIKeyArrayU128,
+    ) -> FFICallbackStatus,
+    pub get_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        hashes: *const u128,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+}
+
 
 /// FFI-safe equivalent of `SSAChunkMeta`, containing the metadata for a single
 /// chunk within a file's manifest.

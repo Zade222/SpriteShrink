@@ -17,10 +17,9 @@ use crate::ffi::ffi_error_handling::{
 use crate::ffi::ffi_types::{
     FFIChunkDataArray, FFIChunkIndexEntry,
     FFIFileManifestParent,
-    FFIFileManifestParentU64, FFIFileManifestParentU128,
-    FFIKeyArray, FFIKeyArrayU64, FFIKeyArrayU128,
-    FFISerializedOutput,
+    FFIKeyArray, FFISerializedOutput,
     FFISerializedOutputU64, FFISerializedOutputU128,
+    SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
     FFISSAChunkMeta,
 };
 use crate::lib_error_handling::SpriteShrinkError;
@@ -207,41 +206,6 @@ where
         Err(_) => return FFIResult::SerializationMissingChunk,
     };
 
-    //Convert the Rust results back into FFI-safe, heap-allocated C structures.
-    /*let mut ffi_manifests: Vec<FFIFileManifestParent<H>> =
-        match ser_file_manifest
-        .into_iter()
-        .map(|fmp|  {
-            let mut chunk_meta_vec: Vec<FFISSAChunkMeta<H>> =
-                fmp.chunk_metadata
-                .iter()
-                .map(|meta| FFISSAChunkMeta::from(*meta))
-                .collect();
-
-            let chunk_meta_ptr = chunk_meta_vec
-                .as_mut_ptr();
-            let chunk_meta_cap = chunk_meta_vec.capacity();
-
-            //Give up ownership so it doesn't deallocate it
-            std::mem::forget(chunk_meta_vec);
-
-            let c_filename = match CString::new(fmp.filename.clone()) {
-                Ok(s) => s.into_raw(),
-                Err(_) => return Err(FFIResult::InvalidString),
-            };
-
-            Ok(FFIFileManifestParent {
-                filename: c_filename,
-                chunk_metadata: chunk_meta_ptr,
-                chunk_metadata_len: fmp.chunk_count as usize,
-                chunk_metadata_cap: chunk_meta_cap,
-            })
-        })
-        .collect() {
-            Ok(v) => v,
-            Err(status) => return status, //Propagate the error status
-        };*/
-
     let mut ffi_manifests_vec: Vec<FFIFileManifestParent<H>> =
            Vec::with_capacity(ser_file_manifest.len());
 
@@ -336,94 +300,137 @@ where
     FFIResult::Ok
 }
 
-/// Serializes archive data into an FFI-safe structure.
+/// Serialises uncompressed sprite data using 64bit hash keys.
 ///
-/// On success, returns `FFIResult::Ok` and populates `out_ptr`.
+/// Function for obtaining a `FFISerializedOutputU64` containing a manifest, a
+/// chunk index and a sorted hash list. The function validates its arguments
+/// and then forwards the work to the generic implementation
+/// `serialize_uncompressed_data_internal::<u64>`.
+///
+/// # Parameters
+///
+/// * `args` – A pointer to a fully‑initialised
+///   `SerializeUncompressedDataArgsU64` structure. The structure supplies the
+///   manifest, user data and the two callbacks required for the serialisation
+///   process.
+/// * `out_ptr` – A mutable pointer that will be populated with a pointer to a
+///   newly allocated `FFISerializedOutputU64` on success. The caller is
+///   responsible for freeing this output via the matching
+///   `free_serialized_output_u64` function.
 ///
 /// # Safety
-/// - All pointer arguments must be non-null and valid for their
-///   specified lengths.
-/// - `out_ptr` must be a valid, non-null pointer.
-/// - The memory allocated for `out_keys` in the `get_keys_cb` callback and for
-///   `out_chunks` in the `get_chunks_cb` callback is owned by Rust upon return.
-///   The C caller MUST NOT free this memory.
-/// - On success, the pointer written to `out_ptr` is owned by the C
-///   caller and MUST be freed by passing it to
-///   `free_serialized_output_u64`.
+///
+/// * Both `args` and `out_ptr` must be non‑null pointers. If either is null,
+///   the function returns `FFIResult::NullArgument`.
+/// * All pointer arguments **must** be non‑null and point to valid memory that
+///   lives at least for the duration of the call.
+/// * `args.manifest_array_ptr` must also be a valid, non‑null pointer to an
+///   array of `FFIFileManifestParentU64` with `args.manifest_len` elements.
+///   The caller is responsible for ensuring the array lives for the duration
+///   of the call.
+/// * The callbacks contained in `args` (`get_keys_cb` and `get_chunks_cb`) are
+///   `unsafe extern "C"` functions; they must obey the contract described in
+///   `SerializeUncompressedDataArgsU64`.
+///
+/// # Return value
+///
+/// Returns an `FFIResult` indicating the outcome:
+///
+/// * `FFIResult::Ok` – The operation succeeded and `*out_ptr` now points to a
+///   valid `FFISerializedOutputU64`.
+/// * `FFIResult::NullArgument` – Either `args` or `out_ptr` (or the manifest
+///   pointer inside `args`) was null.
+/// * Other error variants may be returned by the internal implementation if,
+///   for example, a callback fails or memory allocation aborts.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn serialize_uncompressed_data_u64(
-    manifest_array_ptr: *const FFIFileManifestParentU64,
-    manifest_len: usize,
-    user_data: *mut c_void,
-    get_keys_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        out_keys: *mut FFIKeyArrayU64,
-    ) -> FFICallbackStatus,
-    get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        hashes: *const u64,
-        hashes_len: usize,
-        out_chunks: *mut FFIChunkDataArray,
-    ) -> FFICallbackStatus,
+    args: *const SerializeUncompressedDataArgsU64,
     out_ptr: *mut *mut FFISerializedOutputU64
 ) -> FFIResult {
-    if manifest_array_ptr.is_null()
+    if args.is_null()
         || out_ptr.is_null() {
-        return FFIResult::NullArgument;
+            return FFIResult::NullArgument;
     };
 
+    let args_int = unsafe{&*args};
+
+    if args_int.manifest_array_ptr.is_null() {
+        return FFIResult::NullArgument;
+    }
+
     serialize_uncompressed_data_internal::<u64>(
-        manifest_array_ptr,
-        manifest_len,
-        user_data,
-        get_keys_cb,
-        get_chunks_cb,
+        args_int.manifest_array_ptr,
+        args_int.manifest_len,
+        args_int.user_data,
+        args_int.get_keys_cb,
+        args_int.get_chunks_cb,
         out_ptr
     )
 }
 
-/// Serializes archive data into an FFI-safe structure.
+/// Serialises uncompressed sprite data using 128bit hash keys.
 ///
-/// On success, returns `FFIResult::Ok` and populates `out_ptr`.
+/// Function for obtaining a `FFISerializedOutputU128` containing a manifest, a
+/// chunk index and a sorted hash list. The function validates its arguments
+/// and then forwards the work to the generic implementation
+/// `serialize_uncompressed_data_internal::<u128>`.
+///
+/// # Parameters
+///
+/// * `args` – A pointer to a fully‑initialised `SerializeUncompressedDataArgsU128`
+///   structure. The structure supplies the manifest, user data and the two
+///   callbacks required for the serialisation process.
+/// * `out_ptr` – A mutable pointer that will be populated with a pointer to a
+///   newly allocated `FFISerializedOutputU128` on success. The caller is
+///   responsible for freeing this output via the matching
+///   `free_serialized_output_u128` function.
 ///
 /// # Safety
-/// - All pointer arguments must be non-null and valid for their
-///   specified lengths.
-/// - `out_ptr` must be a valid, non-null pointer.
-/// - The memory allocated for `out_keys` in the `get_keys_cb` callback and for
-///   `out_chunks` in the `get_chunks_cb` callback is owned by Rust upon return.
-///   The C caller MUST NOT free this memory.
-/// - On success, the pointer written to `out_ptr` is owned by the C
-///   caller and MUST be freed by passing it to
-///   `free_serialized_output_u128`.
+///
+/// * Both `args` and `out_ptr` must be non‑null pointers. If either is null,
+///   the function returns `FFIResult::NullArgument`.
+/// * All pointer arguments **must** be non‑null and point to valid memory that
+///   lives at least for the duration of the call.
+/// * `args.manifest_array_ptr` must also be a valid, non‑null pointer to an
+///   array of `FFIFileManifestParentU128` with `args.manifest_len` elements.
+///   The caller is responsible for ensuring the array lives for the duration
+///   of the call.
+/// * The callbacks contained in `args` (`get_keys_cb` and `get_chunks_cb`) are
+///   `unsafe extern "C"` functions; they must obey the contract described in
+///   `SerializeUncompressedDataArgsU128`.
+///
+/// # Return value
+///
+/// Returns an `FFIResult` indicating the outcome:
+///
+/// * `FFIResult::Ok` – The operation succeeded and `*out_ptr` now points to a
+///   valid `FFISerializedOutputU128`.
+/// * `FFIResult::NullArgument` – Either `args` or `out_ptr` (or the manifest
+///   pointer inside `args`) was null.
+/// * Other error variants may be returned by the internal implementation if,
+///   for example, a callback fails or memory allocation aborts.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn serialize_uncompressed_data_u128(
-    manifest_array_ptr: *const FFIFileManifestParentU128,
-    manifest_len: usize,
-    user_data: *mut c_void,
-    get_keys_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        out_keys: *mut FFIKeyArrayU128,
-    ) -> FFICallbackStatus,
-    get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        hashes: *const u128,
-        hashes_len: usize,
-        out_chunks: *mut FFIChunkDataArray,
-    ) -> FFICallbackStatus,
+    args: *const SerializeUncompressedDataArgsU128,
     out_ptr: *mut *mut FFISerializedOutputU128
 ) -> FFIResult {
-    if manifest_array_ptr.is_null()
+    if args.is_null()
         || out_ptr.is_null() {
-        return FFIResult::NullArgument;
+            return FFIResult::NullArgument;
     };
 
+    let args_int = unsafe{&*args};
+
+    if args_int.manifest_array_ptr.is_null() {
+        return FFIResult::NullArgument;
+    }
+
     serialize_uncompressed_data_internal::<u128>(
-        manifest_array_ptr,
-        manifest_len,
-        user_data,
-        get_keys_cb,
-        get_chunks_cb,
+        args_int.manifest_array_ptr,
+        args_int.manifest_len,
+        args_int.user_data,
+        args_int.get_keys_cb,
+        args_int.get_chunks_cb,
         out_ptr
     )
 }
