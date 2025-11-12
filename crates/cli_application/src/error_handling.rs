@@ -20,7 +20,6 @@ use thiserror::Error;
 use tracing::{
     level_filters::LevelFilter,
     debug,
-    error,
     warn
 };
 use tracing_appender::{
@@ -45,8 +44,8 @@ use crate::{
 /// during the application's runtime.
 #[derive(Error, Debug)]
 pub enum CliError {
-    #[error("I/O Error")] 
-    IoError(#[from] io::Error), 
+    #[error("I/O Error")]
+    IoError(#[from] io::Error),
 
     #[error("Provided path does not exist. {0}")]
     InvalidPath(String),
@@ -121,7 +120,7 @@ pub enum CliError {
 
     #[error("Key not found {0}")]
     KeyNotFound(String),
-    
+
     #[error("File chunking error {0}")]
     FileChunking(#[from] fastcdc::v2020::Error),
 
@@ -154,7 +153,7 @@ pub enum CliError {
 /// logic.
 ///
 /// A special case is handled for `SpriteShrinkError::Cancelled` to ensure that
-/// user-initiated cancellations are correctly propagated as 
+/// user-initiated cancellations are correctly propagated as
 /// `CliError::Cancelled`.
 impl From<SpriteShrinkError> for CliError {
     fn from(err: SpriteShrinkError) -> Self {
@@ -223,8 +222,8 @@ pub fn initiate_logging(
     file_log_level: &str
 ) -> Result<Option<WorkerGuard>, CliError> {
     let proj_dirs = ProjectDirs::from(
-        APPIDENTIFIER.qualifier, 
-        APPIDENTIFIER.organization, 
+        APPIDENTIFIER.qualifier,
+        APPIDENTIFIER.organization,
         APPIDENTIFIER.application)
     .expect("Failed to find a valid project directory.");
 
@@ -246,7 +245,7 @@ pub fn initiate_logging(
         .with_filter(console_level);
 
             let file_appender = rolling::daily(
-                log_dir, 
+                log_dir,
                 "debug.log");
             let (non_blocking_writer, guard) = tracing_appender::non_blocking(
                 file_appender
@@ -299,8 +298,6 @@ pub fn initiate_logging(
         debug!("Log file disabled.");
         Ok(None)
     }
-
-    
 }
 
 /// Converts a byte offset within a string slice to a 1-based line and column
@@ -313,17 +310,17 @@ pub fn initiate_logging(
 ///
 /// # Arguments
 ///
-/// * `contents`: A string slice representing the full content of the file or 
+/// * `contents`: A string slice representing the full content of the file or
 ///   text.
 /// * `offset`: The byte offset (`usize`) from the beginning of the string to
 ///   find the location of.
 ///
 /// # Returns
 ///
-/// A tuple `(usize, usize)` containing the 1-based line number and column 
+/// A tuple `(usize, usize)` containing the 1-based line number and column
 /// number.
 pub fn offset_to_line_col(
-    contents: &str, 
+    contents: &str,
     offset: usize
 ) -> (usize, usize) {
     let mut line = 1;
