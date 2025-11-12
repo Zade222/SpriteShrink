@@ -199,10 +199,10 @@ pub struct SeekMetadata<H>{
 
 /// Implementation of helper method for [`SeekMetadata`].
 ///
-/// This `impl` provides a convenient constructor that creates a fully‑initialized
-/// `SeekMetadata` value in a single call. Using the constructor makes call‑sites
-/// clearer and avoids having to repeat the field names each time a new instance
-/// is needed.
+/// This `impl` provides a convenient constructor that creates a
+/// fully‑initialized `SeekMetadata` value in a single call. Using the
+/// constructor makes call‑sites clearer and avoids having to repeat the
+/// field names each time a new instance is needed.
 ///
 /// # Type parameter
 ///
@@ -244,10 +244,10 @@ pub struct SerializedData<H>{
 
 /// Implements a `Default` value for `SerializedData<H>`.
 ///
-/// This implementation allows callers to create an empty `SerializedData` instance
-/// without having to manually initialise each field. The generic type `H`
-/// represents the hash type used throughout the archive and does not need to
-/// implement `Default` because the default instance only contains empty
+/// This implementation allows callers to create an empty `SerializedData`
+/// instance without having to manually initialise each field. The generic type
+/// `H` represents the hash type used throughout the archive and does not need
+/// to implement `Default` because the default instance only contains empty
 /// collections (`Vec` and `HashMap`).
 ///
 /// # Fields

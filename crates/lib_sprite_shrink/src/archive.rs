@@ -8,7 +8,7 @@
 
 use std::{
     {collections::{
-        HashMap}, 
+        HashMap},
     },
     fmt::{Debug, Display},
     hash::Hash,
@@ -30,7 +30,7 @@ use crate::{ffi::ffi_types::{
 }, IsCancelled, SpriteShrinkError};
 use crate::lib_structs::{
     ChunkLocation, FileHeader, FileManifestParent, Progress
-};  
+};
 
 use crate::parsing::{MAGIC_NUMBER, SUPPORTED_VERSION};
 
@@ -117,9 +117,9 @@ pub struct ArchiveBuilder<'a, E, H, R, W> {
 /// # Arguments
 ///
 /// * `file_count`: The total number of files to be included.
-/// * `algorithm_code`: Numerical value representing the compression used on 
+/// * `algorithm_code`: Numerical value representing the compression used on
 ///   the compressed data.
-/// * `hash_type`: Numerical value representing the hash type used when 
+/// * `hash_type`: Numerical value representing the hash type used when
 ///   the data was hashed.
 /// * `man_length`: The total length in bytes of the file manifest.
 /// * `dict_length`: The total length in bytes of the dictionary.
@@ -153,7 +153,7 @@ fn build_file_header(
         dict_length,
         chunk_index_offset: header_size + man_length + dict_length,
         chunk_index_length,
-        data_offset: header_size + man_length + dict_length + 
+        data_offset: header_size + man_length + dict_length +
             chunk_index_length
     }
 }
@@ -177,8 +177,8 @@ fn build_file_header(
 /// - `Ok(Vec<u8>)` containing the compressed data as a byte vector.
 /// - `Err` if the compression process fails.
 pub fn compress_with_dict(
-    data_payload: &[u8], 
-    dict: &[u8], 
+    data_payload: &[u8],
+    dict: &[u8],
     level: &i32
 ) -> Result<Vec<u8>, ArchiveError> {
     //Create and initiate vector for storing compressed data bytes.
@@ -186,10 +186,10 @@ pub fn compress_with_dict(
 
     //Create encoder that will process data.
     let mut encoder = zstd::stream::Encoder::with_dictionary(
-        &mut compressed_data, 
-        *level, 
+        &mut compressed_data,
+        *level,
         dict)?;
-    
+
     //Use encoder to compress the data payload.
     encoder.write_all(data_payload)?;
 
@@ -200,11 +200,11 @@ pub fn compress_with_dict(
     Ok(compressed_data)
 }
 
-/// Compresses a collection of data chunks in parallel using a 
+/// Compresses a collection of data chunks in parallel using a
 /// producer-consumer model.
 ///
 /// This function orchestrates a high-performance, multi-threaded compression
-/// pipeline designed to handle large sets of unique data chunks efficiently. 
+/// pipeline designed to handle large sets of unique data chunks efficiently.
 /// It separates the I/O-bound task of reading and writing from the CPU-bound
 /// task of compression.
 ///
@@ -236,7 +236,7 @@ pub fn compress_with_dict(
 /// # Arguments
 ///
 /// * `worker_count`: The number of threads to spawn for the compression worker
-///   pool. If `0`, it defaults to the number of available logical cores minus 
+///   pool. If `0`, it defaults to the number of available logical cores minus
 ///   one.
 /// * `dictionary`: A byte slice containing the pre-trained Zstandard
 ///   compression dictionary.
@@ -257,7 +257,7 @@ pub fn compress_with_dict(
 ///   index. The index is a vector of tuples, where each tuple maps a chunk's
 ///   hash to its `ChunkLocation` (offset and length) in the final compressed
 ///   data blob.
-/// - `Err(ArchiveError)` if any part of the process fails, such as a worker 
+/// - `Err(ArchiveError)` if any part of the process fails, such as a worker
 ///   thread panicking, a failure in a callback, or an internal logic error.
 ///
 /// # Errors
@@ -290,15 +290,15 @@ where
 
     //Create Arc for sorted hashes for safely sharing.
     let sorted_hashes_arc: Arc<[H]> = Arc::from(sorted_hashes);
-    
+
     /*Create channels for sending/receiving to compressor info limited by
     PREFETCH_HIGH_THRESHOLD.
     This acts as the FIFO job buffer.*/
-    let (to_compress_tx, to_compress_rx) = 
+    let (to_compress_tx, to_compress_rx) =
         flume::bounded::<(H, Vec<u8>)>(PREFETCH_HIGH_THRESHOLD);
 
     //Create channels for sending/receiving from compressor.
-    let (from_compress_tx, from_compress_rx) = 
+    let (from_compress_tx, from_compress_rx) =
         flume::unbounded::<(H, Vec<u8>)>();
 
     //Error channels
@@ -316,7 +316,7 @@ where
         worker_count
     };
 
-    
+
 
     // Resolve the number of threads to use. If 0, use available parallelism.
     let num_workers = (num_threads).saturating_sub(1).max(1);
@@ -331,17 +331,17 @@ where
 
         //Create handle/thread for worker.
         let handle = thread::spawn(move || {
-            /*Workers loop until the to_compress channel is empty and 
+            /*Workers loop until the to_compress channel is empty and
             disconnected.*/
             while let Ok((hash, data)) = to_compress_rx_clone.recv() {
                 match compress_with_dict(
-                    &data, 
-                    &dictionary_clone, 
+                    &data,
+                    &dictionary_clone,
                     &compression_level
                 ) {
                     Ok(compressed_data) => {
                         if from_compress_tx_clone.send((
-                            hash, 
+                            hash,
                             compressed_data
                         )).is_err() {
                             //The I/O thread has terminated; exit gracefully.
@@ -374,30 +374,30 @@ where
 
     //Create handle/thread for IO coordinator.
     let io_handle = thread::spawn(move || -> Result<usize, ArchiveError> {
-        /*Tracks which chunks have been read from the source and sent to the 
+        /*Tracks which chunks have been read from the source and sent to the
         workers for compression. */
         let mut read_cursor = 0usize;
 
-        /*Tracks which chunks have been written to the destination in the 
+        /*Tracks which chunks have been written to the destination in the
         correct, sequential order.*/
         let mut write_cursor = 0usize;
 
-        /*Tracks the offset into the final data blob of the archive to be 
+        /*Tracks the offset into the final data blob of the archive to be
         stored by the chunk index.*/
         let mut offset = 0u64;
-        
-        /*Temporary buffer for holding compressed data if received out of 
+
+        /*Temporary buffer for holding compressed data if received out of
         order.*/
         let mut reordering_buffer: HashMap<H, Vec<u8>> = HashMap::new();
 
         let mut max_buffer_size = 0usize;
 
-        /*Loop that runs until all chunks have been sent to the host 
+        /*Loop that runs until all chunks have been sent to the host
         application to be written.*/
         while write_cursor < total_chunks {
-            
+
             //If the to_compress_tx job buffer is below the threshold.
-            if to_compress_tx.len() < PREFETCH_LOW_THRESHOLD && 
+            if to_compress_tx.len() < PREFETCH_LOW_THRESHOLD &&
                 //and if the read_cursor is below total chunks
                 read_cursor < total_chunks {
                     //Calculate how much chunk data to get.
@@ -466,7 +466,7 @@ where
                             .lock()
                             .unwrap();
 
-                        /*Send the compressed data to be written by the host 
+                        /*Send the compressed data to be written by the host
                         application*/
                         chunk_write_cb(&data_to_write)
                             .map_err(
@@ -478,7 +478,7 @@ where
 
                         //Add chunk location data to chunk index.
                         ci_clone.push((
-                            next_hash_to_write, 
+                            next_hash_to_write,
                             ChunkLocation {
                                 offset,
                                 compressed_length: data_len as u32,
@@ -500,7 +500,7 @@ where
         if io_handle.is_finished() {
             break;
         }
-        
+
         if let Ok(err) = err_rx.try_recv() {
             return Err(err);
         }
@@ -526,7 +526,8 @@ where
 impl<'a, E, H, R, W> ArchiveBuilder<'a, E, H, R, W>
 where
     E: std::error::Error + IsCancelled + Send + Sync + 'static,
-    H: Copy + Debug + Eq + Hash + Serialize + Send + Sync + 'static + Display + Ord,
+    H: Copy + Debug + Eq + Hash + Serialize + Send + Sync + 'static + Display
+        + Ord,
     R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
     W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
 {
@@ -549,7 +550,7 @@ where
             write_comp_data,
             //Set default values for optional parameters
             compression_algorithm: 98, //Default to zstd numerical code.
-            compression_level: 19, 
+            compression_level: 19,
             dictionary_size: 16 * 1024,
             worker_threads: 0, //Let Rayon decide
             opt_dict: false,
@@ -601,7 +602,7 @@ where
     }
 
     /// Sets a callback function for progress reporting.
-    pub fn with_progress<F>(mut self, callback: F) -> Self 
+    pub fn with_progress<F>(mut self, callback: F) -> Self
     where
         F: Fn(Progress) + Sync + Send + 'static,
     {
@@ -609,14 +610,14 @@ where
         self
     }
 
-    /// Sets a callback function for progress reporting when called via C. 
+    /// Sets a callback function for progress reporting when called via C.
     pub fn with_c_progress(
-            &mut self, 
-            callback: CProgressCallback, 
+            &mut self,
+            callback: CProgressCallback,
             user_data: *mut c_void
         ) -> &mut Self {
             self.c_progress_callback = Some((
-                callback, 
+                callback,
                 FFIUserData(user_data)
             ));
             self
@@ -635,10 +636,10 @@ where
     /// # Returns
     ///
     /// A `Result` which is:
-    /// - `Ok(Vec<u8>)` containing the complete binary data of the archive 
+    /// - `Ok(Vec<u8>)` containing the complete binary data of the archive
     ///   header.
-    /// - `Err(SpriteShrinkError)` if any step fails, such as dictionary training,
-    ///   compression, or serialization.
+    /// - `Err(SpriteShrinkError)` if any step fails, such as dictionary
+    ///   training, compression, or serialization.
     pub fn build(self) -> Result<Vec<u8>, SpriteShrinkError> {
         //Destructure self into its fields
         let ArchiveBuilder {
@@ -672,25 +673,25 @@ where
                 }
                 if let Some((callback, user_data)) = c_progress_callback {
                     let ffi_progress = match progress {
-                        Progress::GeneratingDictionary => FFIProgress { 
-                            ty: FFIProgressType::GeneratingDictionary, 
-                            total_chunks: 0 
+                        Progress::GeneratingDictionary => FFIProgress {
+                            ty: FFIProgressType::GeneratingDictionary,
+                            total_chunks: 0
                         },
-                        Progress::DictionaryDone => FFIProgress { 
-                            ty: FFIProgressType::DictionaryDone, 
-                            total_chunks: 0 
+                        Progress::DictionaryDone => FFIProgress {
+                            ty: FFIProgressType::DictionaryDone,
+                            total_chunks: 0
                         },
                         Progress::Compressing {total_chunks} => FFIProgress {
-                            ty: FFIProgressType::Compressing, 
-                            total_chunks 
+                            ty: FFIProgressType::Compressing,
+                            total_chunks
                         },
-                        Progress::ChunkCompressed => FFIProgress { 
-                            ty: FFIProgressType::ChunkCompressed, 
-                            total_chunks: 0 
+                        Progress::ChunkCompressed => FFIProgress {
+                            ty: FFIProgressType::ChunkCompressed,
+                            total_chunks: 0
                         },
-                        Progress::Finalizing => FFIProgress { 
-                            ty: FFIProgressType::Finalizing, 
-                            total_chunks: 0 
+                        Progress::Finalizing => FFIProgress {
+                            ty: FFIProgressType::Finalizing,
+                            total_chunks: 0
                         },
                     };
                     callback(ffi_progress, user_data.0);
@@ -700,23 +701,23 @@ where
 
         //Report progress before starting a dictionary generation
         report_progress(Progress::GeneratingDictionary);
-        
+
         let (samples_for_dict, sample_sizes) = build_train_samples(
-            sorted_hashes, 
-            total_size, 
+            sorted_hashes,
+            total_size,
             dictionary_size as usize,
             get_chunk_data_arc.as_ref()
         )?;
 
         //Make dictionary from sorted data.
         let mut _dictionary: Vec<u8> = Vec::new();
-        
+
         if opt_dict{
             _dictionary = gen_zstd_opt_dict(
-            &samples_for_dict, 
+            &samples_for_dict,
             &sample_sizes,
-            dictionary_size as usize, 
-            worker_threads, 
+            dictionary_size as usize,
+            worker_threads,
             compression_level)?;
         } else {
             _dictionary = zstd::dict::from_continuous(
@@ -737,7 +738,7 @@ where
             let get_chunk_data_arc = Arc::new(get_chunk_data_arc);
             move |hashes: &[H]| -> Result<Vec<(H, Vec<u8>)>, E> {
                 let ret_chunks = (get_chunk_data_arc)(hashes)?;
-                let mut chunk_pairs: Vec<(H, Vec<u8>)> = 
+                let mut chunk_pairs: Vec<(H, Vec<u8>)> =
                     Vec::with_capacity(ret_chunks.len());
 
                 for (index, chunk) in ret_chunks.iter().enumerate(){
@@ -761,21 +762,21 @@ where
 
                 Ok(())
             }
-            
+
         };
 
-        report_progress(Progress::Compressing { 
+        report_progress(Progress::Compressing {
             total_chunks: (
-                sorted_hashes.len() as u64 
+                sorted_hashes.len() as u64
             )
         });
-        
+
         let chunk_index = compress_chunks(
-            worker_threads, 
-            &_dictionary, 
-            sorted_hashes, 
-            compression_level, 
-            get_chunk_data_cb, 
+            worker_threads,
+            &_dictionary,
+            sorted_hashes,
+            compression_level,
+            get_chunk_data_cb,
             write_chunk_data_cb
         )?;
 
@@ -800,7 +801,7 @@ where
         let bin_file_manifest = bincode::serde::encode_to_vec(
         &ser_file_manifest, config
         ).map_err(|e| ArchiveError::ManifestEncodeError(e.to_string()))?;
-        
+
         drop(ser_file_manifest);
 
         let bin_chunk_index = bincode::serde::encode_to_vec(
@@ -820,8 +821,8 @@ where
         );
 
         let mut final_data = Vec::with_capacity(
-            file_header.data_offset as usize + bin_file_manifest.len() as usize + 
-            _dictionary.len() + bin_chunk_index.len() as usize
+            file_header.data_offset as usize + bin_file_manifest.len()
+                as usize + _dictionary.len() + bin_chunk_index.len() as usize
         );
 
         final_data.extend_from_slice(file_header.as_bytes());
@@ -840,7 +841,7 @@ pub fn decompress_chunk(
     /*Create a zstd decoder with the prepared dictionary from the file
     archive.*/
     let mut decoder = zstd::stream::Decoder::with_dictionary(
-        comp_chunk_data, 
+        comp_chunk_data,
         dictionary)?;
 
     //Decompress the data into a new vector.

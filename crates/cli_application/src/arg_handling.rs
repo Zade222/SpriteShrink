@@ -33,18 +33,18 @@ const CUSTOM_HELP_TEMPLATE: &str = "\
 /// and user-friendly command-line interface.
 #[derive(Clone, Parser, Debug)]
 #[command(
-    version, 
-    about, 
-    long_about = None, 
+    version,
+    about,
+    long_about = None,
     help_template = CUSTOM_HELP_TEMPLATE,
     //term_width = 80
 )]
 pub struct Args {
     //Primary group of arguments.
     #[arg(
-        short, 
-        long, 
-        help_heading = "Primary Options", 
+        short,
+        long,
+        help_heading = "Primary Options",
         required = true,
         help = "Path to single ROM file or directory of ROMs for \ninput. Can \
         be specified more than once."
@@ -52,17 +52,17 @@ pub struct Args {
     pub input: Vec<PathBuf>,
 
     #[arg(
-        short, 
-        long, 
+        short,
+        long,
         help_heading = "Primary Options",
         help = "Path for the output archive or extracted files."
     )]
     pub output: Option<PathBuf>,
 
     #[arg(
-        short, 
-        long, 
-        help_heading = "Primary Options", 
+        short,
+        long,
+        help_heading = "Primary Options",
         conflicts_with = "extract",
         help = "Activates archive file list mode, used in \ncombination with \
         -i. Lists all files, and their\n indices, in an archive."
@@ -70,9 +70,9 @@ pub struct Args {
     pub list: bool,
 
     #[arg(
-        short, 
-        long, 
-        help_heading = "Primary Options", 
+        short,
+        long,
+        help_heading = "Primary Options",
         conflicts_with = "extract",
         help = "Activates json metadata mode. The metadata output \nwill be \
         printed in json format."
@@ -80,7 +80,7 @@ pub struct Args {
     pub metadata: bool,
 
     #[arg(
-        short, 
+        short,
         long, help_heading = "Primary Options",
         help = "Specifies the index number(s) of the ROM(s) to be \nextracted, \
         as listed by the -m flag."
@@ -90,9 +90,9 @@ pub struct Args {
     //Tuning paramters
 
     /*#[arg(
-        short, 
-        long, 
-        help_heading = "Tuning Parameters", 
+        short,
+        long,
+        help_heading = "Tuning Parameters",
         default_value_t = String::from("zstd"),
         help = "Sets the compression algorithm.\n
         Choices: zstd, lzma, deflate. Defaults to zstd."
@@ -100,8 +100,8 @@ pub struct Args {
     pub compression: String,*/
 
     #[arg(
-        short = 'c', 
-        long = "compression-level", 
+        short = 'c',
+        long = "compression-level",
         value_name = "LEVEL",
         help_heading = "Tuning Parameters",
         default_value_t = 19,
@@ -111,8 +111,8 @@ pub struct Args {
     pub compression_level: u8,
 
     #[arg(
-        short, 
-        long, 
+        short,
+        long,
         help_heading = "Tuning Parameters",
         help = "Determines the window size for the hashing \nalgorithm. \
         (e.g., '256K', '4KB', '64KiB')\nRecommended value is 2kb."
@@ -120,8 +120,8 @@ pub struct Args {
     pub window: Option<ByteSize>,
 
     #[arg(
-        short, 
-        long, 
+        short,
+        long,
         help_heading = "Tuning Parameters",
         help = "Determines the dictionary size for the \ncompression \
         algorithm. \n(e.g., '256K', '4KB', '64KiB')\nRecommended value is 16kb."
@@ -129,18 +129,18 @@ pub struct Args {
     pub dictionary: Option<ByteSize>,
 
     #[arg(
-        short = 'b', 
-        long = "hash-bit-length", 
+        short = 'b',
+        long = "hash-bit-length",
         value_name = "LENGTH",
         help_heading = "Tuning Parameters",
         help = "Sets the hashing algorithm bit length. \nDefault value is 64.\n\
         If the hash verification stage fails set to\n128."
     )]
     pub hash_bit_length: Option<u32>,
-    
+
     #[arg(
-        long, 
-        help_heading = "Tuning Parameters", 
+        long,
+        help_heading = "Tuning Parameters",
         default_value_t = false,
         help = "Autotune both the window size and dictionary\nsize. Will find \
         the reasonably optimal size\nfor each. This uses a somewhat \
@@ -151,7 +151,7 @@ pub struct Args {
     pub auto_tune: bool,
 
     #[arg(
-        long, 
+        long,
         help_heading = "Tuning Parameters",
         value_name = "TIMEOUT",
         help = "Sets the maximum time in seconds for each \nautotune iteration. \
@@ -160,8 +160,8 @@ pub struct Args {
     pub autotune_timeout: Option<u64>,
 
     #[arg(
-        long, 
-        help_heading = "Tuning Parameters", 
+        long,
+        help_heading = "Tuning Parameters",
         default_value_t = false,
         help = "When generating dictionary for compression,\noptimize the \
         dictionary for better\ncompression. NOT recommended for large files\n\
@@ -175,8 +175,8 @@ pub struct Args {
     //Behavior and Output Control
 
     #[arg(
-        short, 
-        long, 
+        short,
+        long,
         help_heading = "Behavior and Output Control",
         help = "Sets the maximum number of worker threads to use. \nDefaults to \
         all available logical cores."
@@ -184,7 +184,7 @@ pub struct Args {
     pub threads: Option<usize>,
 
     #[arg(
-        long, 
+        long,
         help_heading = "Behavior and Output Control",
         help = "Forces SpriteShrink to not read it's config and won't\ncreate \
         one if it doesn't already exist. For flags not\nspecified, each will\
@@ -193,8 +193,8 @@ pub struct Args {
     pub ignore_config: bool,
 
     #[arg(
-        long, 
-        help_heading = "Behavior and Output Control", 
+        long,
+        help_heading = "Behavior and Output Control",
         default_value_t = false,
         help = "Forces low-memory mode by using an on disk cache for \n\
         temporarily storing data. Can adversely effect \napplication \
@@ -203,9 +203,9 @@ pub struct Args {
     pub low_memory: bool,
 
     #[arg(
-        short, 
-        long, 
-        help_heading = "Behavior and Output Control", 
+        short,
+        long,
+        help_heading = "Behavior and Output Control",
         default_value_t = false,
         help = "Forces the application to overwrite the output file \nif it \
         exists and/or if the output directory doesn't\nexist, creates it."
@@ -213,25 +213,25 @@ pub struct Args {
     pub force: bool,
 
     #[arg(
-        short, 
-        long, 
-        help_heading = "Behavior and Output Control", 
+        short,
+        long,
+        help_heading = "Behavior and Output Control",
         default_value_t = false,
         help = "Activates printing progress to console."
     )]
     pub progress: bool,
 
     #[arg(
-        short, 
-        long, 
-        help_heading = "Behavior and Output Control", 
+        short,
+        long,
+        help_heading = "Behavior and Output Control",
         default_value_t = false,
         help = "Activates quiet mode, suppressing all non-essential\noutput."
     )]
     pub quiet: bool,
 
     #[arg(
-        long, 
+        long,
         help_heading = "Behavior and Output Control",
         help = "Disables logging messages to log file."
     )]
@@ -242,7 +242,7 @@ pub struct Args {
 ///
 /// This function checks for logical conflicts, missing required options,
 /// improper usage of flags based on the selected operation mode and resolves
-/// config conflicts. Its purpose is to ensure the application has a valid 
+/// config conflicts. Its purpose is to ensure the application has a valid
 /// set of arguments before proceeding with any work.
 ///
 /// # Arguments
@@ -285,7 +285,7 @@ pub fn validate_args(
         return Err(CliError::FileExistsError(output_path.to_path_buf()));
     }
 
-    //Extraction Mode ROM Index Validation 
+    //Extraction Mode ROM Index Validation
     if let Some(rom_range) = &args.extract {
         if args.input.len() > 1 {
             return Err(CliError::TooManyFiles(
@@ -301,7 +301,7 @@ pub fn validate_args(
         }
 
 
-        if let Some(output_path) = &args.output 
+        if let Some(output_path) = &args.output
             && !output_path.is_dir()
             && output_path.exists()
         {
@@ -352,7 +352,7 @@ pub fn validate_args(
         }
     }
 
-    /*Check if both window and dictionary parameters are specified when 
+    /*Check if both window and dictionary parameters are specified when
     auto-tune flag is provided.*/
     if args.auto_tune &&
        arg_was_provided("window") &&
@@ -391,7 +391,7 @@ pub fn validate_args(
 /// struct is what the application will use to control its execution.
 pub fn merge_config_and_args (
     config: &SpriteShrinkConfig,
-    mut args: Args, 
+    mut args: Args,
     matches: &ArgMatches,
 ) -> Args {
     //This helper checks if an argument was present on the command line.

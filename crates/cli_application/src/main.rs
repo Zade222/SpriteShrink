@@ -41,7 +41,7 @@ use error_handling::{
 mod storage_io;
 use crate::{cli_types::{
     SpriteShrinkConfig
-    }, 
+    },
     storage_io::{
     cleanup_old_logs, files_from_dirs, load_config, organize_paths
     },
@@ -56,10 +56,10 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 
 /// Dispatches the primary application logic based on parsed arguments.
 ///
-/// This function serves as the central controller for the application. It 
+/// This function serves as the central controller for the application. It
 /// takes the validated command-line arguments and determines which
 /// operational mode to execute: compression, extraction, or metadata
-/// retrieval. It is also responsible for the initial processing of input 
+/// retrieval. It is also responsible for the initial processing of input
 /// paths, expanding directories into a list of files to be processed.
 ///
 /// # Arguments
@@ -68,7 +68,7 @@ static ALLOC: dhat::Alloc = dhat::Alloc;
 ///   user-provided settings and flags that dictate the application's behavior.
 /// * `running`: An `Arc<AtomicBool>` that is used as a cancellation token.
 ///   Long-running operations, like compression, will monitor this flag to
-///   allow for a graceful shutdown if the user issues a termination signal 
+///   allow for a graceful shutdown if the user issues a termination signal
 ///   (e.g., Ctrl+C).
 ///
 /// # Returns
@@ -94,7 +94,7 @@ fn run(
     running: Arc<AtomicBool>
 ) -> Result<(), CliError> {
     let (mut file_paths, dir_paths) = organize_paths(&args.input)?;
-    
+
     if !dir_paths.is_empty() {
         file_paths.extend(files_from_dirs(&dir_paths)?);
     }
@@ -113,7 +113,7 @@ fn run(
             let indices: Vec<u8> = range_parser::parse::<u8>(
                 extract_str
             )?;
-            
+
             if let Some(max_arg_index) = indices.iter().max().cloned() {
                 let file_max_index: u8 = get_max_rom_index(file_path)?;
 
@@ -121,7 +121,7 @@ fn run(
                     return Err(CliError::InvalidRomIndex(format!(
                     "One or more ROM indexes are invalid. The requested index \
                         {max_arg_index} is out of the valid range \
-                        (1-{file_max_index})." 
+                        (1-{file_max_index})."
                     )));
                 }
             }
@@ -133,14 +133,14 @@ fn run(
 
             debug!("Mode: Extract");
             run_extraction(
-                &file_paths[0], 
-                output_path, 
-                &indices, 
+                &file_paths[0],
+                output_path,
+                &indices,
                 args,
                 running,
             )?;
         }
-        
+
         (None, true) =>{
             match file_paths.len() {
                 1 => {
@@ -174,8 +174,8 @@ fn run(
                     running,
                 )?,
                 128 => run_compression::<u128>(
-                    file_paths, 
-                    args, 
+                    file_paths,
+                    args,
                     &2,
                     running,
                 )?,
@@ -200,14 +200,14 @@ fn run(
 /// Sets up a handler to gracefully shut down the application on Ctrl+C.
 ///
 /// This function registers a handler that listens for the Ctrl+C signal. When
-/// the signal is received, it flips a shared atomic boolean flag from `true` 
+/// the signal is received, it flips a shared atomic boolean flag from `true`
 /// to `false`. This flag can be passed to long-running tasks, allowing them to
-/// check for a cancellation request and terminate gracefully instead of 
+/// check for a cancellation request and terminate gracefully instead of
 /// abruptly exiting.
 ///
 /// # Returns
 ///
-/// An `Arc<AtomicBool>` that serves as a shared "running" flag. It is 
+/// An `Arc<AtomicBool>` that serves as a shared "running" flag. It is
 /// initially `true` and will be set to `false` when the user presses Ctrl+C.
 fn setup_ctrlc_handler() -> Arc<AtomicBool> {
     let running = Arc::new(AtomicBool::new(true));
@@ -259,7 +259,7 @@ fn main() -> Result<(), CliError>{
                 eprintln!("There's an issue with your configuration file.");
 
                 if let Ok(path) = confy::get_configuration_file_path(
-                    "spriteshrink", 
+                    "spriteshrink",
                     "spriteshrink-config"
                 ) {
                     eprintln!("File: {}", path.display());
@@ -267,11 +267,11 @@ fn main() -> Result<(), CliError>{
                     if let Some(span) = e.span() &&
                         let Ok(contents) = fs::read_to_string(&path) {
                             let (line, col) = offset_to_line_col(
-                                &contents, 
+                                &contents,
                                 span.start
                             );
 
-                            eprintln!("Error is on line {}, column {}:", 
+                            eprintln!("Error is on line {}, column {}:",
                                 line, col
                             );
 
@@ -279,7 +279,9 @@ fn main() -> Result<(), CliError>{
                             .lines()
                             .nth(line - 1) {
                                 eprint!("\n  \x1b[93m{}\x1b[0m\n", line_content);
-                                eprintln!("  \x1b[91;1m{}^\x1b[0m", " ".repeat(col.saturating_sub(1)));
+                                eprintln!("  \x1b[91;1m{}^\x1b[0m", " "
+                                    .repeat(col.saturating_sub(1))
+                                );
                             }
                     }
                 }
@@ -293,11 +295,11 @@ fn main() -> Result<(), CliError>{
         }
     };
 
-    /*Determine which options supersede others between the user provided 
+    /*Determine which options supersede others between the user provided
     flags and the on disk config.*/
     let final_args = merge_config_and_args(&file_cfg, args, &matches);
 
-    let log_level = if final_args.disable_logging || 
+    let log_level = if final_args.disable_logging ||
         file_cfg.log_level == "off" {
             "off".to_string()
     } else {
@@ -329,7 +331,7 @@ fn main() -> Result<(), CliError>{
             std::process::exit(1);
         }
     }
-    
+
     //Begin application logic.
     match run(&final_args, running){
         Ok(_) => {

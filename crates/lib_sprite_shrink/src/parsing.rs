@@ -74,7 +74,7 @@ pub fn parse_file_header(
     header_data: &[u8]
 ) -> Result<FileHeader, SpriteShrinkError>{
     //Attempt to cast the byte slice to a FileHeader.
-    let file_header = 
+    let file_header =
         bytemuck::try_from_bytes::<FileHeader>(header_data)
         .map_err(|e| ParsingError::InvalidHeader(e.to_string()))?;
 
@@ -92,7 +92,7 @@ pub fn parse_file_header(
 
     Ok(*file_header)
 }
-    
+
 /// Deserializes the file manifest from a raw byte slice.
 ///
 /// This function is responsible for parsing the binary representation
@@ -113,7 +113,7 @@ pub fn parse_file_header(
 pub fn parse_file_metadata<H>(
     manifest_data: &[u8]
 ) -> Result<Vec<FileManifestParent<H>>, SpriteShrinkError>
-where 
+where
     for<'de> H: serde::Deserialize<'de>
 {
     let config = bincode::config::standard();
@@ -154,7 +154,9 @@ where
         bincode::serde::decode_from_slice(chunk_index_data, config)
             .map_err(|e| {ParsingError::IndexDecodeError(e.to_string())})?;
 
-    let chunk_index: HashMap<H, ChunkLocation> = bin_chunk_index.into_iter().collect();
+    let chunk_index: HashMap<H, ChunkLocation> = bin_chunk_index
+        .into_iter()
+        .collect();
 
     Ok(chunk_index)
 }

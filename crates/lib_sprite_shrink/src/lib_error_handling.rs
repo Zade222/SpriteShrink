@@ -21,7 +21,7 @@ use crate::{
 /// This enum centralizes failure conditions that arise during the core
 /// processes of compression, archiving, and data verification. It is
 /// designed to be used by applications that consume this library,
-/// providing clear, specific error variants and surface interior errors 
+/// providing clear, specific error variants and surface interior errors
 /// for robust handling.
 #[derive(Error, Debug)]
 pub enum SpriteShrinkError {
@@ -37,8 +37,8 @@ pub enum SpriteShrinkError {
     #[error("An error occurred during serialization")]
     Serialization(SerializationError),
 
-    #[error("I/O Error")] 
-    Io(#[from] io::Error), 
+    #[error("I/O Error")]
+    Io(#[from] io::Error),
 
     #[error("An external error occurred: {0}")]
     External(Box<dyn std::error::Error + Send + Sync>),
@@ -49,7 +49,7 @@ pub enum SpriteShrinkError {
 
 /// Converts an `ArchiveError` into a `SpriteShrinkError`.
 ///
-/// This implementation allows for the ergonomic propagation of errors from 
+/// This implementation allows for the ergonomic propagation of errors from
 /// the archive module into the library's top-level error type. It wraps most
 /// archive-specific errors within the `SpriteShrinkError::Archive` variant.
 ///
@@ -68,9 +68,9 @@ impl From<ArchiveError> for SpriteShrinkError {
 
 /// Converts a `ProcessingError` into a `SpriteShrinkError`.
 ///
-/// This implementation allows for the ergonomic propagation of errors from 
-/// the data processing module into the library's top-level error type. It 
-/// wraps most processing-specific errors within the 
+/// This implementation allows for the ergonomic propagation of errors from
+/// the data processing module into the library's top-level error type. It
+/// wraps most processing-specific errors within the
 /// `SpriteShrinkError::Processing` variant.
 ///
 /// A special case is handled for `ProcessingError::Cancelled` to ensure that a
@@ -88,9 +88,9 @@ impl From<ProcessingError> for SpriteShrinkError {
 
 /// Converts a `SerializationError` into a `SpriteShrinkError`.
 ///
-/// This implementation allows for the ergonomic propagation of errors from 
-/// the data serialization module into the library's top-level error type. It 
-/// wraps most serialization-specific errors within the 
+/// This implementation allows for the ergonomic propagation of errors from
+/// the data serialization module into the library's top-level error type. It
+/// wraps most serialization-specific errors within the
 /// `SpriteShrinkError::Serialization` variant.
 ///
 /// A special case is handled for `ProcessingError::Cancelled` to ensure that a

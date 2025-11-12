@@ -7,18 +7,18 @@ pub mod ffi;
 
 mod lib_error_handling;
 pub use lib_error_handling::{
-    IsCancelled, SpriteShrinkError, 
+    IsCancelled, SpriteShrinkError,
 };
 
 mod lib_structs;
 pub use lib_structs::{
-    ChunkLocation, FileData, FileHeader, FileManifestParent, 
+    ChunkLocation, FileData, FileHeader, FileManifestParent,
     ProcessedFileData, Progress, SSAChunkMeta
 };
 
 mod parsing;
 pub use parsing::{
-    parse_file_chunk_index, parse_file_header, parse_file_metadata, 
+    parse_file_chunk_index, parse_file_header, parse_file_metadata,
     SUPPORTED_VERSION, MAGIC_NUMBER, SS_SEED
 };
 

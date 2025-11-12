@@ -41,13 +41,13 @@ use crate::storage_io::read_file_data;
 ///   data cannot be correctly parsed.
 pub fn get_file_header(file_path: &Path) -> Result<FileHeader, CliError> {
     let header_size = mem::size_of::<FileHeader>();
-    
+
     let byte_header_data: Vec<u8> = read_file_data(
-        file_path, 
-        &0, 
+        file_path,
+        &0,
         &header_size
     )?;
-    
+
     let header: FileHeader = parse_file_header(&byte_header_data)?;
 
     Ok(header)
@@ -72,9 +72,9 @@ pub fn get_file_header(file_path: &Path) -> Result<FileHeader, CliError> {
 /// - `Ok(Vec<FileManifestParent>)` containing the parsed file manifest.
 /// - `Err(CliError)` if reading or parsing the manifest fails.
 pub fn get_file_manifest<H>(
-    file_path: &Path, 
-    man_offset: &u64, 
-    man_length: &usize) -> Result<Vec<FileManifestParent<H>>, CliError> 
+    file_path: &Path,
+    man_offset: &u64,
+    man_length: &usize) -> Result<Vec<FileManifestParent<H>>, CliError>
 where
     H: Hashable
         + Ord
@@ -84,8 +84,8 @@ where
 {
     //Read file manifest from file.
     let bin_vec_manifest = read_file_data(
-        file_path, 
-        man_offset, 
+        file_path,
+        man_offset,
         man_length
     )?;
 
@@ -143,7 +143,7 @@ pub fn get_max_rom_index(file_path: &Path)
 /// - `Ok(HashMap<u64, ChunkLocation>)` containing the parsed index.
 /// - `Err(CliError)` if reading the file or parsing the data fails.
 pub fn get_chunk_index<H>(
-    file_path: &Path, 
+    file_path: &Path,
     chunk_index_offset: &u64,
     chunk_index_length: &usize
 ) -> Result<HashMap<H, ChunkLocation>, CliError>
@@ -156,14 +156,13 @@ where
     {
     //Read the chunk_index from the file.
     let bin_vec_chunk_index = read_file_data(
-        file_path, 
-        chunk_index_offset, 
+        file_path,
+        chunk_index_offset,
         chunk_index_length
     )?;
-    
+
     //Parse the binary data into a chunk index HashMap and return the value.
     parse_file_chunk_index(
         &bin_vec_chunk_index
     ).map_err(CliError::from)
 }
-

@@ -7,10 +7,10 @@
 //! to the designated output directory.
 
 use std::{
-    fmt::Display, 
-    fs::{File, create_dir_all, rename}, 
-    hash::Hash, 
-    io::{BufWriter, Write}, 
+    fmt::Display,
+    fs::{File, create_dir_all, rename},
+    hash::Hash,
+    io::{BufWriter, Write},
     path::Path,
     sync::{
         Arc, atomic::{AtomicBool, Ordering},
@@ -25,11 +25,11 @@ use sprite_shrink::{Hashable, decompress_chunk};
 
 use crate::{
     archive_parser::{
-    get_chunk_index, get_file_header, get_file_manifest, 
-    }, 
-    arg_handling::Args, 
+    get_chunk_index, get_file_header, get_file_manifest,
+    },
+    arg_handling::Args,
     cli_types::TempFileGuard,
-    error_handling::CliError, 
+    error_handling::CliError,
     storage_io::read_file_data,
 };
 
@@ -69,8 +69,8 @@ use crate::{
 ///   in the archive.
 /// - Any error propagated from the decompression or file writing stages.
 pub fn run_extraction(
-    file_path: &Path, 
-    out_dir: &Path, 
+    file_path: &Path,
+    out_dir: &Path,
     rom_indices: &Vec<u8>,
     args: &Args,
     running: Arc<AtomicBool>,
@@ -83,17 +83,17 @@ pub fn run_extraction(
 
     match hash_bit_length {
         1 => extract_data::<u64>(
-            file_path, 
-            out_dir, 
-            rom_indices,  
+            file_path,
+            out_dir,
+            rom_indices,
             &header,
             args,
             running,
         ),
         2 => extract_data::<u128>(
-            file_path, 
-            out_dir, 
-            rom_indices, 
+            file_path,
+            out_dir,
+            rom_indices,
             &header,
             args,
             running,
@@ -102,7 +102,7 @@ pub fn run_extraction(
             Err(CliError::InternalError(
                 "Unsupported hash type in archive header.".to_string()
             )),
-           
+
     }
 }
 
@@ -120,12 +120,12 @@ fn extract_data<H>(
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
 where
-    H: Hashable + 
-        Ord + 
-        Display + 
-        Serialize + 
-        for<'de> Deserialize<'de> + 
-        Eq + 
+    H: Hashable +
+        Ord +
+        Display +
+        Serialize +
+        for<'de> Deserialize<'de> +
+        Eq +
         Hash,
 {
     /*Stores the length of the file_manifest from the header.*/
@@ -137,27 +137,27 @@ where
     /*Stores the length of the dictionary from the header.*/
     let dictionary_length = header.dict_length as usize;
 
-    /*Read and store the file manifest from the target file in memory in 
+    /*Read and store the file manifest from the target file in memory in
     the file_manifest variable*/
     let file_manifest = get_file_manifest::<H>(
-        file_path, 
-        &header.man_offset, 
+        file_path,
+        &header.man_offset,
         &man_length
     )?;
 
-    /*Read and store the zstd compression dictionary from the target file in 
+    /*Read and store the zstd compression dictionary from the target file in
     memory in the dictionary variable.*/
     let dictionary = read_file_data(
-        file_path, 
-        &header.dict_offset, 
+        file_path,
+        &header.dict_offset,
         &dictionary_length
     )?;
 
-    /*Read and store the file zstd compression dictionary from the target 
+    /*Read and store the file zstd compression dictionary from the target
     file in memory in the dictionary variable.*/
     let chunk_index = get_chunk_index::<H>(
-        file_path, 
-        &header.chunk_index_offset, 
+        file_path,
+        &header.chunk_index_offset,
         &chunk_length
     )?;
 
@@ -199,18 +199,18 @@ where
 
             /*Store the chunk data offset within the compressed
             store, from the ChunkLocation struct.*/
-            let absolute_offset = 
-                chunk_location.offset + 
+            let absolute_offset =
+                chunk_location.offset +
                 header.data_offset;
 
             let comp_chunk_data = read_file_data(
-                file_path, 
-                &absolute_offset, 
+                file_path,
+                &absolute_offset,
                 &(chunk_location.compressed_length as usize)
             )?;
 
             let decomp_chunk_data = decompress_chunk(
-                    &comp_chunk_data, 
+                    &comp_chunk_data,
                     &dictionary
             )?;
 

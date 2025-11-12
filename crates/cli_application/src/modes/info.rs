@@ -1,7 +1,7 @@
 //! Implements the metadata retrieval mode for the command-line application.
 //!
 //! This module contains the `run_info` function, which reads the header
-//! and file manifest from a sprite-shrink multicart archive. It then displays 
+//! and file manifest from a sprite-shrink multicart archive. It then displays
 //! a summary of the archive's contents, such as the names and indices of
 //! all contained files, to the console.
 
@@ -34,11 +34,11 @@ use crate::error_handling::CliError;
 ///
 /// * `file_path`: A `Path` pointing to the archive file whose
 ///   metadata is to be displayed.
-/// * `list`: A user provided boolean flag that determines the plain text 
+/// * `list`: A user provided boolean flag that determines the plain text
 ///   output format. If `true`, the output will be a plain text table.
-/// * `metadata`: A user provided boolean flag that determines the json 
+/// * `metadata`: A user provided boolean flag that determines the json
 ///   output format. If `true`, the output will be JSON.
-/// 
+///
 ///
 /// # Returns
 ///
@@ -67,15 +67,15 @@ pub fn run_info(
         ($hash_type:ty) => {{
             let file_manifest =
                 get_file_manifest::<$hash_type>(
-                    file_path, 
-                    &header.man_offset, 
+                    file_path,
+                    &header.man_offset,
                     &man_length
                 )?;
             dispatch_print_info(file_manifest, list, metadata)?
         }};
     }
 
-    /*Read and store the file manifest from the target file in memory in 
+    /*Read and store the file manifest from the target file in memory in
     the file_manifest variable*/
     match hash_bit_length {
         1 => process_and_print!(u64),
@@ -84,7 +84,7 @@ pub fn run_info(
             //Handle other cases or return an error for unsupported hash types
             return Err(CliError::InternalError(
                 "Unsupported hash type in archive header.".to_string()));
-        }   
+        }
     };
 
     Ok(())
@@ -102,9 +102,9 @@ pub fn run_info(
 ///
 /// * `file_manifest`: A vector of `FileManifestParent` structs, where each
 ///   struct contains the metadata for a single file in the archive.
-/// * `list`: A user provided boolean flag that determines the plain text 
+/// * `list`: A user provided boolean flag that determines the plain text
 ///   output format. If `true`, the output will be a plain text table.
-/// * `metadata`: A user provided boolean flag that determines the json 
+/// * `metadata`: A user provided boolean flag that determines the json
 ///   output format. If `true`, the output will be JSON.
 ///
 /// # Type Parameters
@@ -118,7 +118,7 @@ fn dispatch_print_info<H: Clone>(
     metadata: bool
 ) -> Result<(), CliError>{
     if metadata {
-        print_info_json::<H>(file_manifest)?; 
+        print_info_json::<H>(file_manifest)?;
     } else {
         print_info_table::<H>(file_manifest);
     }
@@ -136,7 +136,7 @@ fn dispatch_print_info<H: Clone>(
 ///
 /// * `H`: The hash type used in the file manifest, which must implement
 ///   the necessary traits for serialization and display.
-/// 
+///
 /// # Examples
 ///
 /// An example of the output format printed to the console:
@@ -160,13 +160,13 @@ fn print_info_table<H: Clone>(
         let file_size = fmp.chunk_metadata.last().map_or(0, |last_chunk| {
             last_chunk.offset + last_chunk.length as u64
         });
-        println!("{}\t| {}\t| {}", 
-            index + 1, 
-            human_bytes(file_size as f64), 
+        println!("{}\t| {}\t| {}",
+            index + 1,
+            human_bytes(file_size as f64),
             fmp.filename
         );
     });
-    
+
 }
 
 /// Prints a json formatted table of the file manifest's contents.
@@ -188,7 +188,7 @@ fn print_info_json<H: Clone>(
             let file_size = fmp.chunk_metadata.last().map_or(0, |last_chunk| {
                 last_chunk.offset + last_chunk.length as u64
             });
-            
+
             json!({
                 "index": index + 1,
                 "filename": &fmp.filename,
@@ -197,7 +197,7 @@ fn print_info_json<H: Clone>(
         })
         .collect();
 
-    
+
     let output = json!(files_json);
 
     let pretty_json = to_string_pretty(&output)

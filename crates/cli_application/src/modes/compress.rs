@@ -27,8 +27,9 @@ use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::{bounded};
 use redb::{backends::InMemoryBackend, Database, TableDefinition, Value};
 use sprite_shrink::{
-    ArchiveBuilder, FileManifestParent, Hashable, Progress, SS_SEED, SSAChunkMeta,
-    serialize_uncompressed_data, test_compression, verify_single_file
+    ArchiveBuilder, FileManifestParent, Hashable, Progress, SS_SEED,
+    SSAChunkMeta, serialize_uncompressed_data, test_compression,
+    verify_single_file
 };
 use rayon::prelude::*;
 use serde::Serialize;
@@ -244,7 +245,10 @@ where
                 return Err(CliError::Cancelled);
             }
 
-            Ok(data_store_for_key_ret.iter().map(|entry| *entry.key()).collect())
+            Ok(data_store_for_key_ret
+                .iter()
+                .map(|entry| *entry.key())
+                .collect())
         } else {
             if !batch_running_clone.load(Ordering::SeqCst) {
                 return Err(CliError::Cancelled);

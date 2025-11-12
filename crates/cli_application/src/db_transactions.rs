@@ -98,7 +98,7 @@ where
 pub fn get_chunks<H>(
     hashes: &[H],
     db_info: &DBInfo<H, Vec<u8>>,
-) -> Result<Vec<Vec<u8>>, CliError> 
+) -> Result<Vec<Vec<u8>>, CliError>
 where
     H: Hashable + redb::Key + Display,
     //This bound is important for redb's generic key operations
@@ -125,15 +125,15 @@ where
             }
         }
     }
-    
+
     Ok(ret_chunks)
 }
 
 /// Retrieves all keys (chunk hashes) from the database.
 ///
 /// This function performs a full scan of the data store table to collect every
-/// unique key. It operates within a single read transaction for consistency and
-/// efficiency. The resulting vector of keys represents all unique chunks
+/// unique key. It operates within a single read transaction for consistency
+/// and efficiency. The resulting vector of keys represents all unique chunks
 /// identified during the file processing stage.
 ///
 /// # Arguments
@@ -154,7 +154,7 @@ where
 ///   use as a `redb` database key.
 pub fn get_keys<H>(
     db_info: &DBInfo<H, Vec<u8>>,
-) -> Result<Vec<H>, CliError> 
+) -> Result<Vec<H>, CliError>
 where
     H: Hashable + redb::Key,
     //This bound is important for redb's generic key operations
@@ -168,14 +168,14 @@ where
         .iter()?
         //The iterator yields Result<(Key, Value), Error>
         .map(|result| {
-            /*The result variable is a Result. 
+            /*The result variable is a Result.
             We map over it to get the (key, _value) pair.*/
             result.map(|(key, _)| H::from(key.value()))
             .map_err(CliError::from)
         })
         //Collect the iterator of Results into a single Result containing a Vec.
         .collect();
-    
+
     //Return all_keys
     all_keys
 }
@@ -225,4 +225,3 @@ where
 
     Ok(total_size)
 }
-

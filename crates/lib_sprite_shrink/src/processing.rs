@@ -61,7 +61,8 @@ pub enum ProcessingError {
 
 pub trait Hashable:
     //Specifies what capabilities H must have.
-    Copy + Clone + Eq + std::hash::Hash + serde::Serialize + Send + Sync + 'static
+    Copy + Clone + Eq + std::hash::Hash + serde::Serialize + Send + Sync +
+        'static
 {
     /// Create a new hash from a byte slice using the library's seed.
     fn from_bytes_with_seed(bytes: &[u8]) -> Self;
@@ -569,7 +570,8 @@ where
     /*Calculate a step value to sample evenly across all chunks.
     This ensures we select chunks from the beginning, middle, and
     end.*/
-    let step = (total_data_size as f64 / MAX_SAMPLES_SIZE as f64).ceil() as u64;
+    let step = (total_data_size as f64 / MAX_SAMPLES_SIZE as f64)
+        .ceil() as u64;
     let step = step.max(1) as usize;
 
 
@@ -734,7 +736,8 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     size fail early.*/
     if seek_offset + seek_length > original_file_size {
         return Err(ProcessingError::SeekOutOfBounds(
-            "Seek request is outside the bounds of the original file.".to_string(),
+            "Seek request is outside the bounds of the original file."
+                .to_string(),
         ).into());
     }
 

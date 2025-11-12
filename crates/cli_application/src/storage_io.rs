@@ -25,14 +25,15 @@ use crate::{
 
 /// A string literal representing the default, commented configuration file.
 ///
-/// This constant holds the content that is written to `spriteshrink.toml` 
-/// when the application is run for the first time and no existing 
+/// This constant holds the content that is written to `spriteshrink.toml`
+/// when the application is run for the first time and no existing
 /// configuration is found.
 ///
-/// Its primary purpose is to provide a user-friendly template, with each 
+/// Its primary purpose is to provide a user-friendly template, with each
 /// option explained, so that users can easily understand and customize their
 /// settings.
-const DEFAULT_CONFIG_WITH_COMMENTS: &str = r#"# Sets the numerical compression level.
+const DEFAULT_CONFIG_WITH_COMMENTS:
+&str = r#"# Sets the numerical compression level.
 # Default = 19
 compression_level = 19
 
@@ -58,9 +59,9 @@ auto_tune = false
 # Default = 15 seconds
 autotune_timeout = 15
 
-# Enable (true) or disable (false) whether to optimze the ztd compression 
-# dictionary when it is generated. Be sure to disable when processing large 
-# amounts of data (e.g. If a single ROM exceeds approximately 64 megabytes, 
+# Enable (true) or disable (false) whether to optimze the ztd compression
+# dictionary when it is generated. Be sure to disable when processing large
+# amounts of data (e.g. If a single ROM exceeds approximately 64 megabytes,
 # set to false) as this step can take a significant amount of time for neglible
 # gain for large amounts of data.
 # Default = false
@@ -96,7 +97,7 @@ log_retention_days = 7
 # - error will only log errors.
 # - warning includes warning messages and the above messages (errors)
 # - info includes info messages and the above messages (errrors and warnings)
-# - debug includes debug messages and the above messages 
+# - debug includes debug messages and the above messages
 #   (errrors, warnings and info)
 # - off disables the creation of a log file and won't write any messages to one
 #   if one exists
@@ -124,8 +125,8 @@ fn is_regular_file(path: &Path) -> bool {
     fs::symlink_metadata(path)
         .map(|m| {
             m.file_type().is_file()
-        }) 
-        .unwrap_or(false) 
+        })
+        .unwrap_or(false)
 }
 
 /// Sorts input paths into separate vectors of files and directories.
@@ -183,7 +184,9 @@ pub fn organize_paths(
 /// A `Result` which is:
 /// - `Ok(Vec<PathBuf>)` containing a list of all regular files found.
 /// - `Err(CliError)` if reading any of the directories fails.
-pub fn files_from_dirs(dir_paths: &[PathBuf]) -> Result<Vec<PathBuf>, CliError> {
+pub fn files_from_dirs(
+    dir_paths: &[PathBuf]
+) -> Result<Vec<PathBuf>, CliError> {
     /*Create mutable vector file_paths and then for each path in dir_paths:
     - Read the directory for entries. or each entry found:
         - Check if each entry is a file.
@@ -222,8 +225,8 @@ pub fn files_from_dirs(dir_paths: &[PathBuf]) -> Result<Vec<PathBuf>, CliError> 
 /// - `Ok(Vec<u8>)` containing the bytes read from the file segment.
 /// - `Err(CliError::Io)` if the file cannot be opened or read.
 pub fn read_file_data(
-    filepath: &Path, 
-    data_index: &u64, 
+    filepath: &Path,
+    data_index: &u64,
     data_length: &usize
 ) -> Result<Vec<u8>, CliError> {
     //Open file, but don't read whole file data into memory.
@@ -237,25 +240,25 @@ pub fn read_file_data(
 
     //Read the data data from the file.
     file.read_exact(&mut file_buffer)?;
-    
+
     //Return read data from file.
     Ok(file_buffer)
 }
 
 /// Assembles the final archive file by combining metadata and compressed data.
 ///
-/// This function completes the archive creation process by writing all 
+/// This function completes the archive creation process by writing all
 /// necessary components to the final output file. It operates in two stages to
 /// ensure data integrity and efficient handling of large files:
 ///
-/// 1. It first writes the initial data block, which contains the archive 
+/// 1. It first writes the initial data block, which contains the archive
 ///    header and all serialized metadata (file manifest, chunk index, etc.),
 ///    to the final destination file.
 /// 2. It then appends the compressed data, which is streamed from a temporary
 ///    file where it was stored during the compression phase.
 ///
-/// After the contents of the temporary file have been successfully appended, 
-/// the temporary file is deleted, leaving a complete and valid `.ssmc` 
+/// After the contents of the temporary file have been successfully appended,
+/// the temporary file is deleted, leaving a complete and valid `.ssmc`
 /// archive.
 ///
 /// # Arguments
@@ -280,7 +283,7 @@ pub fn write_final_archive(
     tmp_file_path: &Path,
     data: &[u8]
 ) -> Result<(), CliError> {
-    /*Check if the parent directory of the target output exists, 
+    /*Check if the parent directory of the target output exists,
     if not create it.*/
     if let Some(dir) = output_path.parent() {
         fs::create_dir_all(dir)?;
@@ -310,11 +313,11 @@ pub fn write_final_archive(
 /// needed.
 ///
 /// This function orchestrates the loading of the `SpriteShrinkConfig` struct.
-/// It first determines the appropriate, platform-specific path for the 
+/// It first determines the appropriate, platform-specific path for the
 /// configuration file using the `confy` crate.
 ///
 /// If the configuration file does not exist at that path, it will create the
-/// necessary parent directories and write a default, well-commented 
+/// necessary parent directories and write a default, well-commented
 /// configuration file to help the user get started.
 ///
 /// It then proceeds to load and parse the TOML configuration file into a
@@ -331,7 +334,7 @@ pub fn write_final_archive(
 /// This function will return an error in the following situations:
 /// - The configuration directory cannot be created due to permissions issues.
 /// - The default configuration file cannot be written to disk.
-/// - The existing configuration file is malformed (invalid TOML) and cannot 
+/// - The existing configuration file is malformed (invalid TOML) and cannot
 ///   be parsed.
 /// - A general I/O error occurs during file reading or writing.
 pub fn load_config() -> Result<SpriteShrinkConfig, CliError> {
@@ -340,10 +343,10 @@ pub fn load_config() -> Result<SpriteShrinkConfig, CliError> {
 
     //Get the confy config_path for where the config will be stored.
     let config_path = confy::get_configuration_file_path(
-        app_name, 
+        app_name,
         APPIDENTIFIER.config_name)?;
-    
-    /*Check if the config exists. 
+
+    /*Check if the config exists.
     If it does not create and fill that config with a default commented
     config file.
     If the config does, continue to loading it with confy.*/
@@ -382,11 +385,11 @@ pub fn load_config() -> Result<SpriteShrinkConfig, CliError> {
 pub fn append_data_to_file(path: &Path, data: &[u8]) -> Result<(), CliError> {
     let file = OpenOptions::new()
         //Create the file if it doesn't exist.
-        .create(true)   
+        .create(true)
         //Append to the end of the file.
-        .append(true)   
+        .append(true)
         //Open the file with the specified options at the specified path
-        .open(path)?; 
+        .open(path)?;
 
     //Creates an in-memory buffer that batches writes to the OS.
     let mut writer = BufWriter::new(file);
@@ -425,7 +428,7 @@ pub fn calc_tot_input_size(
     file_paths: &[PathBuf],
 ) -> Result<u64, CliError> {
     let mut size_sum: u64 = 0;
-    
+
     for path in file_paths{
         let metadata = fs::metadata(path)?;
         size_sum += metadata.len();
@@ -473,8 +476,8 @@ pub fn cleanup_old_logs(
     }
 
     let proj_dirs = ProjectDirs::from(
-        APPIDENTIFIER.qualifier, 
-        APPIDENTIFIER.organization, 
+        APPIDENTIFIER.qualifier,
+        APPIDENTIFIER.organization,
         APPIDENTIFIER.application)
     .expect("Failed to find a valid project directory.");
 
@@ -494,7 +497,7 @@ pub fn cleanup_old_logs(
         let log = log?;
         let path = log.path();
 
-        if path.is_file() && 
+        if path.is_file() &&
             path.to_string_lossy().contains("debug.log") &&
             let Ok(metadata) = metadata(&path) &&
             let Ok(created_time) = metadata.created() &&

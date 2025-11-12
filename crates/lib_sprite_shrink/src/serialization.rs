@@ -208,7 +208,8 @@ where
         ..Default::default()
     };
 
-    serialized_data.ser_file_manifest.sort_by(|a, b| a.filename.cmp(&b.filename));
+    serialized_data.ser_file_manifest
+        .sort_by(|a, b| a.filename.cmp(&b.filename));
 
     /*Put each files chunks in order from the beginning of the file to the end
     for easier processing when rebuilding file. */

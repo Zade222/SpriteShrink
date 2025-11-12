@@ -1,9 +1,9 @@
 //! Defines core data structures for the CLI application.
 //!
 //! This module centralizes the definitions of fundamental structs used across
-//! the application's lifecycle. These structures facilitate communication between
-//! threads, manage database interactions, and handle temporary resources,
-//! ensuring a clean and organized architecture.
+//! the application's lifecycle. These structures facilitate communication
+//! between threads, manage database interactions, and handle temporary
+//! resources, ensuring a clean and organized architecture.
 
 use std::{
     fs::remove_file,
