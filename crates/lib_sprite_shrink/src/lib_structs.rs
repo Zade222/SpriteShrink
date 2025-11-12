@@ -196,7 +196,7 @@ pub struct SeekMetadata<H>{
     pub end_offset: u64
 }
 
-/// Implementation of helper methods for [`SeekMetadata`].
+/// Implementation of helper method for [`SeekMetadata`].
 ///
 /// This `impl` provides a convenient constructor that creates a fully‑initialized
 /// `SeekMetadata` value in a single call. Using the constructor makes call‑sites

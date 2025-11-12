@@ -44,7 +44,7 @@ pub enum SerializationError {
 /// A `Vec` containing clones of all the values from the input map.
 pub fn dashmap_values_to_vec<T, R>(
     input_dash: &DashMap<T, R>
-) -> Vec<R> 
+) -> Vec<R>
 where
     T: Eq + std::hash::Hash,
     R: Clone,
@@ -73,9 +73,9 @@ where
 ///
 /// * `sorted_hashes`: A slice of hashes that have been sorted into a
 ///   deterministic order. This consistent ordering is critical for ensuring
-///   that the generated chunk index and its offsets are correct and 
+///   that the generated chunk index and its offsets are correct and
 ///   reproducible.
-/// * `data_store_get_chunk_cb`: A callback function that the serializer uses 
+/// * `data_store_get_chunk_cb`: A callback function that the serializer uses
 ///   to fetch the raw byte data for a given set of hashes. It must return a
 ///   `Vec<Vec<u8>>` where the data for each chunk is in the same order as the
 ///   input hashes.
@@ -94,7 +94,7 @@ where
 ///
 /// * `D`: The type of the `data_store_get_chunk_cb` callback. It must be a
 ///   closure that implements `Fn(&[H]) -> Vec<Vec<u8>>`.
-/// * `H`: The generic hash type used for identifying chunks. It must be 
+/// * `H`: The generic hash type used for identifying chunks. It must be
 ///   `Copy`,
 ///   `Eq`, `Hash`, and `Display`.
 pub fn serialize_store<D, E, H>(
@@ -106,7 +106,7 @@ where
     E: std::error::Error + Send + Sync + 'static,
     H: Copy + Eq + std::hash::Hash + std::fmt::Display,
 {
-    
+
     let (chunk_index, _offset) = sorted_hashes.iter().try_fold(
         (
             HashMap::with_capacity(sorted_hashes.len()),
@@ -116,7 +116,7 @@ where
             let data_entry = &data_store_get_chunk_cb(&[*hash])
             .map_err(|e| SerializationError::External(e.to_string()))?
             .remove(0);
-            
+
             if !data_entry.is_empty() {
                 let data = data_entry;
                 let data_len = data.len() as u64;
@@ -130,7 +130,7 @@ where
                 );
 
                 offset += data_len;
-                
+
                 Ok((index_map, offset))
             } else {
                 //If a chunk is missing, return an error
@@ -145,7 +145,7 @@ where
 /// Prepares and serializes all data necessary for the final archive assembly.
 ///
 /// This function acts as a final preparation step before the archive is
-/// constructed. It takes the collected file metadata and the unique data 
+/// constructed. It takes the collected file metadata and the unique data
 /// chunks and organizes them into a consistent, serializable format.
 ///
 /// The key operations performed are:
@@ -153,8 +153,8 @@ where
 ///     `DashMap` into a `Vec` and sorts it alphabetically by filename. This
 ///     ensures that the file listing in the final archive is deterministic.
 /// 2.  **Sorting Chunk Metadata**: For each file in the manifest, it sorts the
-///     chunk metadata by the original byte offset. This is critical for 
-///     ensuring that files can be correctly reconstructed in order during 
+///     chunk metadata by the original byte offset. This is critical for
+///     ensuring that files can be correctly reconstructed in order during
 ///     extraction.
 /// 3.  **Collecting and Sorting Hashes**: It retrieves all unique chunk hashes
 ///     from the data store (via the `data_store_key_cb`) and sorts them. This
@@ -197,7 +197,7 @@ pub fn serialize_uncompressed_data<D, E, H, K>(
     data_store_key_cb: &K,
     data_store_get_chunk_cb: &D
 ) -> Result<(
-    Vec<FileManifestParent<H>>/*ser_file_manifest */, 
+    Vec<FileManifestParent<H>>/*ser_file_manifest */,
     HashMap<H, ChunkLocation> /*chunk_index */,
     Vec<H> /*sorted_hashes */
 ), SpriteShrinkError>
@@ -226,16 +226,16 @@ where
             return Err(SpriteShrinkError::External(Box::new(e)));
         }
     };
-    
-    
+
+
     sorted_hashes.sort_unstable();
 
-    let chunk_index: HashMap<H, ChunkLocation> = 
+    let chunk_index: HashMap<H, ChunkLocation> =
         serialize_store(&sorted_hashes, data_store_get_chunk_cb)?;
-    
+
     Ok((
-        ser_file_manifest, 
-        chunk_index, 
+        ser_file_manifest,
+        chunk_index,
         sorted_hashes
     ))
 }
