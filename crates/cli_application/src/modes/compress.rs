@@ -515,9 +515,10 @@ where
                 };
 
                 //Serialize temporary data
-                let (_ser_file_manifest,
+                /*let (_ser_file_manifest,
                 _chunk_index,
-                sorted_hashes) =
+                sorted_hashes)*/
+                let temp_serialized_data =
                 serialize_uncompressed_data(
                     &_fm,
                     &at_key_ret_cb,
@@ -537,7 +538,7 @@ where
                 /*Compress the data and measure the size
                 (dictionary size + compressed data size)*/
                 let compressed_size = test_compression(
-                    &sorted_hashes,
+                    &temp_serialized_data.sorted_hashes,
                     total_data_size,
                     _process_threads,
                     8192,
@@ -593,10 +594,10 @@ where
         _veri_hashes = _temp_data.veri_hashes;
 
         /*Serialize the data for later using it for verifying the files. */
-        let (_ser_fm,
+        /*let (_ser_fm,
             _ci,
-            sorted_hashes) =
-            serialize_uncompressed_data(
+            sorted_hashes)*/
+        let temp_serialized_data = serialize_uncompressed_data(
                 &_file_manifest,
                 &key_ret_cb,
                 chunk_ret_cb.as_ref()
@@ -655,7 +656,7 @@ where
                 /*Given the current dictionary size, determine the size of the
                 data*/
                 let compressed_size = test_compression(
-                    &sorted_hashes,
+                    &temp_serialized_data.sorted_hashes,
                     chunk_sum,
                     _process_threads,
                     current_dict_size,
@@ -731,9 +732,10 @@ where
 
     /*Prepares and serializes all data for the final archive. See above for
     each variable in the output tuple.*/
-    let (ser_file_manifest,
+    /*let (ser_file_manifest,
         chunk_index,
-        sorted_hashes) = serialize_uncompressed_data(
+        sorted_hashes)*/
+    let serialized_data = serialize_uncompressed_data(
             &_file_manifest,
             &key_ret_cb,
             chunk_ret_cb.as_ref()
@@ -760,7 +762,7 @@ where
     let verification_pb_arc = Arc::new(verification_pb);
 
     //Clone ser_file_manifest for use in verification loop
-    let sfm_clone = ser_file_manifest.clone();
+    let sfm_clone = serialized_data.ser_file_manifest.clone();
 
     //Vector used to track status of each thread.
     let mut thread_handles = vec![];
@@ -826,7 +828,7 @@ where
 
     /*chunk index was storing non compressed data_store locations and is no
     longer needed.*/
-    drop(chunk_index);
+    drop(serialized_data.chunk_index);
 
     //Define progress bar to be used by callback
     let progress_bar = Arc::new(Mutex::new(None));
@@ -966,8 +968,8 @@ where
     it according to the ssmc spec and returns the byte data ready to be
     written.*/
     let mut builder = ArchiveBuilder::new(
-        ser_file_manifest,
-        &sorted_hashes,
+        serialized_data.ser_file_manifest,
+        &serialized_data.sorted_hashes,
         file_paths.len() as u32,
         *hash_type_id,
         chunk_sum,

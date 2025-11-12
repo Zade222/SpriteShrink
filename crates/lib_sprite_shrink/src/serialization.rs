@@ -14,7 +14,7 @@ use thiserror::Error;
 use crate::lib_error_handling::{
     IsCancelled, SpriteShrinkError
 };
-use crate::lib_structs::{ChunkLocation, FileManifestParent};
+use crate::lib_structs::{ChunkLocation, FileManifestParent, SerializedData};
 
 #[derive(Error, Debug)]
 pub enum SerializationError {
@@ -177,7 +177,7 @@ where
 /// # Returns
 ///
 /// A `Result` which is:
-/// - `Ok` on success, containing a tuple with four elements:
+/// - `Ok` on success, containing a struct with three fields:
 ///   - `Vec<FileManifestParent<H>>`: The file manifest, sorted by filename.
 ///   - `HashMap<H, ChunkLocation>`: The complete chunk index, mapping each
 ///     hash to its location.
@@ -196,28 +196,25 @@ pub fn serialize_uncompressed_data<D, E, H, K>(
     file_manifest: &DashMap<String, FileManifestParent<H>>,
     data_store_key_cb: &K,
     data_store_get_chunk_cb: &D
-) -> Result<(
-    Vec<FileManifestParent<H>>/*ser_file_manifest */,
-    HashMap<H, ChunkLocation> /*chunk_index */,
-    Vec<H> /*sorted_hashes */
-), SpriteShrinkError>
+) -> Result<SerializedData<H>, SpriteShrinkError>
 where
     D: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
     E: std::error::Error + IsCancelled + Send + Sync + 'static,
     H: Copy + Ord + Eq + std::hash::Hash + std::fmt::Display,
     K: Fn() -> Result<Vec<H>, E>
 {
-    let mut ser_file_manifest = dashmap_values_to_vec(file_manifest);
+    let mut serialized_data = SerializedData<H>::default();
 
-    ser_file_manifest.sort_by(|a, b| a.filename.cmp(&b.filename));
+    serialized_data.ser_file_manifest = dashmap_values_to_vec(file_manifest);
+    serialized_data.ser_file_manifest.sort_by(|a, b| a.filename.cmp(&b.filename));
 
     /*Put each files chunks in order from the beginning of the file to the end
     for easier processing when rebuilding file. */
-    ser_file_manifest.iter_mut().for_each(|fmp| {
+    serialized_data.ser_file_manifest.iter_mut().for_each(|fmp| {
         fmp.chunk_metadata.sort_by_key(|metadata| metadata.offset);
     });
 
-    let mut sorted_hashes: Vec<H> = match data_store_key_cb() {
+    serialized_data.sorted_hashes = match data_store_key_cb() {
         Ok(hashes) => hashes,
         Err(e) => {
             if e.is_cancelled() {
@@ -228,14 +225,12 @@ where
     };
 
 
-    sorted_hashes.sort_unstable();
+    serialized_data.sorted_hashes.sort_unstable();
 
-    let chunk_index: HashMap<H, ChunkLocation> =
-        serialize_store(&sorted_hashes, data_store_get_chunk_cb)?;
+    serialized_data.chunk_index = serialize_store(
+        &serialized_data.sorted_hashes,
+        data_store_get_chunk_cb
+    )?;
 
-    Ok((
-        ser_file_manifest,
-        chunk_index,
-        sorted_hashes
-    ))
+    Ok(serialized_data)
 }

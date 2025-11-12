@@ -193,11 +193,12 @@ where
     };
 
     //Call the core Rust serialization logic.
-    let (
-        ser_file_manifest,
-        chunk_index,
-        sorted_hashes
-    ) = match serialize_uncompressed_data::<_, SpriteShrinkError, H, _>(
+    let serialized_data = match serialize_uncompressed_data::<
+        _,
+        SpriteShrinkError,
+        H,
+        _
+    >(
         &file_manifest,
         &get_keys_closure,
         &get_chunks_closure
@@ -207,9 +208,9 @@ where
     };
 
     let mut ffi_manifests_vec: Vec<FFIFileManifestParent<H>> =
-           Vec::with_capacity(ser_file_manifest.len());
+           Vec::with_capacity(serialized_data.ser_file_manifest.len());
 
-    for fmp in ser_file_manifest {
+    for fmp in serialized_data.ser_file_manifest {
         let mut chunk_meta_vec: Vec<FFISSAChunkMeta<H>> = fmp
             .chunk_metadata
             .iter()
@@ -260,7 +261,7 @@ where
     //Give up ownership of the outer Vec
     std::mem::forget(ffi_manifests_vec);
 
-    let mut entries: Vec<FFIChunkIndexEntry<H>> = chunk_index
+    let mut entries: Vec<FFIChunkIndexEntry<H>> = serialized_data.chunk_index
         .into_iter()
         .map(|(hash, location)| {
             FFIChunkIndexEntry::from((
@@ -287,12 +288,12 @@ where
         entries_ptr,
         entries_len,
         entries_cap,
-        sorted_hashes.as_ptr(),
-        sorted_hashes.len(),
-        sorted_hashes.capacity(),
+        serialized_data.sorted_hashes.as_ptr(),
+        serialized_data.sorted_hashes.len(),
+        serialized_data.sorted_hashes.capacity(),
     )));
 
-    std::mem::forget(sorted_hashes);
+    std::mem::forget(serialized_data.sorted_hashes);
 
     unsafe {
         *out_ptr = Box::into_raw(output);

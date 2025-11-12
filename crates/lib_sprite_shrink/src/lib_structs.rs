@@ -6,6 +6,7 @@
 //! serialized format on disk. They are designed to be efficient for both
 //! compression and extraction operations.
 
+use std::collections::HashMap;
 use bytemuck::{Pod, Zeroable};
 use fastcdc::v2020::{Chunk};
 use serde::{Deserialize, Serialize};
@@ -212,6 +213,33 @@ impl<H> SeekMetadata<H> {
     pub fn new(hash: H, start_offset: u64, end_offset: u64) -> Self {
         Self { hash, start_offset, end_offset }
     }
+}
+
+/// Holds all data produced by a single *uncompressed* serialization pass.
+/// The three fields together constitute the complete description of an
+/// archive before the actual byte payload is written.
+///
+/// # Type Parameters
+/// * `H` – The hash type used to identify a chunk. It must implement
+///   `Copy`, `Ord`, `Eq`, `Hash` and `Display`.
+///
+/// # Fields
+/// * `ser_file_manifest` – A vector of `FileManifestParent<H>` records, one
+///   per file in the archive. The vector is sorted by filename and each
+///   file’s `chunk_metadata` slice is sorted by the original byte offset,
+///   making it easy to rebuild files during extraction.
+/// * `chunk_index` – A map from each chunk hash (`H`) to its location
+///   (`ChunkLocation`) within the final data blob. This index is produced by
+///   `serialize_store` and is required for locating chunks when reading an
+///   archive.
+/// * `sorted_hashes` – The list of all unique chunk hashes, sorted in a
+///   deterministic order. The order is used both for generating `chunk_index`
+///   and for the later compression step that writes the actual chunk bytes.
+#[derive(Debug, Default)]
+pub struct SerializedData<H>{
+    pub ser_file_manifest: Vec<FileManifestParent<H>>,
+    pub chunk_index: HashMap<H, ChunkLocation>,
+    pub sorted_hashes: Vec<H>,
 }
 
 /// Contains metadata for a single chunk in a file's manifest.
