@@ -203,9 +203,11 @@ where
     H: Copy + Ord + Eq + std::hash::Hash + std::fmt::Display,
     K: Fn() -> Result<Vec<H>, E>
 {
-    let mut serialized_data = SerializedData<H>::default();
+    let mut serialized_data = SerializedData::<H> {
+        ser_file_manifest: dashmap_values_to_vec(file_manifest),
+        ..Default::default()
+    };
 
-    serialized_data.ser_file_manifest = dashmap_values_to_vec(file_manifest);
     serialized_data.ser_file_manifest.sort_by(|a, b| a.filename.cmp(&b.filename));
 
     /*Put each files chunks in order from the beginning of the file to the end

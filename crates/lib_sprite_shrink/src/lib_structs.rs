@@ -235,11 +235,39 @@ impl<H> SeekMetadata<H> {
 /// * `sorted_hashes` – The list of all unique chunk hashes, sorted in a
 ///   deterministic order. The order is used both for generating `chunk_index`
 ///   and for the later compression step that writes the actual chunk bytes.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SerializedData<H>{
     pub ser_file_manifest: Vec<FileManifestParent<H>>,
     pub chunk_index: HashMap<H, ChunkLocation>,
     pub sorted_hashes: Vec<H>,
+}
+
+/// Implements a `Default` value for `SerializedData<H>`.
+///
+/// This implementation allows callers to create an empty `SerializedData` instance
+/// without having to manually initialise each field. The generic type `H`
+/// represents the hash type used throughout the archive and does not need to
+/// implement `Default` because the default instance only contains empty
+/// collections (`Vec` and `HashMap`).
+///
+/// # Fields
+/// * `ser_file_manifest`: an empty `Vec<FileManifestParent<H>>`.
+///   This will later hold a sorted list of file manifests needed to
+///   reconstruct a file.
+/// * `chunk_index`: an empty `HashMap<H, ChunkLocation>`.
+///   The index maps each chunk hash to its location in the final data blob; it
+///   is filled by `serialize_store` once the chunk data is known.
+/// * `sorted_hashes`: an empty `Vec<H>`.
+///   This vector will be populated with all unique chunk hashes in a
+///   deterministic order before the chunk index is built.
+impl<H> Default for SerializedData<H> {
+    fn default() -> Self {
+        SerializedData {
+            ser_file_manifest: Vec::new(),
+            chunk_index: HashMap::new(),
+            sorted_hashes: Vec::new(),
+        }
+    }
 }
 
 /// Contains metadata for a single chunk in a file's manifest.
