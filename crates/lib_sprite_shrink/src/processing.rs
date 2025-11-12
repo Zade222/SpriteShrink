@@ -25,7 +25,7 @@ use crate::lib_error_handling::{
     IsCancelled, SpriteShrinkError
 };
 use crate::lib_structs::{
-    FileData, FileManifestParent, ProcessedFileData, SSAChunkMeta
+    FileData, FileManifestParent, ProcessedFileData, SeekMetadata, SSAChunkMeta
 };
 use crate::parsing::{SS_SEED};
 
@@ -714,15 +714,16 @@ where
 /// * `seek_length`: The number of bytes to read from the `seek_offset`.
 ///
 /// # Returns
-/// A `Result` containing a `Vec` where each entry is a tuple of:
+/// A `Result` containing a `Vec` where each entry is a SeekMetadata which
+/// contains the following:
 /// - The `hash` of a required chunk.
-/// - The `(start, end)` byte range to copy from that chunk *after* it has
+/// - The `start` and `end` byte range to copy from that chunk *after* it has
 ///   been decompressed.
 pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     manifest: &FileManifestParent<H>,
     seek_offset: u64,
     seek_length: u64,
-) -> Result<Vec<(H, (u64, u64))>, SpriteShrinkError> {
+) -> Result<Vec<SeekMetadata<H>>, SpriteShrinkError> {
     //Calculate original file size.
     let original_file_size: u64 = manifest.chunk_metadata
         .iter()
@@ -738,7 +739,7 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     }
 
     //Prepare the return vector
-    let mut required_chunks: Vec<(H, (u64, u64))> = Vec::new();
+    let mut required_chunks: Vec<SeekMetadata<H>> = Vec::new();
 
     //Calculate the seek end for checking if each chunk is within that range.
     let seek_end = seek_offset + seek_length;
@@ -767,9 +768,11 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
                 );
 
             /*Add the gathered data to the return vector. */
-            required_chunks.push(
-                (chunk_meta.hash, (read_start_in_chunk, read_end_in_chunk))
-            )
+            required_chunks.push(SeekMetadata::new(
+                chunk_meta.hash,
+                read_start_in_chunk,
+                read_end_in_chunk
+            ))
         }
         /*If a chunk is found beyond the end of the seek request, end the
         loop.*/

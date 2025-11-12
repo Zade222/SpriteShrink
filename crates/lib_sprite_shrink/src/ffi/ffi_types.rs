@@ -29,7 +29,7 @@ use crate::lib_error_handling::{
 };
 
 use crate::lib_structs::{
-    ChunkLocation, FileManifestParent, SSAChunkMeta
+    ChunkLocation, FileManifestParent, SeekMetadata, SSAChunkMeta
 };
 
 use crate::processing::Hashable;
@@ -1117,12 +1117,12 @@ pub type FFISeekChunkInfoU128 = FFISeekChunkInfo<u128>;
 
 // Converts a tuple containing a chunk's hash and the start/end read boundaries
 // into the FFI-safe `FFISeekChunkInfo` struct.
-impl<H: Hashable> From<(H, (u64, u64))> for FFISeekChunkInfo<H> {
-    fn from((hash, (start, end)): (H, (u64, u64))) -> Self {
+impl<H: Hashable> From<SeekMetadata<H>> for FFISeekChunkInfo<H> {
+    fn from(metadata: SeekMetadata<H>) -> Self {
         Self {
-            hash,
-            read_start: start,
-            read_end: end,
+            hash: metadata.hash,
+            read_start: metadata.start_offset,
+            read_end: metadata.end_offset
         }
     }
 }

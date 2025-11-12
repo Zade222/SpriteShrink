@@ -1071,12 +1071,8 @@ where
             let mut ffi_chunks: Vec<FFISeekChunkInfo<H>> =
                 seek_info_vec
                     .into_iter()
-                    .map(|(hash, (start, end))| {
-                            FFISeekChunkInfo::from((
-                            hash,
-                            (start,
-                            end)
-                        ))
+                    .map(|metadata| {
+                        FFISeekChunkInfo::from(metadata)
                     })
                     .collect();
 

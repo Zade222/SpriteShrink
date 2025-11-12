@@ -167,6 +167,53 @@ pub enum Progress {
     Finalizing,
 }
 
+
+/// Metadata describing a single chunk that must be read for a seek request.
+///
+/// `SeekMetadata` is produced by [`get_seek_chunks`]. It contains the hash of
+/// the required chunk together with the byte range (relative to the start of
+/// that chunk) that should be copied after the chunk has been decompressed.
+///
+/// The `start_offset` is inclusive and the `end_offset` is exclusive,
+/// mirroring the semantics used throughout the library for slice ranges.
+///
+/// # Fields
+/// * `hash`: The unique identifier for the data chunk.
+/// * `start_offset`:  Inclusive start offset within the chunk where the
+///   requested data begins.
+/// * `end_offset`: Exclusive end offset within the chunk where the needed data
+///   ends.
+///
+/// # Type parameters
+///
+/// * `H` – The hash type used by the archive (e.g. `u64` or `u128`). It must
+///   implement the traits required by the surrounding APIs (`Copy`, `Eq`,
+///   etc.).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SeekMetadata<H>{
+    pub hash: H,
+    pub start_offset: u64,
+    pub end_offset: u64
+}
+
+/// Implementation of helper methods for [`SeekMetadata`].
+///
+/// This `impl` provides a convenient constructor that creates a fully‑initialized
+/// `SeekMetadata` value in a single call. Using the constructor makes call‑sites
+/// clearer and avoids having to repeat the field names each time a new instance
+/// is needed.
+///
+/// # Type parameter
+///
+/// * `H` – The hash type used by the archive (e.g. `u64`, `u128`). The type is
+///   generic so the same struct can be used with any hash algorithm that the
+///   library supports.
+impl<H> SeekMetadata<H> {
+    pub fn new(hash: H, start_offset: u64, end_offset: u64) -> Self {
+        Self { hash, start_offset, end_offset }
+    }
+}
+
 /// Contains metadata for a single chunk in a file's manifest.
 ///
 /// This struct stores essential information used to identify and place a
