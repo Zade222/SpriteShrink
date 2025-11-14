@@ -168,8 +168,8 @@ pub struct ArchiveBuilderArgsU64 {
 /// * `manifest_array_ptr`: Pointer to an array of
 ///   [`FFIFileManifestParentU128`]  structs.
 /// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
-/// * `sorted_hashes_array_ptr`: Pointer to a sorted array of all unique `u128`
-///   chunk hashes.
+/// * `sorted_hashes_array_ptr`: Pointer to a sorted array of all unique
+///   `Hash128` chunk hashes.
 /// * `sorted_hashes_len`: The number of elements in the
 ///   `sorted_hashes_array_ptr` array.
 /// * `file_count`: The total number of files being added to the archive.
@@ -195,14 +195,14 @@ pub struct ArchiveBuilderArgsU64 {
 pub struct ArchiveBuilderArgsU128 {
     pub manifest_array_ptr: *const FFIFileManifestParentU128,
     pub manifest_len: usize,
-    pub sorted_hashes_array_ptr: *const u128,
+    pub sorted_hashes_array_ptr: *const Hash128,
     pub sorted_hashes_len: usize,
     pub file_count: u32,
     pub total_size: u64,
     pub user_data: *mut c_void,
     pub get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
-        hashes: *const u128,
+        hashes: *const Hash128,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
@@ -807,6 +807,52 @@ where
                 chunk_count: fmp.chunk_metadata_len as u64
             }
         }
+    }
+}
+
+/// A 128‑bit hash represented as two 64‑bit words.
+///
+/// This type is the FFI‑compatible representation of a `u128` value that is
+/// passed between Rust and C code.  It is marked with `#[repr(C)]` so that the
+/// memory layout matches the C struct definition exactly:
+///
+/// The two fields are:
+/// * `low` – the lower (least‑significant) 64 bits of the hash.
+/// * `high` – the upper (most‑significant) 64 bits of the hash.
+///
+/// # Safety
+///
+/// Because the layout is guaranteed by `#[repr(C)]`, it is safe to transmute a
+/// `Hash128` to/from a pair of `u64`s or a `u128` using the associated
+/// conversion implementations.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Hash128 {
+    pub low: u64,  //Least significant 64 bits
+    pub high: u64, //Most significant 64 bits
+}
+
+/// Convert a native `u128` into its FFI representation (`Hash128`).
+///
+/// The conversion stores the lower 64 bits in `low` and the upper 64 bits
+/// in `high`. This mirrors the layout expected by the C side and allows
+/// the hash to be passed safely across the language boundary.
+impl From<u128> for Hash128 {
+    fn from(hash: u128) -> Self {
+        Hash128 {
+            low: hash as u64,
+            high: (hash >> 64) as u64,
+        }
+    }
+}
+
+/// Convert an FFI `Hash128` into a library native `u128`.
+///
+/// The reconstruction places the `high` field in the most‑significant 64 bits
+/// and the `low` field in the least‑significant 64 bits.
+impl From<Hash128> for u128{
+    fn from(ffi_hash: Hash128) -> Self{
+        ((ffi_hash.high as u128) << 64) | (ffi_hash.low as u128)
     }
 }
 
@@ -1580,6 +1626,7 @@ pub struct FFIVecBytes {
 /// incorrectly sized pointer results in undefined behaviour. The callbacks themselves
 /// must also obey the FFI safety contract: they may not unwind across the FFI boundary
 /// and must not dereference any pointers other than those provided to them.
+#[repr(C)]
 pub struct VerifySingleFileArgsU64{
     pub file_manifest_parent: *const FFIFileManifestParentU64,
     pub veri_hash_array_ptr: *const u8,
@@ -1635,6 +1682,7 @@ pub struct VerifySingleFileArgsU64{
 /// incorrectly sized pointer results in undefined behaviour. The callbacks themselves
 /// must also obey the FFI safety contract: they may not unwind across the FFI boundary
 /// and must not dereference any pointers other than those provided to them.
+#[repr(C)]
 pub struct VerifySingleFileArgsU128{
     pub file_manifest_parent: *const FFIFileManifestParentU128,
     pub veri_hash_array_ptr: *const u8,
