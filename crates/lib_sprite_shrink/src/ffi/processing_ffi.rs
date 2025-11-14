@@ -233,6 +233,8 @@ where
 ///   caller is responsible for freeing it with
 ///   `free_file_manifest_and_chunks_u64` to avoid leaks.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn create_file_manifest_and_chunks_u64(
     args: *const CreateFileManifestAndChunksArgs,
     out_ptr: *mut *mut FFIFileManifestChunksU64
@@ -292,6 +294,8 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u64(
 ///   caller is responsible for freeing it with
 ///   `free_file_manifest_and_chunks_u128` to avoid leaks.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn create_file_manifest_and_chunks_u128(
     args: *const CreateFileManifestAndChunksArgs,
     out_ptr: *mut *mut FFIFileManifestChunksU128
@@ -444,6 +448,8 @@ pub unsafe extern "C" fn free_file_manifest_and_chunks_u128(
 /// - On success, the pointer written to `out_ptr` is owned by the caller and
 ///   MUST be freed by passing it to `free_processed_file_data_ffi`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn process_file_in_memory_ffi(
     file_data: FFIFileData,
     window_size: u64,
@@ -723,6 +729,8 @@ where
 /// Returns an `FFIResult` indicating success (`FFIResult::Ok`) or the type of
 /// failure (e.g., `NullArgument`, `InvalidArgument`, or an internal error).
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn verify_single_file_u64(
     args: *const VerifySingleFileArgsU64,
 ) -> FFIResult {
@@ -774,6 +782,8 @@ pub unsafe extern "C" fn verify_single_file_u64(
 /// Returns an `FFIResult` indicating success (`FFIResult::Ok`) or the type of
 /// failure (e.g., `NullArgument`, `InvalidArgument`, or an internal error).
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn verify_single_file_u128(
     args: *const VerifySingleFileArgsU128,
 ) -> FFIResult {
@@ -917,6 +927,8 @@ where
 ///   lengths.
 /// - `out_size` must be a valid, non-null pointer to a `u64`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn test_compression_u64(
     total_data_size: u64,
     sorted_hashes_array_ptr: *const u64,
@@ -965,6 +977,8 @@ pub unsafe extern "C" fn test_compression_u64(
 ///   lengths.
 /// - `out_size` must be a valid, non-null pointer to a `u64`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn test_compression_u128(
     total_data_size: u64,
     sorted_hashes_array_ptr: *const u128,
@@ -1113,6 +1127,8 @@ where
 ///   caller and MUST be freed by passing it to the
 ///   `free_seek_chunks_u64` function.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn get_seek_chunks_u64(
     file_manifest_parent: *const FFIFileManifestParent<u64>,
     seek_offset: u64,
@@ -1142,6 +1158,8 @@ pub unsafe extern "C" fn get_seek_chunks_u64(
 ///   caller and MUST be freed by passing it to the
 ///   `free_seek_chunks_u128` function.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn get_seek_chunks_u128(
     file_manifest_parent: *const FFIFileManifestParent<u128>,
     seek_offset: u64,

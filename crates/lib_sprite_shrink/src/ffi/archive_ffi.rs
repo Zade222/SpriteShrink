@@ -125,7 +125,7 @@ fn setup_builder_closures<H: 'static>(
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
-        hashes: *const H,
+        hashes: *const u64,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
@@ -195,9 +195,7 @@ fn setup_builder_closures<H: 'static>(
         };
 
         Result::from(status)?;
-
         Ok(())
-
     };
 
     BuilderCallbacks {
@@ -243,6 +241,8 @@ fn setup_builder_closures<H: 'static>(
 ///   deallocate its memory if the build process is aborted.  Failure to do so
 ///   will result in a memory leak.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_new_u64(
     args: *const ArchiveBuilderArgsU64,
     out_ptr: *mut *mut ArchiveBuilderU64,
@@ -342,6 +342,8 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 ///   deallocate its memory if the build process is aborted.  Failure to do so
 ///   will result in a memory leak.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_new_u128(
     args: *const ArchiveBuilderArgsU128,
     out_ptr: *mut *mut ArchiveBuilderU128,
@@ -460,6 +462,8 @@ where
 /// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u64`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u64(
     builder_handle: *mut ArchiveBuilderU64,
     code: u16
@@ -476,6 +480,8 @@ pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u64(
 /// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u128`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u128(
     builder_handle: *mut ArchiveBuilderU128,
     code: u16
@@ -492,6 +498,8 @@ pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u128(
 /// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u64`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_compression_level_u64(
     builder_handle: *mut ArchiveBuilderU64,
     level: i32,
@@ -508,6 +516,8 @@ pub unsafe extern "C" fn archive_builder_set_compression_level_u64(
 /// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u128`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_compression_level_u128(
     builder_handle: *mut ArchiveBuilderU128,
     level: i32,
@@ -524,6 +534,8 @@ pub unsafe extern "C" fn archive_builder_set_compression_level_u128(
 /// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u64`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_dictionary_size_u64(
     builder_handle: *mut ArchiveBuilderU64,
     size: u64,
@@ -540,6 +552,8 @@ pub unsafe extern "C" fn archive_builder_set_dictionary_size_u64(
 /// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u128`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_dictionary_size_u128(
     builder_handle: *mut ArchiveBuilderU128,
     size: u64,
@@ -556,6 +570,8 @@ pub unsafe extern "C" fn archive_builder_set_dictionary_size_u128(
 /// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u64`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_worker_count_u64(
     builder_handle: *mut ArchiveBuilderU64,
     threads: usize,
@@ -572,6 +588,8 @@ pub unsafe extern "C" fn archive_builder_set_worker_count_u64(
 /// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u128`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_worker_count_u128(
     builder_handle: *mut ArchiveBuilderU128,
     threads: usize,
@@ -588,6 +606,8 @@ pub unsafe extern "C" fn archive_builder_set_worker_count_u128(
 /// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u64`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_optimize_dictionary_u64(
     builder_handle: *mut ArchiveBuilderU64,
     optimize: bool,
@@ -604,6 +624,8 @@ pub unsafe extern "C" fn archive_builder_set_optimize_dictionary_u64(
 /// The `builder_handle` must be a valid, non-null pointer from
 /// `archive_builder_new_u128`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_optimize_dictionary_u128(
     builder_handle: *mut ArchiveBuilderU128,
     optimize: bool,
@@ -678,6 +700,8 @@ where
 /// `archive_builder_new_u64`. The `callback` function pointer must be
 /// valid for the lifetime of the builder.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_c_progress_u64(
     builder_handle: *mut ArchiveBuilderU64,
     callback: extern "C" fn(FFIProgress, *mut c_void),
@@ -697,6 +721,8 @@ pub unsafe extern "C" fn archive_builder_set_c_progress_u64(
 /// `archive_builder_new_u128`. The `callback` function pointer must be
 /// valid for the lifetime of the builder.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_set_c_progress_u128(
     builder_handle: *mut ArchiveBuilderU128,
     callback: extern "C" fn(FFIProgress, *mut c_void),
@@ -781,6 +807,8 @@ unsafe fn handle_build_result(
 /// - The pointer returned via `out_data` must be freed with
 ///   `archive_data_free_u64`
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_build_u64(
     builder_handle: *mut ArchiveBuilderU64,
     out_ptr: *mut *mut FFIArchiveData,
@@ -814,6 +842,8 @@ pub unsafe extern "C" fn archive_builder_build_u64(
 /// - The pointer returned via `out_data` must be freed with
 ///   `archive_data_free_u128`
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn archive_builder_build_u128(
     builder_handle: *mut ArchiveBuilderU128,
     out_ptr: *mut *mut FFIArchiveData,

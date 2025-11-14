@@ -344,6 +344,8 @@ where
 /// * Other error variants may be returned by the internal implementation if,
 ///   for example, a callback fails or memory allocation aborts.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn serialize_uncompressed_data_u64(
     args: *const SerializeUncompressedDataArgsU64,
     out_ptr: *mut *mut FFISerializedOutputU64
@@ -411,6 +413,8 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 /// * Other error variants may be returned by the internal implementation if,
 ///   for example, a callback fails or memory allocation aborts.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn serialize_uncompressed_data_u128(
     args: *const SerializeUncompressedDataArgsU128,
     out_ptr: *mut *mut FFISerializedOutputU128

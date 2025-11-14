@@ -125,6 +125,8 @@ where
 ///   caller and MUST be freed by passing it to
 ///   `free_parsed_chunk_index_u64` to avoid memory leaks.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn parse_file_chunk_index_u64(
     chunk_index_array_ptr: *const u8,
     chunk_index_len: usize,
@@ -159,6 +161,8 @@ pub unsafe extern "C" fn parse_file_chunk_index_u64(
 ///   caller and MUST be freed by passing it to
 ///   `free_parsed_chunk_index_u128` to avoid memory leaks.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn parse_file_chunk_index_u128(
     chunk_index_array_ptr: *const u8,
     chunk_index_len: usize,
@@ -247,6 +251,8 @@ pub unsafe extern "C" fn free_parsed_chunk_index_u128(
 /// - The pointer returned via `out_ptr` is owned by the caller and MUST be
 ///   freed by passing it to `free_file_header_ffi`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn parse_file_header_ffi(
     header_data_array_ptr: *const u8,
     header_data_len: usize,
@@ -415,6 +421,8 @@ where
 /// - The pointer returned via `out_ptr` is owned by the caller and
 ///   MUST be freed by passing it to `free_parsed_manifest_u64`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn parse_file_metadata_u64(
     manifest_data_array_ptr: *const u8,
     manifest_data_len: usize,
@@ -447,6 +455,8 @@ pub unsafe extern "C" fn parse_file_metadata_u64(
 /// - The pointer returned via `out_ptr` is owned by the caller and
 ///   MUST be freed by passing it to `free_parsed_manifest_u128`.
 #[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
 pub unsafe extern "C" fn parse_file_metadata_u128(
     manifest_data_array_ptr: *const u8,
     manifest_data_len: usize,
