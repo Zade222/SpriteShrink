@@ -308,7 +308,7 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 }
 
 /// Creates Rust closures that wrap C function pointers for the ArchiveBuilder
-/// for u128 hashes.
+/// for u128 hahes.
 ///
 /// This function acts as a bridge between the C-style callback mechanism
 /// (function pointers and an opaque `user_data` pointer) and the idiomatic
