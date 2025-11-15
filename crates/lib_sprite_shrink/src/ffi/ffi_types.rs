@@ -1536,57 +1536,6 @@ impl<H: Copy> From<SSAChunkMeta<H>> for FFISSAChunkMeta<H> {
     }
 }
 
-
-/// A wrapper for a mutable C `void` pointer, used to pass user-defined
-/// context data across the FFI boundary.
-///
-/// This struct allows a C caller to provide an opaque pointer to its own
-/// state or context. Rust code can then pass this pointer back to C-defined
-/// callback functions, enabling them to access their original environment
-/// without Rust needing to know anything about the data's structure.
-///
-/// For example, if the C application manages its state in a struct, it can
-/// pass a pointer to that struct as `user_data`. When Rust invokes a C
-/// callback, it includes this pointer, allowing the callback to safely cast
-/// it back to its original type and access its fields.
-#[derive(Clone, Copy)]
-pub struct FFIUserData(pub *mut c_void);
-
-/// Represents a C-compatible, heap-allocated byte vector.
-///
-/// This struct is used to pass ownership of a dynamically sized byte array
-/// from C to Rust. It is a fundamental building block for more complex data
-/// structures, such as `FFIChunkDataArray`, which represents an array of these
-/// byte vectors.
-///
-/// # Fields
-///
-/// * `ptr`: A raw pointer to the beginning of the heap-allocated byte array.
-/// * `len`: The number of bytes in the array pointed to by `ptr`.
-///
-/// # Memory Management
-///
-/// The memory management contract for this struct is context-dependent,
-/// as it is used in different patterns across the FFI layer.
-///
-/// 1.  **Rust Takes Ownership**: In some functions (e.g., serialization),
-///     the C caller allocates memory for this struct and its contents, and
-///     Rust takes ownership, freeing the memory when it's done.
-/// 2.  **Caller Retains Ownership**: In other functions (e.g., archive building),
-///     the C caller allocates the memory and also remains responsible for
-///     freeing it, usually via a dedicated `free_...` callback provided to Rust.
-///
-/// **Warning:** Always refer to the documentation of the specific FFI
-/// function you are calling to understand the correct memory management
-/// policy. Assuming the wrong model will lead to memory leaks or
-   /// double-free errors.
-#[repr(C)]
-pub struct FFIVecBytes {
-    pub ptr: *mut u8,
-    pub len: usize,
-    pub cap: usize,
-}
-
 /// Arguments required to verify a single file using the verify_single_file_u64
 /// function.
 ///
@@ -1614,7 +1563,7 @@ pub struct FFIVecBytes {
 ///   and must remain valid until the next callback invocation.
 ///   The callback receives:
 ///   - `user_data`: the same pointer passed in this struct,
-///   - `hashes`: pointer to an array of `u128` hash identifiers,
+///   - `hashes`: pointer to an array of `u64` hash identifiers,
 ///   - `hashes_len`: length of the `hashes` array.
 /// * `progress_cb` – Optional progress callback. It is called periodically with the
 ///   number of bytes processed so far.
@@ -1669,7 +1618,7 @@ pub struct VerifySingleFileArgsU64{
 ///   and must remain valid until the next callback invocation.
 ///   The callback receives:
 ///   - `user_data`: the same pointer passed in this struct,
-///   - `hashes`: pointer to an array of `u128` hash identifiers,
+///   - `hashes`: pointer to an array of `Hash128` hash identifiers,
 ///   - `hashes_len`: length of the `hashes` array.
 ///
 /// * `progress_cb` – Optional progress callback. It is called periodically with the
@@ -1689,7 +1638,7 @@ pub struct VerifySingleFileArgsU128{
     pub user_data: *mut c_void,
     pub get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
-        hashes: *const u128,
+        hashes: *const Hash128,
         hashes_len: usize
     ) -> FFIChunkDataArray,
     pub progress_cb: unsafe extern "C" fn(
@@ -1773,6 +1722,22 @@ unsafe impl Send for ThreadSafeUserData {}
 /// pointed to by this `void` pointer. Failure to ensure this will result in
 /// undefined behavior.
 unsafe impl Sync for ThreadSafeUserData {}
+
+// Allocate a small heap‑allocated struct that carries the original
+// user_data and callback. The pointer is passed through the FFI layer and
+// recovered inside `shim_get_chunks_cb`. Because the allocation lives only
+// for the duration of this call we free it after
+// `test_compression_internal` returns.
+#[repr(C)]
+pub struct TestShimUserData {
+    pub original_user_data: *mut c_void,
+    pub original_callback: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        hashes: *const Hash128,
+        hashes_len: usize,
+        out_chunks_array: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+}
 
 /// A Rust-internal struct for holding the arguments for the `test_compression`
 /// logic.
@@ -1884,4 +1849,71 @@ pub struct TestCompressionArgsU128 {
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
+}
+
+/// Represents a C-compatible, heap-allocated byte vector.
+///
+/// This struct is used to pass ownership of a dynamically sized byte array
+/// from C to Rust. It is a fundamental building block for more complex data
+/// structures, such as `FFIChunkDataArray`, which represents an array of these
+/// byte vectors.
+///
+/// # Fields
+///
+/// * `ptr`: A raw pointer to the beginning of the heap-allocated byte array.
+/// * `len`: The number of bytes in the array pointed to by `ptr`.
+///
+/// # Memory Management
+///
+/// The memory management contract for this struct is context-dependent,
+/// as it is used in different patterns across the FFI layer.
+///
+/// 1.  **Rust Takes Ownership**: In some functions (e.g., serialization),
+///     the C caller allocates memory for this struct and its contents, and
+///     Rust takes ownership, freeing the memory when it's done.
+/// 2.  **Caller Retains Ownership**: In other functions (e.g., archive building),
+///     the C caller allocates the memory and also remains responsible for
+///     freeing it, usually via a dedicated `free_...` callback provided to Rust.
+///
+/// **Warning:** Always refer to the documentation of the specific FFI
+/// function you are calling to understand the correct memory management
+/// policy. Assuming the wrong model will lead to memory leaks or
+   /// double-free errors.
+#[repr(C)]
+pub struct FFIVecBytes {
+    pub ptr: *mut u8,
+    pub len: usize,
+    pub cap: usize,
+}
+
+/// A wrapper for a mutable C `void` pointer, used to pass user-defined
+/// context data across the FFI boundary.
+///
+/// This struct allows a C caller to provide an opaque pointer to its own
+/// state or context. Rust code can then pass this pointer back to C-defined
+/// callback functions, enabling them to access their original environment
+/// without Rust needing to know anything about the data's structure.
+///
+/// For example, if the C application manages its state in a struct, it can
+/// pass a pointer to that struct as `user_data`. When Rust invokes a C
+/// callback, it includes this pointer, allowing the callback to safely cast
+/// it back to its original type and access its fields.
+#[derive(Clone, Copy)]
+pub struct FFIUserData(pub *mut c_void);
+
+
+
+// Allocate a small heap‑allocated struct that carries the original
+// user_data and callback. The pointer is passed through the FFI layer and
+// recovered inside `shim_get_chunks_cb`. Because the allocation lives only
+// for the duration of this call we free it after
+// `test_compression_internal` returns.
+#[repr(C)]
+pub struct VerifyShimUserData {
+    pub original_user_data: *mut c_void,
+    pub original_callback: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        hashes: *const Hash128,
+        hashes_len: usize,
+    ) -> FFIChunkDataArray,
 }

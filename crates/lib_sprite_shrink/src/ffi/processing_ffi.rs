@@ -25,9 +25,10 @@ use crate::ffi::ffi_types::{
     FFIFileData, FFIFileManifestParent, Hash128,
     FFIHashedChunkData, FFIProcessedFileData,
     FFISeekChunkInfo, FFISeekInfoArray, FFISSAChunkMeta,
+    TestShimUserData, TestCompressionArgsInt,
+    TestCompressionArgsU64, TestCompressionArgsU128,
     VerifySingleFileArgsU64, VerifySingleFileArgsU128,
-    TestCompressionArgsInt,
-    TestCompressionArgsU64, TestCompressionArgsU128
+    VerifyShimUserData
 };
 use crate::lib_error_handling::{
     IsCancelled, SpriteShrinkError
@@ -775,6 +776,8 @@ pub unsafe extern "C" fn verify_single_file_u64(
 ///   lives at least for the duration of the call.
 /// * The `get_chunks_cb` must not unwind across the FFI boundary and must
 ///   return a correctly‑populated `FFIChunkDataArray`.
+/// * The callback must not retain the `user_data` pointer after the call
+///   returns.
 ///
 /// If any pointer is null, the function returns `FFIResult::NullArgument`.
 ///
@@ -800,13 +803,49 @@ pub unsafe extern "C" fn verify_single_file_u128(
             return FFIResult::NullArgument;
     }
 
-    verify_single_file_internal::<SpriteShrinkError, u128>(
+    // The shim lives only for the duration of this FFI call.
+    // Do **not** store the pointer elsewhere; it will be freed after
+    // `verify_single_file_internal` returns.
+    let shim = Box::new(VerifyShimUserData {
+        original_user_data: args_int.user_data,
+        original_callback: args_int.get_chunks_cb,
+    });
+    let shim_ptr: *mut c_void = Box::into_raw(shim) as *mut c_void;
+
+    unsafe extern "C" fn shim_get_chunks_cb(
+        user_data: *mut c_void,
+        hashes: *const u128,
+        hashes_len: usize,
+    ) -> FFIChunkDataArray {
+        let shim_data = unsafe{&*(user_data as *const VerifyShimUserData)};
+
+        let hashes_u128_slice = unsafe{
+            std::slice::from_raw_parts(hashes, hashes_len)
+        };
+        let hashes_hash128: Vec<Hash128> = hashes_u128_slice
+            .iter()
+            .map(|&val| Hash128::from(val))
+            .collect();
+
+        unsafe{(shim_data.original_callback)(
+            shim_data.original_user_data,
+            hashes_hash128.as_ptr(),
+            hashes_hash128.len(),
+        )}
+    }
+
+    let result = verify_single_file_internal::<SpriteShrinkError, u128>(
         args_int.file_manifest_parent,
         args_int.veri_hash_array_ptr,
-        args_int.user_data,
-        args_int.get_chunks_cb,
+        shim_ptr,
+        shim_get_chunks_cb,
         args_int.progress_cb,
-    )
+    );
+
+    //Prevents memory leak
+    unsafe { drop(Box::from_raw(shim_ptr as *mut VerifyShimUserData)); };
+
+    result
 }
 
 /// A generic helper to estimate the compressed size of a data store via FFI.
@@ -872,7 +911,11 @@ where
     let user_data_addr = args.user_data as usize;
 
     let get_chunks_closure = move |hashes: &[H]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
-        let mut ffi_chunks_array = FFIChunkDataArray { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
+        let mut ffi_chunks_array = FFIChunkDataArray {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0
+        };
         let status = unsafe {
             (args.get_chunks_cb)(
                 user_data_addr as *mut c_void,
@@ -993,6 +1036,7 @@ pub unsafe extern "C" fn test_compression_u64(
 ///   • The `sorted_hashes_array_ptr` inside `args` points to a valid array of
 ///     `Hash128` values with length `sorted_hashes_len`.
 ///   • `out_size` points to writable memory for a `u64`.
+/// The callback must not retain the `user_data` pointer after the call returns.
 /// Violating these contracts can lead to undefined behaviour, including memory
 /// corruption or crashes.
 #[unsafe(no_mangle)]
@@ -1007,16 +1051,16 @@ pub unsafe extern "C" fn test_compression_u128(
             return FFIResult::NullArgument;
     };
 
-    let args_ffi = unsafe{&*args};
+    let args_int = unsafe{&*args};
 
-    if args_ffi.sorted_hashes_array_ptr.is_null() {
+    if args_int.sorted_hashes_array_ptr.is_null() {
         return FFIResult::NullArgument;
     }
 
     let sorted_hashes_slice = unsafe{
         std::slice::from_raw_parts(
-            args_ffi.sorted_hashes_array_ptr,
-            args_ffi.sorted_hashes_len
+            args_int.sorted_hashes_array_ptr,
+            args_int.sorted_hashes_len
         )
     };
     let sorted_hashes_u128: Vec<u128> = sorted_hashes_slice
@@ -1024,19 +1068,14 @@ pub unsafe extern "C" fn test_compression_u128(
         .map(|&h| u128::from(h))
         .collect();
 
-    // Allocate a small heap‑allocated struct that carries the original user_data
-    // and callback. The pointer is passed through the FFI layer and recovered
-    // inside `shim_get_chunks_cb`. Because the allocation lives only for the
-    // duration of this call we free it after `test_compression_internal` returns.
-    struct ShimUserData {
-        original_user_data: *mut c_void,
-        original_callback: unsafe extern "C" fn(
-            user_data: *mut c_void,
-            hashes: *const Hash128,
-            hashes_len: usize,
-            out_chunks_array: *mut FFIChunkDataArray,
-        ) -> FFICallbackStatus,
-    }
+    // The shim lives only for the duration of this FFI call.
+    // Do **not** store the pointer elsewhere; it will be freed after
+    // `verify_single_file_internal` returns.
+    let shim = Box::new(TestShimUserData {
+        original_user_data: args_int.user_data,
+        original_callback: args_int.get_chunks_cb,
+    });
+    let shim_ptr: *mut c_void = Box::into_raw(shim) as *mut c_void;
 
     unsafe extern "C" fn shim_get_chunks_cb(
         user_data: *mut c_void,
@@ -1044,15 +1083,15 @@ pub unsafe extern "C" fn test_compression_u128(
         hashes_len: usize,
         out_chunks_array: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus {
-        let shim_data = unsafe{&*(user_data as *const ShimUserData)};
+        let shim_data = unsafe{&*(user_data as *const TestShimUserData)};
 
-
-        let hashes_u128_slice = unsafe{std::slice::from_raw_parts(hashes, hashes_len)};
+        let hashes_u128_slice = unsafe{
+            std::slice::from_raw_parts(hashes, hashes_len)
+        };
         let hashes_hash128: Vec<Hash128> = hashes_u128_slice
             .iter()
             .map(|&val| Hash128::from(val))
             .collect();
-
 
         unsafe{(shim_data.original_callback)(
             shim_data.original_user_data,
@@ -1062,19 +1101,15 @@ pub unsafe extern "C" fn test_compression_u128(
         )}
     }
 
-    let shim = Box::new(ShimUserData {
-        original_user_data: args_ffi.user_data,
-        original_callback: args_ffi.get_chunks_cb,
-    });
-    let shim_ptr: *mut c_void = Box::into_raw(shim) as *mut c_void;
+
 
     let args = TestCompressionArgsInt::<u128> {
-        total_data_size: args_ffi.total_data_size,
+        total_data_size: args_int.total_data_size,
         sorted_hashes_array_ptr: sorted_hashes_u128.as_ptr(),
         sorted_hashes_len: sorted_hashes_u128.len(),
-        worker_count: args_ffi.worker_count,
-        dictionary_size: args_ffi.dictionary_size,
-        compression_level: args_ffi.compression_level,
+        worker_count: args_int.worker_count,
+        dictionary_size: args_int.dictionary_size,
+        compression_level: args_int.compression_level,
         user_data: shim_ptr,
         get_chunks_cb: shim_get_chunks_cb
     };
@@ -1085,7 +1120,7 @@ pub unsafe extern "C" fn test_compression_u128(
     );
 
     //Prevents memory leak
-    unsafe { drop(Box::from_raw(shim_ptr as *mut ShimUserData)); };
+    unsafe { drop(Box::from_raw(shim_ptr as *mut TestShimUserData)); };
 
     result
 }
