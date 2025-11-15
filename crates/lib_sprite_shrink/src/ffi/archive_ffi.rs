@@ -125,7 +125,7 @@ fn setup_builder_closures<H: 'static>(
     user_data: *mut c_void,
     get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
-        hashes: *const u64,
+        hashes: *const H,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
