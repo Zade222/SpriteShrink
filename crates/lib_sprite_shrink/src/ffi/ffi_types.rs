@@ -1793,8 +1793,6 @@ unsafe impl Sync for ThreadSafeUserData {}
 /// * `dictionary_size`: Desired size (in bytes) of the temporary dictionary.
 /// * `compression_level`: The Zstandard compression level to be used by the
 ///   worker threads. When testing a maximum value of 7 is used.
-/// * `out_size`: Pointer to a `u64` where the estimated compressed size will
-///   be stored on success.
 /// * `user_data`: Opaque user‑supplied context that will be passed back to
 ///   the `get_chunks_cb` callback.
 /// * `get_chunks_cb`: A C-style callback function pointer to retrieve raw
@@ -1805,18 +1803,84 @@ unsafe impl Sync for ThreadSafeUserData {}
 ///   - `hashes_len`: length of that slice,
 ///   - `out_chunks`: pointer to an `FFIChunkDataArray` that the callback must
 ///     fill
-pub struct TestCompressionArgs<H> {
+pub struct TestCompressionArgsInt<H> {
     pub total_data_size: u64,
     pub sorted_hashes_array_ptr: *const H,
     pub sorted_hashes_len: usize,
     pub worker_count: usize,
     pub dictionary_size: usize,
     pub compression_level: i32,
-    pub out_size: *mut u64,
     pub user_data: *mut c_void,
     pub get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
         hashes: *const H,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+}
+
+/// Arguments for the `test_compression_u64` FFI entry point.
+///
+///
+/// # Fields
+///
+/// * `total_data_size` – Size of the uncompressed data in bytes.
+/// * `sorted_hashes_array_ptr` – Pointer to an array of sorted 64‑bit hash
+///   values (`u64`). Must point to `sorted_hashes_len` entries.
+/// * `sorted_hashes_len` – Number of hash entries in the array.
+/// * `worker_count` – Number of worker threads to employ during compression
+///   testing.
+/// * `dictionary_size` – Desired dictionary size (bytes) for the Zstandard
+///   dictionary.TestCompressionArgs`
+/// * `compression_level` – Zstandard compression level.
+/// * `user_data` – Opaque pointer passed back to the `get_chunks_cb` callback.
+/// * `get_chunks_cb` – Callback that receives a slice of hash values and must
+///   fill an `FFIChunkDataArray` with the corresponding chunk data.
+#[repr(C)]
+pub struct TestCompressionArgsU64 {
+    pub total_data_size: u64,
+    pub sorted_hashes_array_ptr: *const u64,
+    pub sorted_hashes_len: usize,
+    pub worker_count: usize,
+    pub dictionary_size: usize,
+    pub compression_level: i32,
+    pub user_data: *mut c_void,
+    pub get_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        hashes: *const u64,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+}
+
+/// Arguments for the `test_compression_u128` FFI entry point.
+///
+/// # Fields
+///
+/// * `total_data_size`: Size of the uncompressed data in bytes.
+/// * `sorted_hashes_array_ptr`: Pointer to an array of sorted 128‑bit hash
+///   values (`Hash128`). Must point to `sorted_hashes_len` entries.
+/// * `sorted_hashes_len`: Number of hash entries in the array.
+/// * `worker_count`: Number of worker threads to employ during compression
+///   testing.
+/// * `dictionary_size`: Desired dictionary size (bytes) for the Zstandard
+///   dictionary.
+/// * `compression_level`: Zstandard compression level.
+/// * `user_data`: Opaque pointer passed back to the `get_chunks_cb` callback.
+/// * `get_chunks_cb`: Callback that receives a slice of `Hash128` values and must
+///   fill an `FFIChunkDataArray` with the corresponding chunk data.
+#[repr(C)]
+pub struct TestCompressionArgsU128 {
+    pub total_data_size: u64,
+    pub sorted_hashes_array_ptr: *const Hash128,
+    pub sorted_hashes_len: usize,
+    pub worker_count: usize,
+    pub dictionary_size: usize,
+    pub compression_level: i32,
+    pub user_data: *mut c_void,
+    pub get_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        hashes: *const Hash128,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,

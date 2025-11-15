@@ -22,11 +22,12 @@ use crate::ffi::ffi_types::{
     CreateFileManifestAndChunksArgs, FFIChunk, FFIChunkDataArray,
     FFIFileManifestChunks,
     FFIFileManifestChunksU64, FFIFileManifestChunksU128,
-    FFIFileData, FFIFileManifestParent,
+    FFIFileData, FFIFileManifestParent, Hash128,
     FFIHashedChunkData, FFIProcessedFileData,
     FFISeekChunkInfo, FFISeekInfoArray, FFISSAChunkMeta,
     VerifySingleFileArgsU64, VerifySingleFileArgsU128,
-    TestCompressionArgs
+    TestCompressionArgsInt,
+    TestCompressionArgsU64, TestCompressionArgsU128
 };
 use crate::lib_error_handling::{
     IsCancelled, SpriteShrinkError
@@ -851,7 +852,8 @@ pub unsafe extern "C" fn verify_single_file_u128(
 /// - The `get_chunks_cb` function pointer is valid and points to a function
 ///   with the correct signature.
 fn test_compression_internal<H>(
-    args: TestCompressionArgs<H>
+    args: TestCompressionArgsInt<H>,
+    out_size: *mut u64,
 ) -> FFIResult
 where
     H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
@@ -907,7 +909,7 @@ where
     ) {
         Ok(compressed_size) => {
             unsafe {
-                *args.out_size = compressed_size as u64;
+                *out_size = compressed_size as u64;
             }
 
             FFIResult::Ok
@@ -930,91 +932,162 @@ where
 #[allow(clippy::double_must_use)]
 #[must_use]
 pub unsafe extern "C" fn test_compression_u64(
-    total_data_size: u64,
-    sorted_hashes_array_ptr: *const u64,
-    sorted_hashes_len: usize,
-    worker_count: usize,
-    dictionary_size: usize,
-    compression_level: i32,
+    args: *const TestCompressionArgsU64,
     out_size: *mut u64,
-    user_data: *mut c_void,
-    get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        hashes: *const u64,
-        hashes_len: usize,
-        out_chunks: *mut FFIChunkDataArray,
-    ) -> FFICallbackStatus,
 ) -> FFIResult {
-    if sorted_hashes_array_ptr.is_null() ||
+    if args.is_null() ||
         out_size.is_null() {
             return FFIResult::NullArgument;
     };
 
-    let args = TestCompressionArgs::<u64> {
-        total_data_size,
-        sorted_hashes_array_ptr,
-        sorted_hashes_len,
-        worker_count,
-        dictionary_size,
-        compression_level,
-        out_size,
-        user_data,
-        get_chunks_cb
+    let args_ffi = unsafe{&*args};
+
+    if args_ffi.sorted_hashes_array_ptr.is_null() {
+        return FFIResult::NullArgument;
+    }
+
+    let args_int = TestCompressionArgsInt::<u64> {
+        total_data_size: args_ffi.total_data_size,
+        sorted_hashes_array_ptr: args_ffi.sorted_hashes_array_ptr,
+        sorted_hashes_len: args_ffi.sorted_hashes_len,
+        worker_count: args_ffi.worker_count,
+        dictionary_size: args_ffi.dictionary_size,
+        compression_level: args_ffi.compression_level,
+        user_data: args_ffi.user_data,
+        get_chunks_cb: args_ffi.get_chunks_cb
     };
 
     test_compression_internal::<u64>(
-        args
+        args_int,
+        out_size
     )
 }
 
 /// Estimates the compressed size of a data store when using
-/// u128 hashes.
+/// 128‑bit hashes (`u128`).
 ///
-/// On success, returns `FFIResult::Ok` and populates `out_size`.
+/// # Parameters
+///
+/// * `args` – Pointer to a [`TestCompressionArgsU128`] structure containing
+///   all the information needed to perform the test, such as the total size of
+///   the uncompressed data, a pointer to an array of sorted hash values, the
+///   number of hashes, worker thread count, dictionary size, compression level,
+///   and an optional user‑provided callback for custom chunk generation.
+/// * `out_size` – Pointer to a `u64` where the estimated compressed size will
+///   be written on success. The caller must ensure this pointer is valid and
+///   non‑null.
+///
+/// # Returns
+///
+/// * `FFIResult::Ok` – The estimation succeeded and `*out_size` now contains
+///   the estimated size.
+/// * `FFIResult::NullArgument` – Either `args` or `out_size` (or the internal
+///   `sorted_hashes_array_ptr` within `args`) was a null pointer.
+/// * `FFIResult::Other` – Propagated error from the internal compression test.
 ///
 /// # Safety
-/// - All input pointers must be non-null and valid for their specified
-///   lengths.
-/// - `out_size` must be a valid, non-null pointer to a `u64`.
+///
+/// This function is `unsafe` because it dereferences raw pointers passed from the
+/// caller. The caller must guarantee that:
+///   • `args` points to a valid `TestCompressionArgsU128` instance.
+///   • The `sorted_hashes_array_ptr` inside `args` points to a valid array of
+///     `Hash128` values with length `sorted_hashes_len`.
+///   • `out_size` points to writable memory for a `u64`.
+/// Violating these contracts can lead to undefined behaviour, including memory
+/// corruption or crashes.
 #[unsafe(no_mangle)]
 #[allow(clippy::double_must_use)]
 #[must_use]
 pub unsafe extern "C" fn test_compression_u128(
-    total_data_size: u64,
-    sorted_hashes_array_ptr: *const u128,
-    sorted_hashes_len: usize,
-    worker_count: usize,
-    dictionary_size: usize,
-    compression_level: i32,
+    args: *const TestCompressionArgsU128,
     out_size: *mut u64,
-    user_data: *mut c_void,
-    get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        hashes: *const u128,
-        hashes_len: usize,
-        out_chunks: *mut FFIChunkDataArray,
-    ) -> FFICallbackStatus,
 ) -> FFIResult {
-    if sorted_hashes_array_ptr.is_null() ||
+    if args.is_null() ||
         out_size.is_null() {
             return FFIResult::NullArgument;
     };
 
-    let args = TestCompressionArgs::<u128> {
-        total_data_size,
-        sorted_hashes_array_ptr,
-        sorted_hashes_len,
-        worker_count,
-        dictionary_size,
-        compression_level,
-        out_size,
-        user_data,
-        get_chunks_cb
+    let args_ffi = unsafe{&*args};
+
+    if args_ffi.sorted_hashes_array_ptr.is_null() {
+        return FFIResult::NullArgument;
+    }
+
+    let sorted_hashes_slice = unsafe{
+        std::slice::from_raw_parts(
+            args_ffi.sorted_hashes_array_ptr,
+            args_ffi.sorted_hashes_len
+        )
+    };
+    let sorted_hashes_u128: Vec<u128> = sorted_hashes_slice
+        .iter()
+        .map(|&h| u128::from(h))
+        .collect();
+
+    // Allocate a small heap‑allocated struct that carries the original user_data
+    // and callback. The pointer is passed through the FFI layer and recovered
+    // inside `shim_get_chunks_cb`. Because the allocation lives only for the
+    // duration of this call we free it after `test_compression_internal` returns.
+    struct ShimUserData {
+        original_user_data: *mut c_void,
+        original_callback: unsafe extern "C" fn(
+            user_data: *mut c_void,
+            hashes: *const Hash128,
+            hashes_len: usize,
+            out_chunks_array: *mut FFIChunkDataArray,
+        ) -> FFICallbackStatus,
+    }
+
+    unsafe extern "C" fn shim_get_chunks_cb(
+        user_data: *mut c_void,
+        hashes: *const u128,
+        hashes_len: usize,
+        out_chunks_array: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus {
+        let shim_data = unsafe{&*(user_data as *const ShimUserData)};
+
+
+        let hashes_u128_slice = unsafe{std::slice::from_raw_parts(hashes, hashes_len)};
+        let hashes_hash128: Vec<Hash128> = hashes_u128_slice
+            .iter()
+            .map(|&val| Hash128::from(val))
+            .collect();
+
+
+        unsafe{(shim_data.original_callback)(
+            shim_data.original_user_data,
+            hashes_hash128.as_ptr(),
+            hashes_hash128.len(),
+            out_chunks_array,
+        )}
+    }
+
+    let shim = Box::new(ShimUserData {
+        original_user_data: args_ffi.user_data,
+        original_callback: args_ffi.get_chunks_cb,
+    });
+    let shim_ptr: *mut c_void = Box::into_raw(shim) as *mut c_void;
+
+    let args = TestCompressionArgsInt::<u128> {
+        total_data_size: args_ffi.total_data_size,
+        sorted_hashes_array_ptr: sorted_hashes_u128.as_ptr(),
+        sorted_hashes_len: sorted_hashes_u128.len(),
+        worker_count: args_ffi.worker_count,
+        dictionary_size: args_ffi.dictionary_size,
+        compression_level: args_ffi.compression_level,
+        user_data: shim_ptr,
+        get_chunks_cb: shim_get_chunks_cb
     };
 
-    test_compression_internal::<u128>(
-        args
-    )
+    let result = test_compression_internal::<u128>(
+        args,
+        out_size
+    );
+
+    //Prevents memory leak
+    unsafe { drop(Box::from_raw(shim_ptr as *mut ShimUserData)); };
+
+    result
 }
 
 /// A generic helper to calculate the chunks required for a file seek
