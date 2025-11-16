@@ -169,8 +169,8 @@ pub struct ArchiveBuilderArgsU64 {
 ///   [`FFIFileManifestParentU128`]  structs.
 /// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
 /// * `sorted_hashes_array_ptr`: Pointer to a sorted array of all unique `u128`
-///   chunk hashes.
-/// * `sorted_hashes_len`: The number of elements in the
+///   chunk hashes. Each element is a [u8; 16] in little-endian order.
+/// * `sorted_hashes_len`: The number of hashes in the
 ///   `sorted_hashes_array_ptr` array.
 /// * `file_count`: The total number of files being added to the archive.
 /// * `total_size`: The total combined size, in bytes, of all unique
@@ -195,14 +195,14 @@ pub struct ArchiveBuilderArgsU64 {
 pub struct ArchiveBuilderArgsU128 {
     pub manifest_array_ptr: *const FFIFileManifestParentU128,
     pub manifest_len: usize,
-    pub sorted_hashes_array_ptr: *const u128,
+    pub sorted_hashes_array_ptr: *const u8,
     pub sorted_hashes_len: usize,
     pub file_count: u32,
     pub total_size: u64,
     pub user_data: *mut c_void,
     pub get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
-        hashes: *const u128,
+        hashes: *const u8,
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
