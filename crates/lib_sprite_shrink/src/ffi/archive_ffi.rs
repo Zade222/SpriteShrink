@@ -9,7 +9,7 @@ use std::{
     slice,
 };
 
-use crate::archive::{ArchiveBuilder};
+use crate::archive::{ArchiveBuilder, decompress_chunk};
 use crate::ffi::ffi_error_handling::{
     FFIResult
 };
@@ -411,6 +411,105 @@ pub unsafe extern "C" fn archive_builder_new_u128(
     };
 
     FFIResult::StatusOk
+}
+
+/// Decompress a chunk of data using a zstd dictionary.
+///
+/// # Safety
+///
+/// This function is unsafe because it dereferences raw pointers supplied by
+/// callers from other languages (e.g., C). The caller must guarantee:
+///
+/// * `comp_chunk_data_ptr` points to a valid buffer of at least
+///   `comp_chunk_data_len` bytes.
+/// * `dictionary_ptr` points to a valid buffer of at least `dictionary_len`
+///   bytes.
+/// * `data_out_ptr` points to a mutable buffer of at least `data_out_len`
+///   bytes.
+///
+/// If any of the pointers are null, the function returns
+/// `FFIResult::NullArgument`.
+///
+/// # Parameters
+///
+/// - `comp_chunk_data_ptr`: Pointer to the compressed chunk data.
+/// - `comp_chunk_data_len`: Length of the compressed data buffer.
+/// - `dictionary_ptr`: Pointer to the dictionary used for decompression.
+/// - `dictionary_len`: Length of the dictionary buffer.
+/// - `data_out_ptr`: Pointer to the buffer where decompressed data will be
+///   written.
+/// - `data_out_len`: Capacity of the output buffer. This is known prior to
+///   calling this function as it is stored as part of the chunk's metadata.
+///
+/// # Return Value
+///
+/// The function returns an `FFIResult` indicating the outcome:
+///
+/// * `FFIResult::StatusOk`: Decompression succeeded and the output was
+///   written.
+/// * `FFIResult::NullArgument`: One or more supplied pointers were null.
+/// * `FFIResult::BufferTooSmall`: The output buffer is not large enough to
+///   hold the decompressed data.
+/// * `FFIResult::InternalError`: Decompression failed for an internal reason
+///   (e.g., invalid data).
+///
+/// # Remarks
+///
+/// This wrapper converts raw pointers into Rust slices, calls the safe
+/// `decompress_chunk` function, and copies the resulting data into the caller‑provided
+/// output buffer. All pointer checks and length validations are performed before any
+/// unsafe operations
+#[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
+pub unsafe extern "C" fn decompress_chunk_c(
+    comp_chunk_data_ptr: *const u8,
+    comp_chunk_data_len: usize,
+    dictionary_ptr: *const u8,
+    dictionary_len: usize,
+    data_out_ptr: *mut u8,
+    data_out_len: usize
+) -> FFIResult {
+    if comp_chunk_data_ptr.is_null() ||
+        dictionary_ptr.is_null() ||
+        data_out_ptr.is_null() {
+            return FFIResult::NullArgument;
+        }
+
+    let (comp_chunk_data, dictionary) = unsafe {
+        let comp_chunk_data = slice::from_raw_parts(
+            comp_chunk_data_ptr,
+            comp_chunk_data_len
+        );
+
+        let dictionary = slice::from_raw_parts(
+            dictionary_ptr,
+            dictionary_len
+        );
+
+        (comp_chunk_data, dictionary)
+    };
+
+    let out_slice = unsafe {
+        slice::from_raw_parts_mut(
+            data_out_ptr,
+            data_out_len
+        )
+    };
+
+    match decompress_chunk(comp_chunk_data, dictionary){
+        Ok(decomp_data) => {
+            if out_slice.len() < decomp_data.len() {
+                return FFIResult::BufferTooSmall;
+            }
+
+            out_slice[..decomp_data.len()]
+                .copy_from_slice(decomp_data.as_slice());
+
+            FFIResult::StatusOk
+        }
+        Err(_) => FFIResult::InternalError,
+    }
 }
 
 /// A generic helper to safely update the internal state of an

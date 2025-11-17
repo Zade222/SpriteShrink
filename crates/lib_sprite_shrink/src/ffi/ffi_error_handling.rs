@@ -24,7 +24,8 @@ pub enum FFIStatus {
     InvalidMagicNumber = -13,
     SeekOutOfBounds = -14,
     IncorrectArrayLength = -15,
-    NoDataToProcess = -16
+    NoDataToProcess = -16,
+    BufferTooSmall = -17,
 }
 
 
