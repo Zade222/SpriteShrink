@@ -8,7 +8,7 @@ use crate::serialization::SerializationError;
 #[repr(C)]
 #[must_use]
 pub enum FFIStatus {
-    Ok = 0,
+    StatusOk = 0,
     NullArgument = -1,
     InvalidHeader = -2,
     UnsupportedVersion = -3,
@@ -81,7 +81,7 @@ impl From<SpriteShrinkError> for FFIStatus {
 
 #[repr(C)]
 pub enum FFICallbackStatus {
-    Ok = 0,
+    CallbackOk = 0,
     Error = -1,
     Cancelled = -2,
 }
@@ -89,7 +89,7 @@ pub enum FFICallbackStatus {
 impl From<FFICallbackStatus> for Result<(), SpriteShrinkError> {
     fn from(status: FFICallbackStatus) -> Self {
         match status {
-            FFICallbackStatus::Ok => Ok(()),
+            FFICallbackStatus::CallbackOk => Ok(()),
             FFICallbackStatus::Cancelled => Err(SpriteShrinkError::Cancelled),
             FFICallbackStatus::Error => Err(ArchiveError::External(
                 "An error occurred in a host callback.".to_string(),

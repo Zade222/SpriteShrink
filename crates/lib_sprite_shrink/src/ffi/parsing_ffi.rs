@@ -29,7 +29,7 @@ use crate::parsing::{
 
 /// Parses the file chunk index from a raw byte slice.
 ///
-/// On success, returns `FFIResult::Ok` and populates `out_ptr`.
+/// On success, returns `FFIResult::StatusOk` and populates `out_ptr`.
 /// On failure, returns an appropriate error code.
 ///
 /// # Safety
@@ -85,7 +85,7 @@ pub unsafe extern "C" fn parse_file_chunk_index_u64(
                 *out_ptr = Box::into_raw(Box::new(result));
             };
 
-            FFIResult::Ok
+            FFIResult::StatusOk
         }
         Err(_) => FFIResult::ManifestDecodeError,
     }
@@ -93,7 +93,7 @@ pub unsafe extern "C" fn parse_file_chunk_index_u64(
 
 /// Parses the file chunk index from a raw byte slice.
 ///
-/// On success, returns `FFIResult::Ok` and populates `out_ptr`.
+/// On success, returns `FFIResult::StatusOk` and populates `out_ptr`.
 /// On failure, returns an appropriate error code.
 ///
 /// # Safety
@@ -152,7 +152,7 @@ pub unsafe extern "C" fn parse_file_chunk_index_u128(
                 *out_ptr = Box::into_raw(Box::new(result));
             };
 
-            FFIResult::Ok
+            FFIResult::StatusOk
         }
         Err(_) => FFIResult::ManifestDecodeError,
     }
@@ -216,7 +216,7 @@ pub unsafe extern "C" fn free_parsed_chunk_index_u128(
 
 /// Parses a file header from a byte slice.
 ///
-/// On success, returns `FFIResult::Ok` and populates `out_ptr`.
+/// On success, returns `FFIResult::StatusOk` and populates `out_ptr`.
 /// On failure, returns an appropriate error code.
 ///
 /// # Safety
@@ -250,7 +250,7 @@ pub unsafe extern "C" fn parse_file_header_ffi(
             unsafe{
                 *out_ptr = Box::into_raw(Box::new(data));
             };
-            FFIResult::Ok
+            FFIResult::StatusOk
         }
         Err(e) => e.into(),
     }
@@ -276,7 +276,7 @@ pub unsafe extern "C" fn free_file_header(ptr: *mut FileHeader) {
 
 /// Parses the file manifest from a raw byte slice for a u64 hash.
 ///
-/// On success, returns `FFIResult::Ok` and populates `out_ptr`.
+/// On success, returns `FFIResult::StatusOk` and populates `out_ptr`.
 /// On failure, returns an appropriate error code.
 ///
 /// # Safety
@@ -365,12 +365,12 @@ pub unsafe extern "C" fn parse_file_metadata_u64(
     unsafe {
         *out_ptr = Box::into_raw(Box::new(result));
     }
-    FFIResult::Ok
+    FFIResult::StatusOk
 }
 
 /// Parses the file manifest from a raw byte slice for a u128 hash.
 ///
-/// On success, returns `FFIResult::Ok` and populates `out_ptr`.
+/// On success, returns `FFIResult::StatusOk` and populates `out_ptr`.
 /// On failure, returns an appropriate error code.
 ///
 /// # Safety
@@ -467,7 +467,7 @@ pub unsafe extern "C" fn parse_file_metadata_u128(
     unsafe {
         *out_ptr = Box::into_raw(Box::new(result));
     }
-    FFIResult::Ok
+    FFIResult::StatusOk
 }
 
 /// A generic helper to deallocate an `FFIParsedManifestArray` and its

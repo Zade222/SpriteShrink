@@ -64,7 +64,7 @@ use crate::serialization::{serialize_uncompressed_data};
 ///
 /// Returns an `FFIResult` indicating the outcome:
 ///
-/// * `FFIResult::Ok` – The operation succeeded and `*out_ptr` now points to a
+/// * `FFIResult::StatusOk` – The operation succeeded and `*out_ptr` now points to a
 ///   valid `FFISerializedOutputU64`.
 /// * `FFIResult::NullArgument` – Either `args` or `out_ptr` (or the manifest
 ///   pointer inside `args`) was null.
@@ -286,7 +286,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
     unsafe {
         *out_ptr = Box::into_raw(output);
     };
-    FFIResult::Ok
+    FFIResult::StatusOk
 }
 
 /// Serialises uncompressed sprite data using 128bit hash keys.
@@ -325,7 +325,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 ///
 /// Returns an `FFIResult` indicating the outcome:
 ///
-/// * `FFIResult::Ok` – The operation succeeded and `*out_ptr` now points to a
+/// * `FFIResult::StatusOk` – The operation succeeded and `*out_ptr` now points to a
 ///   valid `FFISerializedOutputU128`.
 /// * `FFIResult::NullArgument` – Either `args` or `out_ptr` (or the manifest
 ///   pointer inside `args`) was null.
@@ -565,7 +565,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
     unsafe {
         *out_ptr = Box::into_raw(output);
     };
-    FFIResult::Ok
+    FFIResult::StatusOk
 }
 
 /// Reconstructs each vector that was originally created in

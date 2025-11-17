@@ -1,6 +1,7 @@
 extern crate cbindgen;
 
 use std::env;
+use std::fs;
 use std::path::PathBuf;
 
 fn main() {
@@ -21,6 +22,24 @@ fn main() {
       .generate()
       .expect("Unable to generate C bindings")
       .write_to_file(&output_file);
+
+    /* The following is put in place to work around a problem with cbindgen not
+     * generating the FFIProgressType enum correctly. */
+    let original_content = fs::read_to_string(&output_file)
+        .expect("Failed to read generated header file for patching");
+
+    let modified_content = original_content.replace(
+        "enum FFIProgressType {",
+        "enum {",
+    );
+
+    if original_content == modified_content {
+        println!("cargo:warning=Could not find 'enum FFIProgressType {{' to patch in {}. The cbindgen output may have changed.", output_file);
+    }
+
+    fs::write(&output_file, modified_content)
+        .expect("Failed to write patched header file");
+    //end workaround
 }
 
 fn target_dir() -> PathBuf {

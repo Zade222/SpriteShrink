@@ -1119,7 +1119,7 @@ pub struct FFIProgress {
 ///
 /// This enum is used within the [`FFIProgress`] struct to signal which phase
 /// of the archive-building process is currently active.
-#[repr(i32)]
+#[repr(u8)]
 pub enum FFIProgressType {
     GeneratingDictionary = 0,
     DictionaryDone = 1,

@@ -109,7 +109,7 @@ where
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` on success, and `out_ptr` will be populated with a valid
+/// * `FFIResult::StatusOk` on success, and `out_ptr` will be populated with a valid
 ///   handle.
 /// * `FFIResult::NullArgument` if any of the essential pointer arguments
 ///   (`manifest_array_ptr`, `sorted_hashes_array_ptr`, `out_ptr`) are null.
@@ -240,7 +240,7 @@ pub unsafe extern "C" fn archive_builder_new_u64(
         *out_ptr = Box::into_raw(handle) as *mut ArchiveBuilderU64;
     };
 
-    FFIResult::Ok
+    FFIResult::StatusOk
 }
 
 /// Creates and initializes a new `ArchiveBuilder` for u128 hashes.
@@ -263,7 +263,7 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` on success, and `out_ptr` will be populated with a valid
+/// * `FFIResult::StatusOk` on success, and `out_ptr` will be populated with a valid
 ///   handle.
 /// * `FFIResult::NullArgument` if any of the essential pointer arguments
 ///   (`manifest_array_ptr`, `sorted_hashes_array_ptr`, `out_ptr`) are null.
@@ -410,7 +410,7 @@ pub unsafe extern "C" fn archive_builder_new_u128(
         *out_ptr = Box::into_raw(handle) as *mut ArchiveBuilderU128;
     };
 
-    FFIResult::Ok
+    FFIResult::StatusOk
 }
 
 /// A generic helper to safely update the internal state of an
@@ -440,7 +440,7 @@ pub unsafe extern "C" fn archive_builder_new_u128(
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` if the `builder_handle` is valid and the update was
+/// * `FFIResult::StatusOk` if the `builder_handle` is valid and the update was
 ///   applied.
 /// * `FFIResult::NullArgument` if the provided `builder_handle` is a null
 ///   pointer.
@@ -457,7 +457,7 @@ where
     };
     if let Some(builder) = builder {
         update_fn(builder);
-        FFIResult::Ok
+        FFIResult::StatusOk
     } else {
         FFIResult::NullArgument
     }
@@ -667,7 +667,7 @@ pub unsafe extern "C" fn archive_builder_set_optimize_dictionary_u128(
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` if the `builder_handle` is valid and the callback was set.
+/// * `FFIResult::StatusOk` if the `builder_handle` is valid and the callback was set.
 /// * `FFIResult::NullArgument` if the provided `builder_handle` is a null
 ///   pointer.
 ///
@@ -694,7 +694,7 @@ where
         if let Some(builder_box) = handle_box_ptr.as_mut() {
             let builder = builder_box.as_mut();
             builder.with_c_progress(callback, user_data);
-            FFIResult::Ok
+            FFIResult::StatusOk
         } else {
             FFIResult::NullArgument
         }
@@ -765,7 +765,7 @@ pub unsafe extern "C" fn archive_builder_set_c_progress_u128(
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` on success, with `out_ptr` pointing to the
+/// * `FFIResult::StatusOk` on success, with `out_ptr` pointing to the
 ///   `FFIArchiveData` struct.
 /// * An FFI-safe error code corresponding to the `SpriteShrinkError` on
 ///   failure.
@@ -774,7 +774,7 @@ pub unsafe extern "C" fn archive_builder_set_c_progress_u128(
 ///
 /// The caller must uphold the following safety invariants:
 /// - The `out_ptr` must be a valid, non-null pointer.
-/// - If the function returns `FFIResult::Ok`, the C caller takes ownership of
+/// - If the function returns `FFIResult::StatusOk`, the C caller takes ownership of
 ///   the `FFIArchiveData` pointer written to `out_ptr`. This pointer must
 ///   be passed to `archive_data_free` to deallocate the struct and the
 ///   underlying byte buffer, preventing a memory leak.
@@ -799,7 +799,7 @@ unsafe fn handle_build_result(
             unsafe {
                     *out_ptr = Box::into_raw(output);
                 }
-            FFIResult::Ok
+            FFIResult::StatusOk
         }
         Err(e) => e.into(),
     }

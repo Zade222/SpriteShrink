@@ -55,7 +55,7 @@ use crate::lib_structs::{FileData, FileManifestParent, SSAChunkMeta};
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` - `*out_ptr` now points to a valid
+/// * `FFIResult::StatusOk` - `*out_ptr` now points to a valid
 ///   `FFIFileManifestChunksU64`
 /// * `FFIResult::NullArgument` - any of the pointers above were `NULL`
 ///
@@ -188,7 +188,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u64(
     unsafe {
         *out_ptr = Box::into_raw(output);
     };
-    FFIResult::Ok
+    FFIResult::StatusOk
 }
 
 /// Creates a file manifest and a list of data chunks via an FFI‑safe interface
@@ -208,7 +208,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u64(
 ///
 /// # Returns
 ///
-/// * `FFIResult::Ok` – `*out_ptr` now points to a valid
+/// * `FFIResult::StatusOk` – `*out_ptr` now points to a valid
 ///   `FFIFileManifestChunksU128`
 /// * `FFIResult::NullArgument` – any of the pointers above were `NULL`
 ///
@@ -347,7 +347,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u128(
         *out_ptr = Box::into_raw(output);
     };
 
-    FFIResult::Ok
+    FFIResult::StatusOk
 }
 
 /// A generic helper to deallocate an `FFIFileManifestChunks` and its contents.
@@ -466,7 +466,7 @@ pub unsafe extern "C" fn free_file_manifest_and_chunks_u128(
 
 /// Processes a single file from memory via an FFI-safe interface.
 ///
-/// On success, returns `FFIResult::Ok` and populates `out_ptr`.
+/// On success, returns `FFIResult::StatusOk` and populates `out_ptr`.
 ///
 /// # Safety
 /// - `file_data` must be valid for reads. Its pointers must not be null.
@@ -564,7 +564,7 @@ pub unsafe extern "C" fn process_file_in_memory_ffi(
         *out_ptr = Box::into_raw(output);
     };
 
-    FFIResult::Ok
+    FFIResult::StatusOk
 }
 
 /// Frees the memory allocated by `process_file_in_memory_ffi`.
@@ -624,7 +624,7 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
 ///
 /// # Return Value
 ///
-/// Returns an `FFIResult` indicating success (`FFIResult::Ok`) or the type of
+/// Returns an `FFIResult` indicating success (`FFIResult::StatusOk`) or the type of
 /// failure (e.g., `NullArgument`, `InvalidArgument`, or an internal error).
 #[unsafe(no_mangle)]
 #[allow(clippy::double_must_use)]
@@ -693,7 +693,7 @@ pub unsafe extern "C" fn verify_single_file_u64(
     match verify_single_file(
         &fmp, &veri_hash, get_chunks_closure, progress_closure
     ){
-        Ok(()) => FFIResult::Ok,
+        Ok(()) => FFIResult::StatusOk,
         Err(e) => e.into(),
     }
 }
@@ -722,7 +722,7 @@ pub unsafe extern "C" fn verify_single_file_u64(
 ///
 /// # Return Value
 ///
-/// Returns an `FFIResult` indicating success (`FFIResult::Ok`) or the type of
+/// Returns an `FFIResult` indicating success (`FFIResult::StatusOk`) or the type of
 /// failure (e.g., `NullArgument`, `InvalidArgument`, or an internal error).
 #[unsafe(no_mangle)]
 #[allow(clippy::double_must_use)]
@@ -819,7 +819,7 @@ pub unsafe extern "C" fn verify_single_file_u128(
     match verify_single_file(
         &fmp, &veri_hash, get_chunks_closure, progress_closure
     ){
-        Ok(()) => FFIResult::Ok,
+        Ok(()) => FFIResult::StatusOk,
         Err(e) => e.into(),
     }
 }
@@ -827,7 +827,7 @@ pub unsafe extern "C" fn verify_single_file_u128(
 /// Estimates the compressed size of a data store when using
 /// u64 hashes.
 ///
-/// On success, returns `FFIResult::Ok` and populates `out_size`.
+/// On success, returns `FFIResult::StatusOk` and populates `out_size`.
 ///
 /// # Safety
 /// - All input pointers must be non-null and valid for their specified
@@ -905,7 +905,7 @@ pub unsafe extern "C" fn test_compression_u64(
                 *out_size = compressed_size as u64;
             }
 
-            FFIResult::Ok
+            FFIResult::StatusOk
         }
         Err(e) => e.into()
     }
@@ -914,7 +914,7 @@ pub unsafe extern "C" fn test_compression_u64(
 /// Estimates the compressed size of a data store when using
 /// u128 hashes.
 ///
-/// On success, returns `FFIResult::Ok` and populates `out_size`.
+/// On success, returns `FFIResult::StatusOk` and populates `out_size`.
 ///
 /// # Safety
 /// - All input pointers must be non-null and valid for their specified
@@ -1004,7 +1004,7 @@ pub unsafe extern "C" fn test_compression_u128(
                 *out_size = compressed_size as u64;
             }
 
-            FFIResult::Ok
+            FFIResult::StatusOk
         }
         Err(e) => e.into()
     }
@@ -1072,7 +1072,7 @@ pub unsafe extern "C" fn get_seek_chunks_u64(
                 *out_ptr = Box::into_raw(output);
             }
 
-            FFIResult::Ok
+            FFIResult::StatusOk
         }
         Err(e) => e.into()
     }
@@ -1141,7 +1141,7 @@ pub unsafe extern "C" fn get_seek_chunks_u128(
                 *out_ptr = Box::into_raw(output);
             }
 
-            FFIResult::Ok
+            FFIResult::StatusOk
         }
         Err(e) => e.into()
     }
