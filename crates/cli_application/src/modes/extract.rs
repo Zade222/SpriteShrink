@@ -153,8 +153,8 @@ where
         &dictionary_length
     )?;
 
-    /*Read and store the file zstd compression dictionary from the target
-    file in memory in the dictionary variable.*/
+    /*Read and store the archive chunk index from the target
+    file in memory in the chunk_index variable.*/
     let chunk_index = get_chunk_index::<H>(
         file_path,
         &header.chunk_index_offset,
