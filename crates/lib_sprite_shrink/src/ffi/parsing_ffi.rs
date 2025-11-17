@@ -7,10 +7,11 @@ use std::ffi::{
     CString,
 };
 use std::{
+    os::raw::c_void,
     slice
 };
 
-use crate::ffi::FFIResult;
+use crate::ffi::{ChunkIndexMap, FFIResult};
 use crate::ffi::ffi_types::{
     FFIChunkIndexEntry,
     FFIFileManifestParent,
@@ -26,6 +27,7 @@ use crate::lib_structs::{
 use crate::parsing::{
     parse_file_chunk_index, parse_file_header, parse_file_metadata,
 };
+use serde::{Deserialize};
 
 /// Parses the file chunk index from a raw byte slice.
 ///
@@ -567,4 +569,188 @@ pub unsafe extern "C" fn free_parsed_manifest_u128(
     free_parsed_manifest_internal::<[u8; 16]>(
         ptr
     );
+}
+
+
+fn setup_chunk_index_lookup_internal<H>(
+    chunk_index_data_ptr: *const u8,
+    chunk_index_data_len: usize,
+    map_ptr: *mut c_void
+) -> FFIResult
+where
+    for<'de> H: Eq + std::hash::Hash + Deserialize<'de>,
+{
+    let raw_chunk_index_data = unsafe {
+        slice::from_raw_parts(
+            chunk_index_data_ptr,
+            chunk_index_data_len
+        )
+    };
+
+    match parse_file_chunk_index::<H>(raw_chunk_index_data) {
+        Ok(index_map) => {
+            let boxed_map = Box::new(index_map);
+            let raw_ptr = Box::into_raw(boxed_map) as *mut c_void;
+
+            unsafe {
+                let out_ptr = map_ptr as *mut *mut c_void;
+
+                *out_ptr = raw_ptr;
+            }
+
+            FFIResult::StatusOk
+        }
+        Err(_) => FFIResult::InternalError
+    }
+}
+
+
+/// Deserializes a raw byte slice into a `HashMap` for rapid chunk lookups
+/// and returns an opaque pointer to it as a handle.
+///
+/// This function takes the binary data of a chunk index, parses it, and
+/// creates an in-memory `HashMap`. It then allocates this map on the heap
+/// and provides a handle (a raw pointer) to the C caller. This handle can
+/// be passed to `lookup_chunk_location_u64` to perform fast lookups.
+///
+/// On success, returns `FFIResult::StatusOk` and writes the handle to `map_ptr`.
+/// On failure, it returns an appropriate error code.
+///
+/// # Arguments
+///
+/// * `chunk_index_data_ptr`: A pointer to the raw byte data of the chunk index.
+/// * `chunk_index_data_len`: The length of the byte data.
+/// * `map_ptr`: An out-parameter; a pointer to a `*mut c_void` where the handle
+///   to the created `HashMap` will be written.
+///
+/// # Safety
+///
+/// - `chunk_index_data_ptr` must point to a valid, readable memory block of
+///   `chunk_index_data_len` bytes.
+/// - `map_ptr` must be a valid, non-null pointer.
+/// - The handle written to `map_ptr` on success is owned by the C caller and
+///   MUST be freed by passing it to `free_chunk_index_u64` to avoid
+///   memory leaks.
+/// - The handle must not be used after it has been freed.
+#[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
+pub unsafe extern "C" fn prepare_chunk_index_u64(
+    chunk_index_data_ptr: *const u8,
+    chunk_index_data_len: usize,
+    map_ptr: *mut c_void
+) -> FFIResult {
+    if chunk_index_data_ptr.is_null() ||
+        map_ptr.is_null() {
+            return FFIResult::NullArgument;
+        }
+
+    setup_chunk_index_lookup_internal::<u64>(
+        chunk_index_data_ptr,
+        chunk_index_data_len,
+        map_ptr
+    )
+}
+
+/// Deserializes a raw byte slice into a `HashMap` for rapid chunk lookups
+/// and returns an opaque pointer to it as a handle.
+///
+/// This function takes the binary data of a chunk index, parses it, and
+/// creates an in-memory `HashMap`. It then allocates this map on the heap
+/// and provides a handle (a raw pointer) to the C caller. This handle can
+/// be passed to `lookup_chunk_location_u128` to perform fast lookups.
+///
+/// On success, returns `FFIResult::StatusOk` and writes the handle to `map_ptr`.
+/// On failure, it returns an appropriate error code.
+///
+/// # Arguments
+///
+/// * `chunk_index_data_ptr`: A pointer to the raw byte data of the chunk index.
+/// * `chunk_index_data_len`: The length of the byte data.
+/// * `map_ptr`: An out-parameter; a pointer to a `*mut c_void` where the handle
+///   to the created `HashMap` will be written.
+///
+/// # Safety
+///
+/// - `chunk_index_data_ptr` must point to a valid, readable memory block of
+///   `chunk_index_data_len` bytes.
+/// - `map_ptr` must be a valid, non-null pointer.
+/// - The handle written to `map_ptr` on success is owned by the C caller and
+///   MUST be freed by passing it to `free_chunk_index_u128` to avoid
+///   memory leaks.
+/// - The handle must not be used after it has been freed.
+#[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
+pub unsafe extern "C" fn prepare_chunk_index_u128(
+    chunk_index_data_ptr: *const u8,
+    chunk_index_data_len: usize,
+    map_ptr: *mut c_void
+) -> FFIResult {
+    if chunk_index_data_ptr.is_null() ||
+        map_ptr.is_null() {
+            return FFIResult::NullArgument;
+        }
+
+    setup_chunk_index_lookup_internal::<u128>(
+        chunk_index_data_ptr,
+        chunk_index_data_len,
+        map_ptr
+    )
+}
+
+
+/// Frees the memory for a chunk index handle created by
+/// `prepare_chunk_index_u64`.
+///
+/// This function takes the opaque pointer (handle) to the `HashMap` and
+/// safely deallocates its memory.
+///
+/// # Safety
+///
+/// - The `map_ptr` must be a valid handle returned from a successful call to
+///   `prepare_chunk_index_u64`.
+/// - The `map_ptr` must not have been freed already. Calling this function
+///   more than once on the same handle will result in a double-free, leading
+///   to undefined behavior.
+/// - The `map_ptr` must not be used again after this function is called.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_chunk_index_u64(
+    map_ptr: *mut c_void
+) {
+    if map_ptr.is_null() {
+        return;
+    }
+
+    let _boxed_map = unsafe {
+        Box::from_raw(map_ptr as *mut ChunkIndexMap<u64>)
+    };
+}
+
+
+/// Frees the memory for a chunk index handle created by
+/// `prepare_chunk_index_u128`.
+///
+/// This function takes the opaque pointer (handle) to the `HashMap` and
+/// safely deallocates its memory.
+///
+/// # Safety
+///
+/// - The `map_ptr` must be a valid handle returned from a successful call to
+///   `prepare_chunk_index_u128`.
+/// - The `map_ptr` must not have been freed already. Calling this function
+///   more than once on the same handle will result in a double-free, leading
+///   to undefined behavior.
+/// - The `map_ptr` must not be used again after this function is called.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_chunk_index_u128(
+    map_ptr: *mut c_void
+) {
+    if map_ptr.is_null() {
+        return;
+    }
+
+    let _boxed_map = unsafe {
+        Box::from_raw(map_ptr as *mut ChunkIndexMap<u128>)
+    };
 }

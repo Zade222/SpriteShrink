@@ -17,6 +17,7 @@ use crate::ffi::ffi_error_handling::{
 };
 use crate::ffi::ffi_types::{
     CreateFileManifestAndChunksArgs, FFIChunk, FFIChunkDataArray,
+    ChunkIndexMap, FFIChunkLocation,
     FFIFileManifestChunks,
     FFIFileManifestChunksU64, FFIFileManifestChunksU128,
     FFIFileData, FFIFileManifestParent,
@@ -35,7 +36,9 @@ use crate::lib_error_handling::{
 use crate::processing::{
     create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory,
     verify_single_file, test_compression};
-use crate::lib_structs::{FileData, FileManifestParent, SSAChunkMeta};
+use crate::lib_structs::{
+    FileData, FileManifestParent, SSAChunkMeta
+};
 
 /// Creates a file manifest and a list of data chunks via an FFI‑safe interface
 /// for 64‑bit hash keys.
@@ -1225,4 +1228,112 @@ pub unsafe extern "C" fn free_seek_chunks_u128(
     };
 
     free_seek_chunks_internal::<[u8; 16]>(ptr);
+}
+
+
+/// Looks up the location of a data chunk in the chunk index using a u64 hash.
+///
+/// This function uses an opaque handle to the `HashMap` (created by
+/// `prepare_chunk_index_u64`) to find the `FFIChunkLocation` corresponding
+/// to the provided hash.
+///
+/// On success (`FFIResult::StatusOk`), the `chunk_location` out-parameter is
+/// populated with the result. If the hash is not found, the function returns
+/// `FFIResult::HashNotFound`.
+///
+/// # Arguments
+///
+/// * `map_ptr`: An opaque handle to the chunk index `HashMap`, originally
+///   obtained from `prepare_chunk_index_u64`.
+/// * `key_hash`: The `u64` hash of the chunk to look up.
+/// * `chunk_location`: An out-parameter; a pointer to an `FFIChunkLocation`
+///   struct where the result will be written.
+///
+/// # Safety
+///
+/// - `map_ptr` must be a valid, non-null handle that has not yet been freed.
+/// - `chunk_location` must be a valid, non-null pointer to a writable memory
+///   location capable of holding an `FFIChunkLocation`.
+#[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
+pub unsafe extern "C" fn lookup_chunk_location_u64(
+    map_ptr: *const c_void,
+    key_hash: u64,
+    chunk_location: *mut FFIChunkLocation
+) -> FFIResult {
+    if map_ptr.is_null() ||chunk_location.is_null() {
+        return FFIResult::NullArgument
+    }
+
+    let hash_map_ref = unsafe {&*(map_ptr as *const ChunkIndexMap<u64>)};
+
+    match hash_map_ref.get(&key_hash){
+        Some(chunk_loc) => {
+            unsafe {
+                *chunk_location = FFIChunkLocation::from(*chunk_loc);
+            }
+
+            FFIResult::StatusOk
+        }
+        None => {
+            FFIResult::HashNotFound
+        }
+    }
+}
+
+
+/// Looks up the location of a data chunk in the chunk index using a u128 hash.
+///
+/// This function uses an opaque handle to the `HashMap` (created by
+/// `prepare_chunk_index_u128`) to find the `FFIChunkLocation` corresponding
+/// to the provided hash.
+///
+/// On success (`FFIResult::StatusOk`), the `chunk_location` out-parameter is
+/// populated with the result. If the hash is not found, the function returns
+/// `FFIResult::HashNotFound`.
+///
+/// # Arguments
+///
+/// * `map_ptr`: An opaque handle to the chunk index `HashMap`, originally
+///   obtained from `prepare_chunk_index_u128`.
+/// * `key_hash`: A 16-byte array representing the `u128` hash of the chunk
+///   to look up.
+/// * `chunk_location`: An out-parameter; a pointer to an `FFIChunkLocation`
+///   struct where the result will be written.
+///
+/// # Safety
+///
+/// - `map_ptr` must be a valid, non-null handle that has not yet been freed.
+/// - `chunk_location` must be a valid, non-null pointer to a writable memory
+///   location capable of holding an `FFIChunkLocation`.
+#[unsafe(no_mangle)]
+#[allow(clippy::double_must_use)]
+#[must_use]
+pub unsafe extern "C" fn lookup_chunk_location_u128(
+    map_ptr: *const c_void,
+    key_hash_ptr: *const u8,
+    chunk_location: *mut FFIChunkLocation
+) -> FFIResult {
+    if map_ptr.is_null() ||chunk_location.is_null() {
+        return FFIResult::NullArgument
+    }
+
+    let hash_map_ref = unsafe {&*(map_ptr as *const ChunkIndexMap<u128>)};
+
+    let key_hash_array = unsafe {*(key_hash_ptr as *const [u8; 16])};
+    let hash_u128 = u128::from_le_bytes(key_hash_array);
+
+    match hash_map_ref.get(&hash_u128){
+        Some(chunk_loc) => {
+            unsafe {
+                *chunk_location = FFIChunkLocation::from(*chunk_loc);
+            }
+
+            FFIResult::StatusOk
+        }
+        None => {
+            FFIResult::HashNotFound
+        }
+    }
 }

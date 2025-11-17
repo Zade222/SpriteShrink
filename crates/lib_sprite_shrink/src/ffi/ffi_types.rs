@@ -12,6 +12,7 @@
 //!   allocating it before calling Rust and freeing it after Rust returns it.
 //! - Ensuring that all C-strings (`c_char*`) are null-terminated.
 
+use std::collections::HashMap;
 use std::{
     ffi::CStr,
     os::raw::c_void,
@@ -272,6 +273,9 @@ pub type CallbackGetChunks<H> = Box<dyn Fn(&[H]) -> Result<Vec<Vec<u8>>,
 pub type CallbackWriteData = Box<dyn FnMut(&[u8], bool) -> Result<(),
     SpriteShrinkError> + Send + Sync + 'static>;
 
+
+pub type ChunkIndexMap<H> = HashMap<H, ChunkLocation>;
+
 /// Arguments used by the `create_file_manifest_and_chunks_u64`
 /// and `create_file_manifest_and_chunks_u128`FFI functions.
 ///
@@ -468,7 +472,7 @@ pub struct FFIChunkDataArray {
 ///   beginning of the archive's main data section.
 /// * `length`: The total size of the compressed chunk in bytes.
 #[repr(C)]
-#[derive(Clone)]
+#[derive(Clone, Copy)]
 pub struct FFIChunkLocation {
     pub offset: u64,
     pub length: u32,

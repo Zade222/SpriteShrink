@@ -26,6 +26,7 @@ pub enum FFIStatus {
     IncorrectArrayLength = -15,
     NoDataToProcess = -16,
     BufferTooSmall = -17,
+    HashNotFound = -18,
 }
 
 
