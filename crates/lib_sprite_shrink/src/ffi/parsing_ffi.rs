@@ -7,7 +7,6 @@ use std::ffi::{
     CString,
 };
 use std::{
-    hash::Hash,
     slice
 };
 
@@ -27,89 +26,6 @@ use crate::lib_structs::{
 use crate::parsing::{
     parse_file_chunk_index, parse_file_header, parse_file_metadata,
 };
-
-/// A generic helper function to parse a chunk index and convert it to an
-/// FFI-safe format.
-///
-/// This internal function serves as the core logic for the public
-/// `parse_file_chunk_index_*` functions. It takes a raw byte slice
-/// containing the serialized chunk index data, calls the primary
-/// `parse_file_chunk_index` function to deserialize it into a Rust `HashMap`,
-/// and then transforms the result into a C-compatible array structure.
-///
-/// The resulting FFI-safe array is allocated on the heap, and a pointer to it
-/// is returned via the `out_ptr` parameter. Ownership of this memory is
-/// transferred to the caller.
-///
-/// # Type Parameters
-///
-/// * `H`: The generic hash type (e.g., `u64`, `u128`) used in the chunk index.
-///   It must be deserializable and support hashing and equality checks.
-///
-/// # Arguments
-///
-/// * `chunk_index_data`: A byte slice containing the bincode-serialized chunk
-///   index.
-/// * `out_ptr`: A raw pointer to a location where the pointer to the newly
-///   allocated `FFIParsedChunkIndexArray` will be written.
-///
-/// # Returns
-///
-/// * `FFIResult::Ok` on success, with `out_ptr` pointing to the parsed data
-///   structure.
-/// * `FFIResult::ManifestDecodeError` if deserialization of the
-///   `chunk_index_data` fails.
-///
-/// # Safety
-///
-/// The public FFI function that calls this helper is responsible for upholding
-/// the following safety invariants:
-/// - The `out_ptr` must be a valid, non-null pointer.
-/// - The caller takes ownership of the memory allocated for the
-///   `FFIParsedChunkIndexArray` and its internal `entries` array. This memory
-///   **must** be deallocated by passing the pointer back to the corresponding
-///   `free_parsed_chunk_index_*` function to prevent a memory leak.
-fn parse_file_chunk_index_internal<H>(
-    chunk_index_data: &[u8],
-    out_ptr: *mut *mut FFIParsedChunkIndexArray<H>,
-) -> FFIResult
-where
-    H: Eq + Hash,
-    for<'de> H: serde::Deserialize<'de>
-{
-    match parse_file_chunk_index(chunk_index_data){
-        Ok(index_map) => {
-            let mut entries: Vec<FFIChunkIndexEntry<H>> = index_map
-                .into_iter()
-                .map(|(hash, location)| {
-                    FFIChunkIndexEntry::<H>::from((hash, location))
-                })
-                .collect();
-
-            let entries_ptr = entries.as_mut_ptr();
-            let entries_len = entries.len();
-            let entries_cap = entries.capacity();
-
-            /*Give up ownership of the Vec so it doesn't get
-            deallocated.*/
-            std::mem::forget(entries);
-
-            //Prepare return struct
-            let result = FFIParsedChunkIndexArray::<H> {
-                entries: entries_ptr,
-                entries_len,
-                entries_cap
-            };
-
-            unsafe {
-                *out_ptr = Box::into_raw(Box::new(result));
-            };
-
-            FFIResult::Ok
-        }
-        Err(_) => FFIResult::ManifestDecodeError,
-    }
-}
 
 /// Parses the file chunk index from a raw byte slice.
 ///
@@ -141,10 +57,38 @@ pub unsafe extern "C" fn parse_file_chunk_index_u64(
         chunk_index_len)
     };
 
-    parse_file_chunk_index_internal::<u64>(
-        chunk_index_data,
-        out_ptr
-    )
+    match parse_file_chunk_index(chunk_index_data){
+        Ok(index_map) => {
+            let mut entries: Vec<FFIChunkIndexEntry<u64>> = index_map
+                .into_iter()
+                .map(|(hash, location)| {
+                    FFIChunkIndexEntry::<u64>::from((hash, location))
+                })
+                .collect();
+
+            let entries_ptr = entries.as_mut_ptr();
+            let entries_len = entries.len();
+            let entries_cap = entries.capacity();
+
+            /*Give up ownership of the Vec so it doesn't get
+            deallocated.*/
+            std::mem::forget(entries);
+
+            //Prepare return struct
+            let result = FFIParsedChunkIndexArray::<u64> {
+                entries: entries_ptr,
+                entries_len,
+                entries_cap
+            };
+
+            unsafe {
+                *out_ptr = Box::into_raw(Box::new(result));
+            };
+
+            FFIResult::Ok
+        }
+        Err(_) => FFIResult::ManifestDecodeError,
+    }
 }
 
 /// Parses the file chunk index from a raw byte slice.
@@ -177,10 +121,41 @@ pub unsafe extern "C" fn parse_file_chunk_index_u128(
         chunk_index_len)
     };
 
-    parse_file_chunk_index_internal::<u128>(
-        chunk_index_data,
-        out_ptr
-    )
+    match parse_file_chunk_index::<u128>(chunk_index_data){
+        Ok(index_map) => {
+            let mut entries: Vec<FFIChunkIndexEntry<[u8; 16]>> = index_map
+                .into_iter()
+                .map(|(hash, location)| {
+                    FFIChunkIndexEntry::<[u8; 16]>::from((
+                        hash.to_le_bytes(),
+                        location
+                    ))
+                })
+                .collect();
+
+            let entries_ptr = entries.as_mut_ptr();
+            let entries_len = entries.len();
+            let entries_cap = entries.capacity();
+
+            /*Give up ownership of the Vec so it doesn't get
+            deallocated.*/
+            std::mem::forget(entries);
+
+            //Prepare return struct
+            let result = FFIParsedChunkIndexArray::<[u8; 16]> {
+                entries: entries_ptr,
+                entries_len,
+                entries_cap
+            };
+
+            unsafe {
+                *out_ptr = Box::into_raw(Box::new(result));
+            };
+
+            FFIResult::Ok
+        }
+        Err(_) => FFIResult::ManifestDecodeError,
+    }
 }
 
 
@@ -234,7 +209,7 @@ pub unsafe extern "C" fn free_parsed_chunk_index_u128(
         return;
     }
 
-    free_parsed_chunk_index_ffi_internal::<u128>(
+    free_parsed_chunk_index_ffi_internal::<[u8; 16]>(
         ptr
     );
 }
@@ -299,115 +274,6 @@ pub unsafe extern "C" fn free_file_header(ptr: *mut FileHeader) {
     }
 }
 
-/// Parses a serialized file‑manifest byte slice and converts it into an
-/// FFI‑safe `FFIParsedManifestArray` that can be handed back to C.
-///
-/// # Arguments
-/// * `manifest_data`: a byte slice that contains the binary encoding of
-///   the file‑manifest.  The caller must ensure that this slice points to
-///   valid, readable memory for `manifest_data.len()` bytes.
-/// * `out_ptr`: a non‑null pointer to a mutable
-///   `*mut FFIParsedManifestArray<H>` where the resulting array will be
-///   written.
-///
-/// On success, `*out_ptr` will point to an opaque `FFIParsedManifestArray<H>`
-/// containing an array of `FFIFileManifestParent<H>` structs, each of which
-/// holds a C string (`*mut c_char`) for the file name and a pointer to a
-/// slice of `FFISSAChunkMeta<H>` describing the chunk locations in that
-/// file.
-///
-/// # Returns
-///
-/// * `FFIResult::Ok` – `out_ptr` now points to a valid array.
-/// * `FFIResult::ManifestDecodeError` – the input data could not be decoded
-///   into a `FileManifestParent<H>` chain.
-/// * `FFIResult::InvalidString` – a filename could not be converted into a
-///   C string.  The caller should treat this as a fatal error.
-///
-/// # Safety
-///
-/// * `manifest_data` must point to a valid slice of length
-///   `manifest_data.len()`.
-/// * `out_ptr` must be non‑null and point to a valid memory location that
-///   the caller will read after the call.
-/// * The returned array and all embedded strings/chunks are allocated on the
-///   heap; the C caller is responsible for freeing them by passing the
-///   pointer to `free_parsed_manifest_u64` /
-///   `free_parsed_manifest_u128`.
-/// * `H` must implement `Copy` and `serde::Deserialize`, as required by the
-///   underlying `parse_file_metadata` implementation.
-/// * The function does not take ownership of `manifest_data`; the caller
-///   retains ownership until the returned data is freed.
-fn parse_file_metadata_internal<H>(
-    manifest_data: &[u8],
-    out_ptr: *mut *mut FFIParsedManifestArray<H>,
-) -> FFIResult
-where
-    H: Copy + for<'de> serde::Deserialize<'de>
-{
-    let file_manifest: Vec<FileManifestParent<H>> =
-        match parse_file_metadata(manifest_data) {
-            Ok(data) => data,
-            //Return null on error
-            Err(_) => return FFIResult::ManifestDecodeError,
-        };
-
-    /*Convert the Vec<FileManifestParent> to a
-    Vec<FFIFileManifestParent>*/
-    let ffi_manifests: Result<Vec<FFIFileManifestParent<H>>, FFIResult> =
-        file_manifest
-        .into_iter()
-        .map(|fmp| {
-            //Convert the nested Vec<SSAChunkMeta>
-            let mut chunk_meta_vec: Vec<FFISSAChunkMeta<H>> =
-            fmp.chunk_metadata
-                .iter()
-                .map(|meta| FFISSAChunkMeta::<H>::from(*meta))
-                .collect();
-
-            let chunk_meta_ptr = chunk_meta_vec.as_mut_ptr();
-            let chunk_meta_len = chunk_meta_vec.len();
-            let chunk_meta_cap = chunk_meta_vec.capacity();
-            //Give up ownership so Rust doesn't deallocate it
-            std::mem::forget(chunk_meta_vec);
-
-            let c_filename = match CString::new(fmp.filename.clone()) {
-                Ok(s) => s.into_raw(),
-                Err(_) => return Err(FFIResult::InvalidString),
-            };
-
-            Ok(FFIFileManifestParent::<H>{
-                filename: c_filename,
-                chunk_metadata: chunk_meta_ptr as *const FFISSAChunkMeta<H>,
-                chunk_metadata_len: chunk_meta_len,
-                chunk_metadata_cap: chunk_meta_cap,
-            })
-        })
-        .collect();
-
-    let mut ffi_manifests = match ffi_manifests {
-        Ok(v) => v,
-        Err(status) => return status,
-    };
-
-    let manifests_ptr = ffi_manifests.as_mut_ptr();
-    let manifests_len = ffi_manifests.len();
-    let manifests_cap = ffi_manifests.capacity();
-    std::mem::forget(ffi_manifests);
-
-    let result = FFIParsedManifestArray::<H> {
-        manifests: manifests_ptr,
-        manifests_len,
-        manifests_cap
-    };
-
-    //Allocate the result struct on the heap and return a raw pointer
-    unsafe {
-        *out_ptr = Box::into_raw(Box::new(result));
-    }
-    FFIResult::Ok
-}
-
 /// Parses the file manifest from a raw byte slice for a u64 hash.
 ///
 /// On success, returns `FFIResult::Ok` and populates `out_ptr`.
@@ -439,7 +305,67 @@ pub unsafe extern "C" fn parse_file_metadata_u64(
         )
     };
 
-    parse_file_metadata_internal::<u64>(manifest_data, out_ptr)
+    let file_manifest: Vec<FileManifestParent<u64>> =
+        match parse_file_metadata(manifest_data) {
+            Ok(data) => data,
+            //Return null on error
+            Err(_) => return FFIResult::ManifestDecodeError,
+        };
+
+    /*Convert the Vec<FileManifestParent> to a
+    Vec<FFIFileManifestParent>*/
+    let ffi_manifests: Result<Vec<FFIFileManifestParent<u64>>, FFIResult> =
+        file_manifest
+        .into_iter()
+        .map(|fmp| {
+            //Convert the nested Vec<SSAChunkMeta>
+            let mut chunk_meta_vec: Vec<FFISSAChunkMeta<u64>> =
+            fmp.chunk_metadata
+                .iter()
+                .map(|meta| FFISSAChunkMeta::<u64>::from(*meta))
+                .collect();
+
+            let chunk_meta_ptr = chunk_meta_vec.as_mut_ptr();
+            let chunk_meta_len = chunk_meta_vec.len();
+            let chunk_meta_cap = chunk_meta_vec.capacity();
+            //Give up ownership so Rust doesn't deallocate it
+            std::mem::forget(chunk_meta_vec);
+
+            let c_filename = match CString::new(fmp.filename.clone()) {
+                Ok(s) => s.into_raw(),
+                Err(_) => return Err(FFIResult::InvalidString),
+            };
+
+            Ok(FFIFileManifestParent::<u64>{
+                filename: c_filename,
+                chunk_metadata: chunk_meta_ptr as *const FFISSAChunkMeta<u64>,
+                chunk_metadata_len: chunk_meta_len,
+                chunk_metadata_cap: chunk_meta_cap,
+            })
+        })
+        .collect();
+
+    let mut ffi_manifests = match ffi_manifests {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
+
+    let manifests_ptr = ffi_manifests.as_mut_ptr();
+    let manifests_len = ffi_manifests.len();
+    let manifests_cap = ffi_manifests.capacity();
+    std::mem::forget(ffi_manifests);
+
+    let result = FFIParsedManifestArray::<u64> {
+        manifests: manifests_ptr,
+        manifests_len,
+        manifests_cap
+    };
+
+    //Allocate the result struct on the heap and return a raw pointer
+    unsafe {
+        *out_ptr = Box::into_raw(Box::new(result));
+    }
+    FFIResult::Ok
 }
 
 /// Parses the file manifest from a raw byte slice for a u128 hash.
@@ -474,7 +400,74 @@ pub unsafe extern "C" fn parse_file_metadata_u128(
         )
     };
 
-    parse_file_metadata_internal::<u128>(manifest_data, out_ptr)
+    let file_manifest: Vec<FileManifestParent<u128>> =
+        match parse_file_metadata(manifest_data) {
+            Ok(data) => data,
+            //Return null on error
+            Err(_) => return FFIResult::ManifestDecodeError,
+        };
+
+    /*Convert the Vec<FileManifestParent> to a
+    Vec<FFIFileManifestParent>*/
+    let ffi_manifests: Result<Vec<FFIFileManifestParent<[u8; 16]>>, FFIResult> =
+        file_manifest
+        .into_iter()
+        .map(|fmp| {
+            //Convert the nested Vec<SSAChunkMeta>
+            let mut chunk_meta_vec: Vec<FFISSAChunkMeta<[u8; 16]>> =
+            fmp.chunk_metadata
+                .iter()
+                .map(|meta| {
+                    FFISSAChunkMeta {
+                        hash: meta.hash.to_le_bytes(),
+                        offset: meta.offset,
+                        length: meta.length,
+                    }
+                })
+                .collect();
+
+            let chunk_meta_ptr = chunk_meta_vec.as_mut_ptr();
+            let chunk_meta_len = chunk_meta_vec.len();
+            let chunk_meta_cap = chunk_meta_vec.capacity();
+            //Give up ownership so Rust doesn't deallocate it
+            std::mem::forget(chunk_meta_vec);
+
+            let c_filename = match CString::new(fmp.filename.clone()) {
+                Ok(s) => s.into_raw(),
+                Err(_) => return Err(FFIResult::InvalidString),
+            };
+
+            Ok(FFIFileManifestParent::<[u8; 16]>{
+                filename: c_filename,
+                chunk_metadata: chunk_meta_ptr as *const FFISSAChunkMeta<
+                    [u8; 16]
+                >,
+                chunk_metadata_len: chunk_meta_len,
+                chunk_metadata_cap: chunk_meta_cap,
+            })
+        })
+        .collect();
+
+    let mut ffi_manifests = match ffi_manifests {
+        Ok(v) => v,
+        Err(status) => return status,
+    };
+
+    let manifests_ptr = ffi_manifests.as_mut_ptr();
+    let manifests_len = ffi_manifests.len();
+    let manifests_cap = ffi_manifests.capacity();
+    std::mem::forget(ffi_manifests);
+
+    let result = FFIParsedManifestArrayU128 {
+        manifests: manifests_ptr,
+        manifests_len,
+        manifests_cap
+    };
+
+    unsafe {
+        *out_ptr = Box::into_raw(Box::new(result));
+    }
+    FFIResult::Ok
 }
 
 /// A generic helper to deallocate an `FFIParsedManifestArray` and its
@@ -571,7 +564,7 @@ pub unsafe extern "C" fn free_parsed_manifest_u128(
         return;
     }
 
-    free_parsed_manifest_internal::<u128>(
+    free_parsed_manifest_internal::<[u8; 16]>(
         ptr
     );
 }

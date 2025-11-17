@@ -41,7 +41,11 @@ trait ArchiveBuilderTrait<H> {
     fn set_compression_algorithm(&mut self, algorithm: u16);
     fn set_compression_level(&mut self, level: i32);
     fn set_dictionary_size(&mut self, size: u64);
-    fn with_c_progress(&mut self, callback: extern "C" fn(FFIProgress, *mut c_void), user_data: *mut c_void);
+    fn with_c_progress(
+        &mut self,
+        callback: extern "C" fn(FFIProgress, *mut c_void),
+        user_data: *mut c_void
+    );
     fn set_worker_threads(&mut self, threads: usize);
     fn set_optimize_dictionary(&mut self, optimize: bool);
 
@@ -52,7 +56,8 @@ trait ArchiveBuilderTrait<H> {
 impl<'a, E, H, R, W> ArchiveBuilderTrait<H> for ArchiveBuilder<'a, E, H, R, W>
 where
     E: std::error::Error + IsCancelled + Send + Sync + 'static,
-    H: Copy + std::fmt::Debug + Eq + std::hash::Hash + serde::Serialize + Send + Sync + 'static + std::fmt::Display + Ord,
+    H: Copy + std::fmt::Debug + Eq + std::hash::Hash + serde::Serialize +
+        Send + Sync + 'static + std::fmt::Display + Ord,
     R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
     W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
 {
@@ -71,7 +76,10 @@ where
     fn set_optimize_dictionary(&mut self, optimize: bool) {
         self.optimize_dictionary(optimize);
     }
-    fn with_c_progress(&mut self, callback: extern "C" fn(FFIProgress, *mut c_void), user_data: *mut c_void) {
+    fn with_c_progress(
+        &mut self, callback: extern "C" fn(FFIProgress, *mut c_void),
+        user_data: *mut c_void
+    ) {
         self.with_c_progress(callback, user_data);
     }
 
@@ -310,7 +318,9 @@ pub unsafe extern "C" fn archive_builder_new_u128(
 
     let ser_file_manifest: Vec<FileManifestParent<u128>> = ffi_manifests
         .iter()
-        .map(FileManifestParent::<u128>::from)
+        .map(|ffi_man|{
+            FileManifestParent::<u128>::from(ffi_man)
+        })
         .collect();
 
     let user_data_addr = args_int.user_data as usize;
@@ -636,10 +646,10 @@ pub unsafe extern "C" fn archive_builder_set_optimize_dictionary_u128(
 /// A generic helper to attach a C progress callback to an `ArchiveBuilder`.
 ///
 /// This internal function provides the logic for setting a C-style progress
-/// reporting callback on an `ArchiveBuilder` instance that is managed behind an
-/// opaque FFI handle. It safely casts the handle back to a mutable Rust trait
-/// object and calls the builder's `with_c_progress` method to register the
-/// C function pointer and `user_data` context.
+/// reporting callback on an `ArchiveBuilder` instance that is managed behind
+/// an opaque FFI handle. It safely casts the handle back to a mutable Rust
+/// trait object and calls the builder's `with_c_progress` method to register
+/// the C function pointer and `user_data` context.
 ///
 /// # Type Parameters
 ///
@@ -658,7 +668,8 @@ pub unsafe extern "C" fn archive_builder_set_optimize_dictionary_u128(
 /// # Returns
 ///
 /// * `FFIResult::Ok` if the `builder_handle` is valid and the callback was set.
-/// * `FFIResult::NullArgument` if the provided `builder_handle` is a null pointer.
+/// * `FFIResult::NullArgument` if the provided `builder_handle` is a null
+///   pointer.
 ///
 /// # Safety
 ///
@@ -764,7 +775,7 @@ pub unsafe extern "C" fn archive_builder_set_c_progress_u128(
 /// The caller must uphold the following safety invariants:
 /// - The `out_ptr` must be a valid, non-null pointer.
 /// - If the function returns `FFIResult::Ok`, the C caller takes ownership of
-///   the `FFIArchiveData` pointer written to `out_ptr`. This pointer **must**
+///   the `FFIArchiveData` pointer written to `out_ptr`. This pointer must
 ///   be passed to `archive_data_free` to deallocate the struct and the
 ///   underlying byte buffer, preventing a memory leak.
 unsafe fn handle_build_result(
@@ -776,7 +787,9 @@ unsafe fn handle_build_result(
             let data_ptr = archive_data.as_mut_ptr();
             let data_len = archive_data.len();
             let data_cap = archive_data.capacity();
-            std::mem::forget(archive_data); // Give ownership to C caller
+
+            // Give ownership to C parent application
+            std::mem::forget(archive_data);
 
             let output = Box::new(FFIArchiveData {
                 data: data_ptr,
