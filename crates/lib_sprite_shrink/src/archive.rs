@@ -834,6 +834,24 @@ where
     }
 }
 
+/// Decompresses a compressed chunk using a ZSTD dictionary.
+///
+/// # Parameters
+///
+/// * `comp_chunk_data` – A byte slice containing the compressed chunk data.
+/// * `dictionary` – A byte slice containing the ZSTD dictionary that was used
+///   during compression.
+///
+/// # Returns
+///
+/// Returns `Ok(Vec<u8>)` with the decompressed data on success, or a
+/// `SpriteShrinkError` on failure.
+///
+/// # Errors
+///
+/// This function will return an error if:
+/// * The ZSTD decoder cannot be created with the supplied dictionary, or
+/// * The decompression process fails while reading the compressed data.
 pub fn decompress_chunk(
     comp_chunk_data: &[u8],
     dictionary: &[u8]
