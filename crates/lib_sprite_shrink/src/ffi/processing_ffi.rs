@@ -27,8 +27,9 @@ use crate::ffi::ffi_types::{
     FFISeekChunkInfo, FFISeekInfoArray,
     FFISeekInfoArrayU64, FFISeekInfoArrayU128,
     FFISSAChunkMeta,
+    TestCompressionArgsU64, TestCompressionArgsU128,
+    U128Bytes,
     VerifySingleFileArgsU64, VerifySingleFileArgsU128,
-    TestCompressionArgsU64, TestCompressionArgsU128
 };
 use crate::lib_error_handling::{
     SpriteShrinkError
@@ -287,11 +288,11 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u128(
         &chunks
     );
 
-    let mut ffi_chunk_metadata: Vec<FFISSAChunkMeta<[u8; 16]>> = fmp
+    let mut ffi_chunk_metadata: Vec<FFISSAChunkMeta<U128Bytes>> = fmp
         .chunk_metadata
         .iter()
         .map(|meta| FFISSAChunkMeta {
-            hash: meta.hash.to_le_bytes(),
+            hash: meta.hash.into(),
             offset: meta.offset,
             length: meta.length,
         })
@@ -307,14 +308,14 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u128(
         Err(_) => return FFIResult::InvalidString,
     };
 
-    let ffi_fmp = FFIFileManifestParent::<[u8; 16]> {
+    let ffi_fmp = FFIFileManifestParent::<U128Bytes> {
         filename: c_filename,
         chunk_metadata: fmp_meta_ptr,
         chunk_metadata_len: fmp_meta_len,
         chunk_metadata_cap: fmp_meta_cap,
     };
 
-    let mut ffi_hashed_chunks: Vec<FFIHashedChunkData<[u8; 16]>> = hashed_chunks
+    let mut ffi_hashed_chunks: Vec<FFIHashedChunkData<U128Bytes>> = hashed_chunks
         .into_iter()
         .map(|(hash, mut data_vec)| {
             let data_ptr = data_vec.as_mut_ptr();
@@ -326,7 +327,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u128(
             allocation to the FFI caller.*/
             std::mem::forget(data_vec);
             FFIHashedChunkData::from((
-                hash.to_le_bytes(),
+                hash.into(),
                 data_ptr,
                 data_len,
                 data_cap
@@ -462,7 +463,7 @@ pub unsafe extern "C" fn free_file_manifest_and_chunks_u128(
         return;
     }
 
-    free_file_manifest_and_chunks_internal::<[u8; 16]>(
+    free_file_manifest_and_chunks_internal::<U128Bytes>(
         ptr
     );
 }
@@ -760,7 +761,7 @@ pub unsafe extern "C" fn verify_single_file_u128(
         let chunk_metadata = chunk_metadata_slice
             .iter()
             .map(|meta| SSAChunkMeta {
-                hash: u128::from_le_bytes(meta.hash),
+                hash: meta.hash.into(),
                 offset: meta.offset,
                 length: meta.length,
             })
@@ -1115,12 +1116,12 @@ pub unsafe extern "C" fn get_seek_chunks_u128(
         seek_length
     ){
         Ok(seek_info_vec) => {
-            let mut ffi_chunks: Vec<FFISeekChunkInfo<[u8; 16]>> =
+            let mut ffi_chunks: Vec<FFISeekChunkInfo<U128Bytes>> =
                 seek_info_vec
                     .into_iter()
                     .map(|metadata| {
                         FFISeekChunkInfo {
-                            hash: metadata.hash.to_le_bytes(),
+                            hash: metadata.hash.into(),
                             read_start: metadata.start_offset,
                             read_end: metadata.end_offset,
                         }
@@ -1227,7 +1228,7 @@ pub unsafe extern "C" fn free_seek_chunks_u128(
         return;
     };
 
-    free_seek_chunks_internal::<[u8; 16]>(ptr);
+    free_seek_chunks_internal::<U128Bytes>(ptr);
 }
 
 

@@ -20,7 +20,7 @@ use crate::ffi::ffi_types::{
     FFIKeyArray, FFISerializedOutput,
     FFISerializedOutputU64, FFISerializedOutputU128,
     SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
-    FFISSAChunkMeta,
+    FFISSAChunkMeta, U128Bytes
 };
 use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{
@@ -383,7 +383,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
     let user_data_addr = args_int.user_data as usize;
 
     let get_keys_closure = || -> Result<Vec<u128>, SpriteShrinkError> {
-        let mut ffi_keys_array = FFIKeyArray::<[u8; 16]> {
+        let mut ffi_keys_array = FFIKeyArray::<U128Bytes> {
             ptr: std::ptr::null_mut(),
             len: 0,
             cap: 0,
@@ -406,7 +406,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
 
         let keys = keys_bytes
             .iter()
-            .map(|bytes| u128::from_le_bytes(*bytes))
+            .map(|bytes| (*bytes).into())
             .collect();
 
         Ok(keys)
@@ -464,15 +464,15 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
         Err(_) => return FFIResult::SerializationMissingChunk,
     };
 
-    let mut ffi_manifests_vec: Vec<FFIFileManifestParent<[u8; 16]>> =
+    let mut ffi_manifests_vec: Vec<FFIFileManifestParent<U128Bytes>> =
         Vec::with_capacity(serialized_data.ser_file_manifest.len());
 
     for fmp in serialized_data.ser_file_manifest{
-        let mut chunk_meta_vec: Vec<FFISSAChunkMeta<[u8; 16]>> = fmp
+        let mut chunk_meta_vec: Vec<FFISSAChunkMeta<U128Bytes>> = fmp
             .chunk_metadata
             .iter()
             .map(|meta| FFISSAChunkMeta{
-                hash: meta.hash.to_le_bytes(),
+                hash: meta.hash.into(),
                 offset: meta.offset,
                 length: meta.length,
             }).collect();
@@ -496,7 +496,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
                         let _ = CString::from_raw(fmp_to_free.filename);
                         let _ = Vec::from_raw_parts(
                             fmp_to_free.chunk_metadata as *mut FFISSAChunkMeta<
-                                [u8; 16]
+                                U128Bytes
                             >,
                             fmp_to_free.chunk_metadata_len,
                             fmp_to_free.chunk_metadata_cap,
@@ -522,12 +522,12 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
     //Give up ownership of the outer Vec
     std::mem::forget(ffi_manifests_vec);
 
-    let mut entries: Vec<FFIChunkIndexEntry<[u8; 16]>> = serialized_data
+    let mut entries: Vec<FFIChunkIndexEntry<U128Bytes>> = serialized_data
         .chunk_index
         .into_iter()
         .map(|
             (hash, location)
-        | FFIChunkIndexEntry::from((hash.to_le_bytes(), location)))
+        | FFIChunkIndexEntry::from((hash.into(), location)))
         .collect();
 
     let entries_ptr = entries.as_mut_ptr();
@@ -537,10 +537,10 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
     //Give up ownership of the Vec so it doesn't get deallocated.
     std::mem::forget(entries);
 
-    let sorted_hashes_bytes: Vec<[u8; 16]> = serialized_data
+    let sorted_hashes_bytes: Vec<U128Bytes> = serialized_data
         .sorted_hashes
         .into_iter()
-        .map(|h| h.to_le_bytes())
+        .map(|h| h.into())
         .collect();
 
     let sorted_hashes_ptr = sorted_hashes_bytes.as_ptr();
@@ -683,7 +683,7 @@ pub unsafe extern "C" fn free_serialized_output_u128(
         return;
     }
 
-    unsafe {free_serialized_output_internal::<[u8; 16]>(
+    unsafe {free_serialized_output_internal::<U128Bytes>(
         ptr,
     )}
 }

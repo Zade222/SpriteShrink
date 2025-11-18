@@ -20,6 +20,7 @@ use crate::ffi::ffi_types::{
     FFIParsedManifestArray,
     FFIParsedManifestArrayU64, FFIParsedManifestArrayU128,
     FFISSAChunkMeta,
+    U128Bytes
 };
 use crate::lib_structs::{
     FileHeader, FileManifestParent,
@@ -125,11 +126,11 @@ pub unsafe extern "C" fn parse_file_chunk_index_u128(
 
     match parse_file_chunk_index::<u128>(chunk_index_data){
         Ok(index_map) => {
-            let mut entries: Vec<FFIChunkIndexEntry<[u8; 16]>> = index_map
+            let mut entries: Vec<FFIChunkIndexEntry<U128Bytes>> = index_map
                 .into_iter()
                 .map(|(hash, location)| {
-                    FFIChunkIndexEntry::<[u8; 16]>::from((
-                        hash.to_le_bytes(),
+                    FFIChunkIndexEntry::<U128Bytes>::from((
+                        hash.into(),
                         location
                     ))
                 })
@@ -144,7 +145,7 @@ pub unsafe extern "C" fn parse_file_chunk_index_u128(
             std::mem::forget(entries);
 
             //Prepare return struct
-            let result = FFIParsedChunkIndexArray::<[u8; 16]> {
+            let result = FFIParsedChunkIndexArray::<U128Bytes> {
                 entries: entries_ptr,
                 entries_len,
                 entries_cap
@@ -211,7 +212,7 @@ pub unsafe extern "C" fn free_parsed_chunk_index_u128(
         return;
     }
 
-    free_parsed_chunk_index_ffi_internal::<[u8; 16]>(
+    free_parsed_chunk_index_ffi_internal::<U128Bytes>(
         ptr
     );
 }
@@ -411,17 +412,17 @@ pub unsafe extern "C" fn parse_file_metadata_u128(
 
     /*Convert the Vec<FileManifestParent> to a
     Vec<FFIFileManifestParent>*/
-    let ffi_manifests: Result<Vec<FFIFileManifestParent<[u8; 16]>>, FFIResult> =
+    let ffi_manifests: Result<Vec<FFIFileManifestParent<U128Bytes>>, FFIResult> =
         file_manifest
         .into_iter()
         .map(|fmp| {
             //Convert the nested Vec<SSAChunkMeta>
-            let mut chunk_meta_vec: Vec<FFISSAChunkMeta<[u8; 16]>> =
+            let mut chunk_meta_vec: Vec<FFISSAChunkMeta<U128Bytes>> =
             fmp.chunk_metadata
                 .iter()
                 .map(|meta| {
                     FFISSAChunkMeta {
-                        hash: meta.hash.to_le_bytes(),
+                        hash: meta.hash.into(),
                         offset: meta.offset,
                         length: meta.length,
                     }
@@ -439,10 +440,10 @@ pub unsafe extern "C" fn parse_file_metadata_u128(
                 Err(_) => return Err(FFIResult::InvalidString),
             };
 
-            Ok(FFIFileManifestParent::<[u8; 16]>{
+            Ok(FFIFileManifestParent::<U128Bytes>{
                 filename: c_filename,
                 chunk_metadata: chunk_meta_ptr as *const FFISSAChunkMeta<
-                    [u8; 16]
+                    U128Bytes
                 >,
                 chunk_metadata_len: chunk_meta_len,
                 chunk_metadata_cap: chunk_meta_cap,
@@ -566,7 +567,7 @@ pub unsafe extern "C" fn free_parsed_manifest_u128(
         return;
     }
 
-    free_parsed_manifest_internal::<[u8; 16]>(
+    free_parsed_manifest_internal::<U128Bytes>(
         ptr
     );
 }

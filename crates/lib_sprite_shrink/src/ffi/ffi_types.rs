@@ -402,8 +402,8 @@ pub type FFIChunkIndexEntryU64 = FFIChunkIndexEntry<u64>;
 ///
 /// This type is used in FFI functions that deal with chunk indices where the
 /// hash algorithm produces a 128-bit integer, represented on the FFI boundary
-/// as a [u8; 16] byte array.
-pub type FFIChunkIndexEntryU128 = FFIChunkIndexEntry<[u8; 16]>;
+/// as a [u8; 16] byte array in a U128Bytes struct.
+pub type FFIChunkIndexEntryU128 = FFIChunkIndexEntry<U128Bytes>;
 
 /// Converts a Rust-native tuple of a hash and its `ChunkLocation` into the
 /// FFI-safe `FFIChunkIndexEntry` struct.
@@ -533,8 +533,9 @@ pub type FFIDataStoreEntryU64 = FFIDataStoreEntry<u64>;
 /// An `FFIDataStoreEntry` specialized for `u128` hashes.
 ///
 /// This type is used in FFI functions that pass key-value data for chunks
-/// where the hash algorithm produces a 128-bit integer.
-pub type FFIDataStoreEntryU128 = FFIDataStoreEntry<[u8; 16]>;
+/// where the hash algorithm produces a 128-bit integer, represented on the FFI
+/// boundary as a [u8; 16] byte array in a U128Bytes struct.
+pub type FFIDataStoreEntryU128 = FFIDataStoreEntry<U128Bytes>;
 
 /// FFI-safe equivalent of `FileData`, used to pass the contents of a single
 /// file from a C caller into Rust.
@@ -617,8 +618,9 @@ pub type FFIFileManifestChunksU64 = FFIFileManifestChunks<u64>;
 /// This type is returned by [`create_file_manifest_and_chunks_u128`] and
 /// is the expected input for [`free_file_manifest_and_chunks_u128`]. It
 /// bundles the file manifest and its chunk data when the hash algorithm
-/// produces a 128-bit integer.
-pub type FFIFileManifestChunksU128 = FFIFileManifestChunks<[u8; 16]>;
+/// produces a 128-bit integer, represented on the FFI boundary as a [u8; 16]
+/// byte array in a U128Bytes struct.
+pub type FFIFileManifestChunksU128 = FFIFileManifestChunks<U128Bytes>;
 
 // Converts a tuple containing the constituent parts into the FFI-safe
 // `FFIFileManifestChunks` struct.
@@ -693,8 +695,9 @@ pub type FFIFileManifestParentU64 = FFIFileManifestParent<u64>;
 /// An `FFIFileManifestParent` specialized for `u128` hashes.
 ///
 /// This type is used in FFI functions that deal with file manifests where the
-/// chunk hash algorithm produces a 128-bit integer.
-pub type FFIFileManifestParentU128 = FFIFileManifestParent<[u8; 16]>;
+/// chunk hash algorithm produces a 128-bit integer, represented on the FFI
+/// boundary as a [u8; 16] byte array in a U128Bytes struct.
+pub type FFIFileManifestParentU128 = FFIFileManifestParent<U128Bytes>;
 
 /// FFI-safe struct for passing an array of keys from C to Rust.
 ///
@@ -735,8 +738,9 @@ pub type FFIKeyArrayU64 = FFIKeyArray<u64>;
 /// An `FFIKeyArray` specialized for `u128` hashes.
 ///
 /// This type is used in FFI functions that deal with hash keys where the
-/// chunk hash algorithm produces a 128-bit integer.
-pub type FFIKeyArrayU128 = FFIKeyArray<[u8; 16]>;
+/// chunk hash algorithm produces a 128-bit integer, represented on the FFI
+/// boundary as a [u8; 16] byte array in a U128Bytes struct.
+pub type FFIKeyArrayU128 = FFIKeyArray<U128Bytes>;
 
 // Converts a tuple containing a Rust-native `FileManifestParent` and raw
 // pointers for its heap-allocated fields into the FFI-safe
@@ -830,9 +834,10 @@ where
 /// 1.  Safely creating a Rust `String` from the raw C-string pointer for the
 ///     filename.
 /// 2.  Reconstructing a slice of the FFI-safe chunk metadata.
-/// 3.  Iterating through the metadata slice and converting each `[u8; 16]`
-///     hash into a `u128` value using `u128::from_le_bytes`, creating a
-///     `Vec` of internal `SSAChunkMeta<u128>` structs.
+/// 3.  Iterating through the metadata slice and converting each `U128Bytes`
+///     struct [u8; 16] array hash into a `u128` value using
+///     `u128::from_le_bytes`, creating a `Vec` of internal
+///     `SSAChunkMeta<u128>` structs.
 ///
 /// # Safety
 ///
@@ -841,8 +846,8 @@ where
 /// `FFIFileManifestParent` reference and all the pointers it contains
 /// (`filename` and `chunk_metadata`) are valid, non-null, and point to memory
 /// that is readable for their specified lengths for the duration of this call.
-impl From<&FFIFileManifestParent<[u8; 16]>> for FileManifestParent<u128> {
-    fn from(fmp: &FFIFileManifestParent<[u8; 16]>) -> Self {
+impl From<&FFIFileManifestParent<U128Bytes>> for FileManifestParent<u128> {
+    fn from(fmp: &FFIFileManifestParent<U128Bytes>) -> Self {
         let filename = unsafe {
             std::ffi::CStr::from_ptr(fmp.filename)
                 .to_string_lossy()
@@ -856,7 +861,7 @@ impl From<&FFIFileManifestParent<[u8; 16]>> for FileManifestParent<u128> {
         let chunk_metadata = chunk_metadata_slice
             .iter()
             .map(|meta| crate::lib_structs::SSAChunkMeta {
-                hash: u128::from_le_bytes(meta.hash),
+                hash: u128::from_le_bytes(meta.hash.bytes),
                 offset: meta.offset,
                 length: meta.length,
             })
@@ -916,8 +921,9 @@ pub type FFIHashedChunkDataU64 = FFIHashedChunkData<u64>;
 /// An `FFIHashedChunkData` struct specialized for `u128` hashes.
 ///
 /// This type is used to represent a chunk's data and its 128-bit hash when
-/// passing information from Rust to a C caller.
-pub type FFIHashedChunkDataU128 = FFIHashedChunkData<[u8; 16]>;
+/// passing information from Rust to a C caller, with the u128 has represented
+/// on the FFI boundary as a [u8; 16] byte array in a U128Bytes struct.
+pub type FFIHashedChunkDataU128 = FFIHashedChunkData<U128Bytes>;
 
 // Converts a tuple containing the constituent parts into the FFI-safe
 // `FFIHashedChunkData` struct. This is a convenience for assembling the
@@ -976,8 +982,10 @@ pub type FFIParsedChunkIndexArrayU64 = FFIParsedChunkIndexArray<u64>;
 ///
 /// This type is returned by [`parse_file_chunk_index_u128`] and is the
 /// expected input for [`free_parsed_chunk_index_u128`]. It represents a
-/// complete chunk index where each chunk is identified by a 128-bit hash.
-pub type FFIParsedChunkIndexArrayU128 = FFIParsedChunkIndexArray<[u8; 16]>;
+/// complete chunk index where each chunk is identified by a 128-bit hash,
+/// represented on the FFI boundary as a [u8; 16] byte array in a U128Bytes
+/// struct.
+pub type FFIParsedChunkIndexArrayU128 = FFIParsedChunkIndexArray<U128Bytes>;
 
 // Converts a tuple containing a raw pointer to the entries and their length
 // into the FFI-safe `FFIParsedChunkIndexArray` struct.
@@ -1038,7 +1046,7 @@ pub type FFIParsedManifestArrayU64 = FFIParsedManifestArray<u64>;
 /// This type is returned by [`parse_file_metadata_u128`] and is the
 /// expected input for [`free_parsed_manifest_u128`]. It represents a
 /// complete file manifest where each chunk is identified by a 128-bit hash.
-pub type FFIParsedManifestArrayU128 = FFIParsedManifestArray<[u8; 16]>;
+pub type FFIParsedManifestArrayU128 = FFIParsedManifestArray<U128Bytes>;
 
 // Converts a tuple containing a raw pointer to the manifests and their
 // length into the FFI-safe `FFIParsedManifestArray` struct.
@@ -1172,8 +1180,9 @@ pub type FFISeekChunkInfoU64 = FFISeekChunkInfo<u64>;
 ///
 /// This type is used in the `FFISeekInfoArrayU64` struct that is returned by
 /// [`get_seek_chunks_ffi_u128`], identifying a required chunk with a 128-bit
-/// hash.
-pub type FFISeekChunkInfoU128 = FFISeekChunkInfo<[u8; 16]>;
+/// hash, represented on the FFI boundary as a [u8; 16] byte array in a
+/// U128Bytes struct.
+pub type FFISeekChunkInfoU128 = FFISeekChunkInfo<U128Bytes>;
 
 /// Converts a tuple containing a chunk's hash and the start/end read
 /// boundaries into the FFI-safe `FFISeekChunkInfo` struct.
@@ -1234,9 +1243,9 @@ pub type FFISeekInfoArrayU64 = FFISeekInfoArray<u64>;
 /// This type is returned by [`get_seek_chunks_ffi_u128`] and is the
 /// expected input for [`free_seek_chunks_ffi_u128`]. It provides a complete
 /// list of all chunks and byte ranges required to fulfill a seek request where
-/// chunks are identified by 128-bit hashes, represented on the FFI boundary as
-/// a [u8; 16] byte array.
-pub type FFISeekInfoArrayU128 = FFISeekInfoArray<[u8; 16]>;
+/// chunks are identified by 128-bit hashes, represented on the FFI boundary
+/// as a [u8; 16] byte array in a U128Bytes struct.
+pub type FFISeekInfoArrayU128 = FFISeekInfoArray<U128Bytes>;
 
 //Converts a tuple containing a raw pointer to the seek info chunks and
 // their length into the FFI-safe `FFISeekInfoArray` struct.
@@ -1256,13 +1265,13 @@ impl<H: Hashable> From<(*mut FFISeekChunkInfo<H>, usize, usize)> for
 }
 
 
-impl From<(*mut FFISeekChunkInfo<[u8; 16]>, usize, usize)> for
-    FFISeekInfoArray<[u8; 16]> {
+impl From<(*mut FFISeekChunkInfo<U128Bytes>, usize, usize)> for
+    FFISeekInfoArray<U128Bytes> {
         fn from((
             chunks_ptr,
             chunks_len,
             chunks_cap
-        ): (*mut FFISeekChunkInfo<[u8; 16]>, usize, usize)) -> Self{
+        ): (*mut FFISeekChunkInfo<U128Bytes>, usize, usize)) -> Self{
             Self {
                 chunks: chunks_ptr,
                 chunks_len,
@@ -1331,8 +1340,10 @@ pub type FFISerializedOutputU64 = FFISerializedOutput<u64>;
 /// This type is returned by [`serialize_uncompressed_data_ffi_u128`] and is
 /// the expected input for [`free_serialized_output_u128`]. It bundles all the
 /// necessary serialized data (manifest, chunk index, sorted hashes) for
-/// building an archive where chunks are identified by 128-bit hashes.
-pub type FFISerializedOutputU128 = FFISerializedOutput<[u8; 16]>;
+/// building an archive where chunks are identified by 128-bit hashes,
+/// represented on the FFI boundary as a [u8; 16] byte array in a U128Bytes
+/// struct.
+pub type FFISerializedOutputU128 = FFISerializedOutput<U128Bytes>;
 
 /// Converts a tuple containing all the constituent raw pointers and lengths
 /// into the FFI-safe `FFISerializedOutput` struct.
@@ -1531,8 +1542,9 @@ pub type FFISSAChunkMetaU64 = FFISSAChunkMeta<u64>;
 ///
 /// This type is used within the `FFIFileManifestParentU128` to describe a
 /// single chunk's metadata using a 128-bit hash, represented on the FFI
-/// boundary as a [u8; 16] byte array.
-pub type FFISSAChunkMetaU128 = FFISSAChunkMeta<[u8; 16]>;
+/// boundary as a [u8; 16] byte array, represented on the FFI boundary as a
+/// [u8; 16] byte array in a U128Bytes struct.
+pub type FFISSAChunkMetaU128 = FFISSAChunkMeta<U128Bytes>;
 
 /// Converts a reference to an FFI-safe `FFISSAChunkMeta` into the Rust-native
 /// `SSAChunkMeta` struct.
@@ -1915,3 +1927,29 @@ pub type TestCompressionArgsU64 = TestCompressionArgs<u64>;
 /// struct are non-null and point to valid memory for the duration of the
 /// `test_compression_u128` call.
 pub type TestCompressionArgsU128 = TestCompressionArgs<u8>;
+
+/// FFI-safe wrapper for a 128-bit value represented as a byte array.
+///
+/// This struct is used to ensure that 128-bit hash values have a consistent
+/// and well-defined memory layout when passed across the FFI boundary.
+/// `cbindgen` can generate a clean C struct for this, avoiding potential
+/// issues with raw array types in generic structs.
+#[repr(C)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct U128Bytes {
+    pub bytes: [u8; 16],
+}
+
+impl From<u128> for U128Bytes {
+    fn from(value: u128) -> Self {
+         Self {
+             bytes: value.to_le_bytes()
+         }
+    }
+}
+
+impl From<U128Bytes> for u128 {
+    fn from(value: U128Bytes) -> Self {
+        u128::from_le_bytes(value.bytes)
+    }
+}
