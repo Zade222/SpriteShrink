@@ -500,7 +500,7 @@ pub fn cleanup_old_logs(
         if path.is_file() &&
             path.to_string_lossy().contains("debug.log") &&
             let Ok(metadata) = metadata(&path) &&
-            let Ok(created_time) = metadata.created() &&
+            let Ok(created_time) = metadata.modified() &&
             let Ok(age) = now.duration_since(created_time) &&
             age > retention_duration {
                 remove_file(&path)?;
