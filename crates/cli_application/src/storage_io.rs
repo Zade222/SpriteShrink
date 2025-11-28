@@ -510,3 +510,54 @@ pub fn cleanup_old_logs(
 
     Ok(())
 }
+
+/// Reads the entire metadata block (manifest, dictionary, and chunk index)
+/// from an archive file into a single byte vector.
+///
+/// This function leverages the information provided in the `FileHeader` to
+/// determine the starting offset and the total contiguous length of the
+/// metadata block within the archive. It then uses `read_file_data` to
+/// efficiently retrieve this block without loading the entire file into
+/// memory.
+///
+/// The metadata block is contiguous in the file, according to the file
+/// specification, immediately following the header and consisting of the
+/// manifest, dictionary, and chunk index in that order.
+///
+/// # Arguments
+///
+/// * `file_path`: A `Path` pointing to the archive file from which the
+///   metadata block is to be read.
+/// * `header`: A reference to the `sprite_shrink::FileHeader` which contains
+///   the necessary offset and length information for the metadata sections.
+///
+/// # Returns
+///
+/// A `Result` which is:
+/// - `Ok(Vec<u8>)` containing the complete metadata block as a byte vector.
+/// - `Err(CliError)` if the file cannot be opened, seeking fails, or reading
+///   the specified range of bytes encounters an I/O error.
+///
+/// # Errors
+///
+/// This function can return an error primarily if `read_file_data` fails,
+/// which can happen due to:
+/// - `CliError::Io` if the file specified by `file_path` cannot be accessed,
+///   if seeking to `header.man_offset` fails, or if the number of bytes
+///   indicated by `total_length` cannot be read from the file.
+pub fn read_metadata_block(
+    file_path: &Path,
+    header: &sprite_shrink::FileHeader,
+) -> Result<Vec<u8>, CliError> {
+    let start_offset = header.man_offset;
+
+    /*The block is contiguous, so the total length is the sum of the three
+    sections.*/
+    let total_length = (
+        header.man_length +
+        header.dict_length +
+        header.chunk_index_length
+    ) as usize;
+
+    read_file_data(file_path, &start_offset, &total_length)
+}

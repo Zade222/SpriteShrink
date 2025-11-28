@@ -16,21 +16,22 @@ use std::{
         Arc, atomic::{AtomicBool, Ordering},
     },
 };
+use rayon::join;
 use serde::{Deserialize, Serialize};
 use tracing::{
     debug
 };
 
-use sprite_shrink::{Hashable, decompress_chunk};
+use sprite_shrink::{
+    Hashable, decompress_chunk, parse_file_metadata, parse_file_chunk_index
+};
 
 use crate::{
-    archive_parser::{
-    get_chunk_index, get_file_header, get_file_manifest,
-    },
+    archive_parser::get_file_header,
     arg_handling::Args,
     cli_types::TempFileGuard,
     error_handling::CliError,
-    storage_io::read_file_data,
+    storage_io::{read_file_data, read_metadata_block},
 };
 
 /// Executes the file extraction process from an archive.
@@ -78,6 +79,9 @@ pub fn run_extraction(
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
 
+    //Read all required metadata.
+    let metadata_block = read_metadata_block(file_path, &header)?;
+
     /*Get the identifier for the hash type stored in the archive.*/
     let hash_bit_length = header.hash_type;
 
@@ -87,6 +91,7 @@ pub fn run_extraction(
             out_dir,
             rom_indices,
             &header,
+            &metadata_block,
             args,
             running,
         ),
@@ -95,6 +100,7 @@ pub fn run_extraction(
             out_dir,
             rom_indices,
             &header,
+            &metadata_block,
             args,
             running,
         ),
@@ -110,56 +116,91 @@ pub fn run_extraction(
 ///
 /// This function is parameterized over the hash type `H` and contains the
 /// core logic for reading the manifest and chunk index, decompressing chunks,
-/// and writing the final files to disk.
+/// and writing the final files to disk. It handles the creation of the
+/// output directory, validates ROM indices against the manifest, and ensures
+/// data integrity through hash verification. Each file is first written to
+/// a temporary file (`.tmp` extension) and then renamed to its final name
+/// upon successful completion to ensure atomicity and prevent corrupted files
+/// in case of an error or cancellation.
+///
+/// # Type Parameters
+///
+/// * `H`: A type parameter that must implement `Hashable`, `Ord`, `Display`,
+///   `Serialize`, `Deserialize<'de>`, `Eq`, and `Hash`. This generic parameter
+///   represents the hash type used within the archive (e.g., `u64` or `u128`).
+///
+/// # Arguments
+///
+/// * `file_path`: A `Path` pointing to the source archive file from which
+///   data will be extracted.
+/// * `out_dir`: A `Path` for the directory where extracted files will be
+///   written. If the directory does not exist, it will be created, unless
+///   `args.force` is false and the directory does not exist, in which case
+///   an `InvalidOutputPath` error is returned.
+/// * `rom_indices`: A vector of `u8` indices specifying which files to
+///   extract from the archive. These indices are 1-based.
+/// * `header`: A reference to the `sprite_shrink::FileHeader` containing
+///   metadata about the archive.
+/// * `metadata_block`: A slice of `u8` containing the raw metadata block
+///   (manifest, dictionary, and chunk index) read from the archive.
+/// * `args`: A reference to the main `Args` struct, used to check
+///   configuration options like `force`.
+/// * `running`: An `Arc<AtomicBool>` used to signal and check for
+///   cancellation of the extraction process.
+///
+/// # Returns
+///
+/// A `Result` which is:
+/// - `Ok(())` if all requested files are extracted successfully.
+/// - `Err(CliError)` if any part of the process fails.
+///
+/// # Errors
+///
+/// This function can return an error in several cases, including:
+/// - `CliError::from` for errors originating from parsing the file manifest
+///   or chunk index.
+/// - `CliError::InvalidOutputPath` if `out_dir` does not exist and `args.force`
+///   is false.
+/// - `CliError::InvalidRomIndex` if a requested ROM index is out of bounds
+///   of the file manifest.
+/// - `CliError::InternalError` if a chunk hash is found in the manifest but
+///   is missing from the chunk index, or if an unsupported hash type is
+///   encountered.
+/// - `CliError::DataIntegrity` if a decompressed chunk's hash does not match
+///   the expected hash from the manifest.
+/// - `CliError::Cancelled` if the `running` flag is set to `false` during
+///   the extraction process.
+/// - Any `std::io::Error` that occurs during file creation, writing, or
+///   renaming operations.
 fn extract_data<H>(
     file_path: &Path,
     out_dir: &Path,
     rom_indices: &Vec<u8>,
     header: &sprite_shrink::FileHeader,
+    metadata_block: &[u8],
     args: &Args,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
 where
-    H: Hashable +
-        Ord +
-        Display +
-        Serialize +
-        for<'de> Deserialize<'de> +
-        Eq +
+    H: Hashable + Ord + Display + Serialize + for<'de> Deserialize<'de> + Eq +
         Hash,
 {
-    /*Stores the length of the file_manifest from the header.*/
+    /*Stores the length of each piece of the metadata from the archive as
+     provided by the header.*/
     let man_length = header.man_length as usize;
+    let dict_length = header.dict_length as usize;
 
-    /*Stores the length of the chunk index from the header.*/
-    let chunk_length = header.chunk_index_length as usize;
+    let manifest_slice = &metadata_block[0..man_length];
+    let dict_slice = &metadata_block[man_length..man_length + dict_length];
+    let index_slice = &metadata_block[man_length + dict_length..];
 
-    /*Stores the length of the dictionary from the header.*/
-    let dictionary_length = header.dict_length as usize;
+    let (manifest_result, index_result) = join(
+        || parse_file_metadata::<H>(manifest_slice).map_err(CliError::from),
+        || parse_file_chunk_index::<H>(index_slice).map_err(CliError::from),
+    );
 
-    /*Read and store the file manifest from the target file in memory in
-    the file_manifest variable*/
-    let file_manifest = get_file_manifest::<H>(
-        file_path,
-        &header.man_offset,
-        &man_length
-    )?;
-
-    /*Read and store the zstd compression dictionary from the target file in
-    memory in the dictionary variable.*/
-    let dictionary = read_file_data(
-        file_path,
-        &header.dict_offset,
-        &dictionary_length
-    )?;
-
-    /*Read and store the archive chunk index from the target
-    file in memory in the chunk_index variable.*/
-    let chunk_index = get_chunk_index::<H>(
-        file_path,
-        &header.chunk_index_offset,
-        &chunk_length
-    )?;
+    let file_manifest = manifest_result?;
+    let chunk_index = index_result?;
 
     if !out_dir.exists() && !args.force{
         return Err(CliError::InvalidOutputPath())
@@ -211,7 +252,7 @@ where
 
             let decomp_chunk_data = decompress_chunk(
                     &comp_chunk_data,
-                    &dictionary
+                    dict_slice
             )?;
 
             let decomp_chunk_hash = H::from_bytes_with_seed(
