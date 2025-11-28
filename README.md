@@ -29,7 +29,7 @@ SpriteShrink is specifically designed for collections of files that are relative
 
 While it is technically capable of processing any file type, it is **not recommended** for:
 * **Files with Little Redundancy**: Collections of files that do not share common data (e.g., a directory of unrelated documents or videos).
-* **Files with Little Redundancy**: Games that internally use their own compression or contain a large amount of compressed video data.
+* **Files with Little Redundancy**: Games that internally use their own compression, have a significant amount of encrypted data or contain a large amount of compressed video data.
 
 The tool's content-defined chunking and deduplication algorithms provide the most benefit when byte-level similarities exist across multiple files, which is common in ROM sets with different regional versions and revisions.
 
@@ -216,13 +216,50 @@ SpriteShrink is designed to be robust. It gracefully handles malformed inputs, e
 This project utilizes multiple licenses for its different components. Please ensure you understand and comply with the license for any part of the project you use.
 
 -   **Cli Application (`sprite_shrink`)** is licensed under the **[GNU General Public License v3.0 (GPLv3)](https://www.gnu.org/licenses/gpl-3.0.en.html)**.
-    This is a copyleft license, which means that any derivative works of the application must also be licensed under the GPLv3.
+This is a copyleft license, which means that any derivative works of the application must also be licensed under the GPLv3.
 
 -   **Sprite Shrink Library (`lib_sprite_shrink`)** is licensed under the **[Mozilla Public License 2.0 (MPL-2.0)](https://www.mozilla.org/en-US/MPL/2.0/)**. This is a "weak copyleft" license. It requires that modifications to the library's source files be shared under the MPL-2.0, but it allows you to link the library into a larger work under a different license.
 
 -   **SSMC Specification (`SPECIFICATION.md`)** is licensed under the **[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/)**. This license allows you to share and adapt the specification for any purpose, even commercially, as long as you give appropriate credit.
 
 -   **User Manual (`user_manual.md`)** is licensed under the **[Creative Commons Attribution 4.0 International (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/)**. This license allows you to share and adapt the specification for any purpose, even commercially, as long as you give appropriate credit.
+
+---
+
+## Frequently Asked Questions
+
+Have a question? It may be answered here! Check here before asking elsewhere for (hopefully) a quick answer.
+
+**Q: I used the `--optimize-dictionary` flag and the application used a bunch of RAM and crashed! Shouldn't that be fixed?**
+  
+  A: As noted in the command's help text, this option is considered experimental. It uses a feature of the underlying Zstandard (zstd) library that can consume a large and unpredictable amount of memory, which may lead to a crash on some systems. It is recommended to use this with caution.
+  
+  
+**Q: Why was the compression ratio low when I archived a large collection of ROMs into one archive file?**
+  
+  A: SpriteShrink achieves its high compression ratios by finding and eliminating redundant data between similar files, like different versions or regional variants of the same game. When used on a large library of unrelated files, there's very little duplicate data to find between each distinct game, so the space savings will be minimal. For best results, use it on a per game basis, as detailed in the [Intended Use Cases and Limitations](#intended-use-cases-and-limitations) section.
+  
+
+**Q: Should I provide `.zip` files as input, or the uncompressed ROMs?**
+  
+  A: You should always provide the raw, uncompressed files (e.g., .iso, .bin, .sfc) directly to SpriteShrink. The tool's main advantage is finding redundant data inside the files themselves. If you pre-compress your ROMs into .zip or .7z archives, their content becomes scrambled from SpriteShrink's perspective, and it will not be able to find any duplicate data, leading to poor results.
+  
+  
+**Q: How is this different from general-purpose archivers like 7-Zip, WinRAR, or `tar.zst`?**
+  
+  A: General purpose archivers typically compress each file individually using a finite data window. SpriteShrink, on the other hand, is a deduplicating archiver that compares data across all files in the set. It analyzes a group of similar files and stores any shared data chunks just once. This content-defined chunking approach is what allows it to achieve significantly better compression ratios on its intended content, such as multiple regional versions or updated variants of the same game.
+  
+**Q: What should I do if compression fails with a hash verification error?**
+  
+  A: A hash verification error indicates a rare "hash collision" occurred during the deduplication process. While uncommon, you can typically resolve this by increasing the hash size. Try running the command again with the --hash-bit-length 128 flag. This uses a larger hash, making collisions far less likely.
+  
+  
+**Q: When should I use `--auto-tune`?**
+  
+  A: The --auto-tune flag is useful when you want to achieve the absolute best compression ratio for a set of files and are willing to wait longer (usually significantly longer for larger data sets). It automatically tests different chunking and dictionary size parameters to find the optimal combination. For most cases, the default settings provide a good balance of speed and compression, but --auto-tune is ideal for archival purposes where file size is the top priority.
+  
+
+---
 
 ## Support and Contact
 
