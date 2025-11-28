@@ -164,11 +164,16 @@ pub struct Args {
         help_heading = "Tuning Parameters",
         default_value_t = false,
         help = "When generating dictionary for compression,\noptimize the \
-        dictionary for better\ncompression. NOT recommended for large files\n\
-        as it can be very slow.\n\
-        Can cause the application to consume a\nsignificant amount of memory \
-        even with the \nlow-memory flag. To avoid system instability,\ndo not \
-        use with a large input data set."
+        dictionary for better\ncompression.\n\
+        Considered experimental and unstable due to\n\
+        unpredictable amount of memory it can\n\
+        consume.\n\
+        NOT recommended for large files as it can\n\
+        be very slow and can cause the application\n\
+        to consume a significant amount of memory\n\
+        even with the low-memory flag.\n\
+        To avoid system instability, do not use\n\
+        with a large input data set."
     )]
     pub optimize_dictionary: bool,
 
