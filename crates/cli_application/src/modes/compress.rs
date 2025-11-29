@@ -1308,7 +1308,7 @@ where
         (window_size / 4) as u32,
         window_size as u32,
         (window_size * 4) as u32,
-        Normalization::Level1,
+        Normalization::Level0,
         SS_SEED
     );
 
