@@ -6,7 +6,7 @@
 //! chunk index, and the compressed data store, ensuring all components
 //! are correctly ordered and formatted.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use dashmap::DashMap;
 use thiserror::Error;
@@ -149,20 +149,25 @@ where
 /// chunks and organizes them into a consistent, serializable format.
 ///
 /// The key operations performed are:
-/// 1.  **Sorting the File Manifest**: It converts the file manifest from a
-///     `DashMap` into a `Vec` and sorts it alphabetically by filename. This
-///     ensures that the file listing in the final archive is deterministic.
-/// 2.  **Sorting Chunk Metadata**: For each file in the manifest, it sorts the
-///     chunk metadata by the original byte offset. This is critical for
-///     ensuring that files can be correctly reconstructed in order during
+/// 1.  **Sorting the File Manifest**: The file manifest is sorted
+///     alphabetically by filename. This provides a deterministic,
+///     user friendly order for the logical file listing within the archive.
+/// 2.  **Sorting Chunk Metadata**: For each file in the manifest, its
+///     constituent chunks are sorted by their original byte offset. This is
+///     critical for ensuring files can be correctly reconstructed during
 ///     extraction.
-/// 3.  **Collecting and Sorting Hashes**: It retrieves all unique chunk hashes
-///     from the data store (via the `data_store_key_cb`) and sorts them. This
-///     provides a canonical order for both the chunk index and the compressed
-///     data blob.
+/// 3.  **Optimizing Chunk Layout**: The physical layout of chunks in the data
+///     blob is optimized for fast extraction. This is achieved by:
+///     a. Analyzing how many times each unique chunk is used across all files.
+///     b. Scoring each file based on the frequency of its chunks. Files with
+///     more shared chunks receive higher scores.
+///     c. Building the final list of hashes (`sorted_hashes`) by processing
+///     files in descending order of their score. This places the most
+///     commonly shared data together at the start of the archive, reducing
+///     disk seek time during extraction.
 /// 4.  **Generating the Chunk Index**: It calls the `serialize_store` function
-///     to create the final chunk index, which maps each sorted hash to its
-///     location in the conceptual data blob.
+///     to create the final chunk index, which maps each hash from the
+///     optimized layout to its location in the data blob.
 ///
 /// # Arguments
 ///
@@ -183,8 +188,8 @@ where
 ///     hash to its location.
 ///   - `Vec<H>`: A vector of all unique chunk hashes, sorted in a
 ///     deterministic order.
-/// - `Err(SpriteShrinkError)` if any part of the serialization process fails, such as a
-///   missing chunk in the data store.
+/// - `Err(SpriteShrinkError)` if any part of the serialization process fails,
+///   such as a missing chunk in the data store.
 ///
 /// # Type Parameters
 ///
@@ -208,17 +213,45 @@ where
         ..Default::default()
     };
 
-    serialized_data.ser_file_manifest
+    serialized_data
+        .ser_file_manifest
         .sort_by(|a, b| a.filename.cmp(&b.filename));
 
     /*Put each files chunks in order from the beginning of the file to the end
     for easier processing when rebuilding file. */
-    serialized_data.ser_file_manifest.iter_mut().for_each(|fmp| {
-        fmp.chunk_metadata.sort_by_key(|metadata| metadata.offset);
+    serialized_data
+        .ser_file_manifest
+        .iter_mut()
+        .for_each(|fmp| {
+            fmp.chunk_metadata.sort_by_key(|metadata| metadata.offset);
     });
 
-    serialized_data.sorted_hashes = match data_store_key_cb() {
-        Ok(hashes) => hashes,
+    let mut chunk_freq = HashMap::new();
+    for fmp in &serialized_data.ser_file_manifest{
+        for chunk in &fmp.chunk_metadata{
+            *chunk_freq.entry(chunk.hash).or_insert(0) += 1;
+        }
+    }
+
+    let mut scored_indices: Vec<_> = serialized_data
+        .ser_file_manifest
+        .iter()
+        .enumerate()
+        .map(|(i, fmp)| {
+            let score: u32 = fmp
+                .chunk_metadata
+                .iter()
+                .map(|chunk| chunk_freq.get(&chunk.hash).copied().unwrap_or(0))
+                .sum();
+            (i, score)
+        }).collect();
+
+    /*Sorts each index, which points to the position in the FileManifestParent
+    vector, in descending order of the score.*/
+    scored_indices.sort_by(|a, b| b.1.cmp(&a.1));
+
+    let total_hashes = match data_store_key_cb() {
+        Ok(hashes) => hashes.len(),
         Err(e) => {
             if e.is_cancelled() {
                 return Err(SpriteShrinkError::Cancelled);
@@ -226,9 +259,21 @@ where
             return Err(SpriteShrinkError::External(Box::new(e)));
         }
     };
+    let mut sorted_hashes = Vec::with_capacity(total_hashes);
+    let mut seen_hashes = HashSet::with_capacity(total_hashes);
 
+    /*Store the order of the chunks in order of the file with the most shared
+    chunks to the least.*/
+    for(index, _score) in scored_indices{
+        let fmp = &serialized_data.ser_file_manifest[index];
+        for chunk in &fmp.chunk_metadata{
+            if seen_hashes.insert(chunk.hash){
+                sorted_hashes.push(chunk.hash);
+            }
+        }
+    }
 
-    serialized_data.sorted_hashes.sort_unstable();
+    serialized_data.sorted_hashes = sorted_hashes;
 
     serialized_data.chunk_index = serialize_store(
         &serialized_data.sorted_hashes,
