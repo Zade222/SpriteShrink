@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 sprite_shrink = {path = "../lib_sprite_shrink"}
+sprite_shrink_cd = {path = "../lib_ss_cd"}
 
 bytesize = "2.0"
 clap = { version = "4.5", features = ["derive"] }
