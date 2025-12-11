@@ -32,6 +32,10 @@ pub enum CueSheetType {
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DiscManifest<H> {
+    pub title: String,
+
+    pub collection_id: u8,
+
     /// The content of a normalized, single bin file, absolute-time CUE sheet
     pub normalized_cue_sheet: String,
     /// This is the essential blueprint of what type each sector is.
