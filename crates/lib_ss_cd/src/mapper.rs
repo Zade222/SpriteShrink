@@ -1,13 +1,18 @@
 use std::borrow::Cow;
-use std::io;
+use std::io::{self, Read, Seek};
+
+use sprite_shrink::{
+    Hashable
+};
 
 use crate::lib_structs::{
-    CueFile, CueSheet, CueSheetType, MsfTime, RleSectorMap, SectorMap,
-    SectorType, Track, TrackType
+    BlockRun, CueFile, CueSheet, CueSheetType, MsfTime, RleSectorMap,
+    SectorMap, SectorType, Track, TrackType
 };
 
 use crate::{
-    analyze::analyze_sector
+    analyze::analyze_sector,
+    stream::SectorRegionStream
 };
 
 use thiserror::Error;
@@ -29,6 +34,78 @@ pub enum MapperError {
 pub trait SectorDataProvider {
     fn read_sector(&mut self, sector_index: u32) -> io::Result<[u8; 2352]>;
 }
+
+
+pub fn build_block_map<H, R>(
+    rle_sector_map: &RleSectorMap,
+    source: &mut R,
+) -> Result<Vec<BlockRun<H>>, io::Error>
+where
+    H: Hashable,
+    R: Read + Seek,
+{
+    let mut block_map = Vec::new();
+    let mut absolute_sector_offset = 0;
+
+    const AUDIO_SEGMENT_SIZE: u32 = 16;
+
+    for (run_count, sector_type) in &rle_sector_map.runs {
+        match sector_type {
+            SectorType::Audio => {
+                let mut sectors_in_run_processed = 0;
+                while sectors_in_run_processed < *run_count {
+                    let segment_start =
+                        absolute_sector_offset + sectors_in_run_processed;
+                    let segment_size = std::cmp::min(
+                        AUDIO_SEGMENT_SIZE,
+                        *run_count - sectors_in_run_processed
+                    );
+
+                    let mut stream = SectorRegionStream::new(
+                        source,
+                        segment_start,
+                        segment_size
+                    );
+
+                    let mut buffer = Vec::new();
+                    stream.read_to_end(&mut buffer)?;
+                    let content_hash = H::from_bytes_with_seed(&buffer);
+
+                    block_map.push(BlockRun {
+                        sector_type: *sector_type,
+                        sector_count: segment_size,
+                        content_hash,
+                    });
+
+                    sectors_in_run_processed += segment_size;
+                }
+            }
+            SectorType::Pregap => {
+                let mut stream = SectorRegionStream::new(
+                    source,
+                    absolute_sector_offset,
+                    *run_count
+                );
+                let mut buffer = Vec::new();
+                stream.read_to_end(&mut buffer)?;
+                let content_hash = H::from_bytes_with_seed(&buffer);
+
+                block_map.push(BlockRun {
+                    sector_type: *sector_type,
+                    sector_count: *run_count,
+                    content_hash,
+                });
+            }
+            // Ignore all others.
+            _ => {}
+        }
+
+        absolute_sector_offset += run_count;
+    }
+
+    Ok(block_map)
+}
+
 
 pub fn build_sector_map(
     cue_sheet: &CueSheet,

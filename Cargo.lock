@@ -1203,6 +1203,7 @@ dependencies = [
  "once_cell",
  "regex",
  "serde",
+ "sprite_shrink",
  "thiserror 2.0.12",
 ]
 
