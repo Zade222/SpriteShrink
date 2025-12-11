@@ -2,6 +2,13 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct BlobLocation {
+    pub offset: u64,
+    pub length: u64,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CueFile {
     pub name: String,
@@ -107,6 +114,21 @@ impl MsfTime {
         }
     }
 }
+
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct OpticalArchiveHeader {
+    pub manifest_version: u16,
+
+    pub manifests_location: BlobLocation,
+
+    pub audio_block_index_location: BlobLocation,
+    pub audio_blob_location: BlobLocation,
+
+    pub pregap_block_index_location: BlobLocation,
+    pub pregap_blob_location: BlobLocation,
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RleSectorMap {
