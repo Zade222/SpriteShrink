@@ -96,6 +96,80 @@ impl Read for MultiBinStream {
 }
 
 
+pub struct SectorRegionStream<'a, R: Read + Seek> {
+    source: &'a mut R,
+    current_sector_idx: u32,
+    end_sector_idx: u32,
+    sector_buffer: Box<[u8; 2352]>,
+    pos_in_sector: usize,
+}
+
+
+impl<'a, R: Read + Seek> SectorRegionStream<'a, R> {
+
+    pub fn new(
+        source: &'a mut R,
+        start_absolute_sector: u32,
+        sector_count: u32,
+    ) -> Self {
+        Self {
+            source,
+            current_sector_idx: start_absolute_sector,
+            end_sector_idx: start_absolute_sector.saturating_add(sector_count),
+            sector_buffer: Box::new([0; 2352]),
+            pos_in_sector: 2352,
+        }
+    }
+
+    fn process_next_sector(&mut self) -> io::Result<()> {
+        if self.current_sector_idx >= self.end_sector_idx {
+            return Err(io::ErrorKind::UnexpectedEof.into());
+        }
+
+        let seek_pos = self.current_sector_idx as u64 * 2352;
+        self.source.seek(SeekFrom::Start(seek_pos))?;
+        self.source.read_exact(self.sector_buffer.as_mut())?;
+
+        self.pos_in_sector = 0;
+
+        self.current_sector_idx += 1;
+        Ok(())
+    }
+}
+
+
+impl<'a, R: Read + Seek> Read for SectorRegionStream<'a, R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let mut bytes_written_to_buf = 0;
+
+        while bytes_written_to_buf < buf.len() {
+            if self.pos_in_sector >= self.sector_buffer.len() {
+                match self.process_next_sector() {
+                    Ok(()) => continue,
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(e) => return Err(e),
+                }
+            }
+
+            let rem_in_sect = self.sector_buffer.len() - self.pos_in_sector;
+            let rem_in_caller_buf = buf.len() - bytes_written_to_buf;
+            let bytes_to_copy = std::cmp::min(rem_in_sect, rem_in_caller_buf);
+
+            let source_slice = &self.sector_buffer
+                [self.pos_in_sector..self.pos_in_sector + bytes_to_copy];
+            let dest_slice = &mut buf
+                [bytes_written_to_buf..bytes_written_to_buf + bytes_to_copy];
+            dest_slice.copy_from_slice(source_slice);
+
+            bytes_written_to_buf += bytes_to_copy;
+            self.pos_in_sector += bytes_to_copy;
+        }
+
+        Ok(bytes_written_to_buf)
+    }
+}
+
+
 pub struct UserDataStream<'a, R: Read + Seek> {
     source: &'a mut R,
     sector_map: &'a SectorMap,
