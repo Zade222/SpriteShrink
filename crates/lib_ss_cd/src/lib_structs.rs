@@ -33,32 +33,18 @@ pub enum CueSheetType {
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DiscManifest<H> {
     pub title: String,
-
     pub collection_id: u8,
-
-    /// The content of a normalized, single bin file, absolute-time CUE sheet
     pub normalized_cue_sheet: String,
-    /// This is the essential blueprint of what type each sector is.
-    /// It run-length encodes the `SectorType` for every sector on the disc.
     pub sector_map: RleSectorMap,
-    /// A run-length encoded map that describes the type and content hash
-    /// of all block-based regions (Audio and Pregap).
     pub block_map: Vec<BlockRun<H>>,
-
-    /// A layout describing the sequence of variable-sized chunks that make up
-    /// the continuous user data stream.
     pub data_stream_layout: Vec<DataChunkLayout<H>>,
 }
 
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct BlockRun<H> {
-    /// The type of sectors in this run (e.g., Audio or Pregap).
     pub sector_type: SectorType,
-    /// The number of consecutive sectors in this run.
     pub sector_count: u32,
-    /// The hash of the single content blob that this entire run of sectors
-    /// maps to (either u64 or u128)
     pub content_hash: H,
 }
 
