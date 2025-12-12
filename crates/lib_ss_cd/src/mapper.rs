@@ -1,5 +1,6 @@
 use std::borrow::Cow;
 use std::io::{self, Read, Seek};
+use std::iter::repeat_n;
 
 use sprite_shrink::{
     Hashable
@@ -256,6 +257,34 @@ fn normalize_cue_sheet(
             tracks: normalized_tracks,
         }],
     })
+}
+
+/// Decompresses a run-length encoded sector map into a full, per-sector vector
+/// for fast lookups.
+///
+/// This function takes an `RleSectorMap` (which is optimized for compact
+/// storage) and expands it into a `SectorMap` (which is optimized for fast,
+/// O(1) lookups in memory).
+///
+/// # Arguments
+/// - `rle_map`: A reference to the `RleSectorMap` to be decoded.
+///
+/// # Returns
+/// A `SectorMap` containing a `Vec<SectorType>` where each element corresponds
+/// to the type of an individual sector on the disc.
+pub fn rle_decode_map(rle_map: &RleSectorMap) -> SectorMap {
+    let total_sectors: usize = rle_map.runs
+        .iter()
+        .map(|(count, _)| *count as usize)
+        .sum();
+
+    let mut sectors = Vec::with_capacity(total_sectors);
+
+    for (count, sector_type) in &rle_map.runs {
+        sectors.extend(repeat_n(*sector_type, *count as usize));
+    }
+
+    SectorMap { sectors }
 }
 
 
