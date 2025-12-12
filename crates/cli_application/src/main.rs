@@ -23,7 +23,12 @@ use tracing::{
 };
 
 mod modes;
-use modes::{run_compression, run_extraction, run_info};
+use modes::{
+    run_extraction, run_info,
+    compress_modes::{
+        run_default_compression
+    }
+};
 
 mod archive_parser;
 use archive_parser::{get_max_rom_index};
@@ -39,12 +44,9 @@ mod error_handling;
 use error_handling::{
     CliError, initiate_logging, offset_to_line_col};
 mod storage_io;
-use crate::{cli_types::{
-    SpriteShrinkConfig
-    },
-    storage_io::{
+use crate::{cli_types::SpriteShrinkConfig, modes::compress_modes::run_optical_compression, storage_io::{
     cleanup_old_logs, files_from_dirs, load_config, organize_paths
-    },
+    }
 };
 
 #[cfg(feature = "dhat-heap")]
@@ -166,22 +168,24 @@ fn run(
             debug!("Mode: Compress");
             let hash_bit_length = args.hash_bit_length.unwrap_or(64);
 
-            match hash_bit_length{
-                64 => run_compression::<u64>(
-                    file_paths,
-                    args,
-                    &1,
-                    running,
-                )?,
-                128 => run_compression::<u128>(
-                    file_paths,
-                    args,
-                    &2,
-                    running,
-                )?,
-                _ => return Err(CliError::InvalidHashBitLength(
-                    "Must be 64 or 128.".to_string(),
-                )),
+            match args.mode.as_str() {
+                "optical" => {
+                    run_optical_compression(
+                        file_paths,
+                        args,
+                        &hash_bit_length,
+                        running,
+                    )?;
+                }
+                "default" =>{
+                    run_default_compression(
+                        file_paths,
+                        args,
+                        &hash_bit_length,
+                        running,
+                    )?;
+                }
+                _ =>  return Err(CliError::InvalidMode(args.mode.clone()))
             }
         }
 

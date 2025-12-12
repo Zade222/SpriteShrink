@@ -89,16 +89,6 @@ pub struct Args {
 
     //Tuning paramters
 
-    /*#[arg(
-        short,
-        long,
-        help_heading = "Tuning Parameters",
-        default_value_t = String::from("zstd"),
-        help = "Sets the compression algorithm.\n
-        Choices: zstd, lzma, deflate. Defaults to zstd."
-    )]
-    pub compression: String,*/
-
     #[arg(
         short = 'c',
         long = "compression-level",
@@ -158,6 +148,16 @@ pub struct Args {
         If an iteration exceeds\nthis time, the latest result is used."
     )]
     pub autotune_timeout: Option<u64>,
+
+    #[arg(
+        long,
+        value_name = "MODE",
+        help_heading = "Tuning Parameters",
+        default_value = "default",
+        help = "Sets the compression mode for\nformat-specific archives. \n\
+                Use 'optical' for bin/cue images.\n"
+    )]
+    pub mode: String,
 
     #[arg(
         long,
@@ -289,6 +289,14 @@ pub fn validate_args(
     {
         return Err(CliError::FileExistsError(output_path.to_path_buf()));
     }
+
+    if args.mode == "optical" && (args.list || args.extract.is_some() || args.metadata) {
+        return Err(CliError::ConflictingArguments(
+            "The --mode 'optical' flag is only applicable for compression and \
+            cannot be used with --list, --extract, or --metadata.".to_string(),
+        ));
+    }
+
 
     //Extraction Mode ROM Index Validation
     if let Some(rom_range) = &args.extract {

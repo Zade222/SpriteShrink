@@ -102,7 +102,7 @@ use crate::{
 /// - `CliError::InternalError` if a thread pool cannot be created.
 /// - Any error propagated from file I/O, database transactions,
 ///   data processing, verification, or final archive writing stages.
-pub fn run_compression<H>(
+pub fn default_compression<H>(
     file_paths: Vec<PathBuf>,
     args: &Args,
     hash_type_id: &u8,
@@ -117,6 +117,8 @@ where
         + redb::Key
         + for<'a> redb::Value<SelfType<'a> = H>,
 {
+    debug!("Running default compression mode.");
+
     /*Verify if the list of files paths is empty, throw error if true. */
     if file_paths.is_empty() {
         return Err(CliError::NoFilesFound());

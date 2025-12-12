@@ -142,6 +142,9 @@ pub enum CliError {
 
     #[error("Flume channel send error: {0}")]
     FlumeSendError(String),
+
+    #[error("Invalid mode specified. {0}")]
+    InvalidMode(String),
 }
 
 /// Converts a library-level `SpriteShrinkError` into a `CliError`.
