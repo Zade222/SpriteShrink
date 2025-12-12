@@ -48,7 +48,10 @@ pub struct ChunkLocation {
 ///   compressed data.
 /// * `hash_type`: Numerical value representing the hash type used when
 ///   the data was hashed. 1 = xxhash3_64, 2 = xxhash3_128
-/// * `pad`: Empty data padding to keep data aligned. Must be all zeros.
+/// * `_pad1`: Empty data padding to keep data aligned. Must be zero.
+/// * `pub format_id`: Field for specifying the ID of the format specific
+///   comrpession that was used for making the archive.
+/// * `_pad2`: Empty data padding to keep data aligned. Must be zeros.
 /// * `man_offset`: The byte offset where the file manifest begins.
 /// * `man_length`: The total length of the file manifest in bytes.
 /// * `dict_offset`: The starting offset of the compression dictionary.
@@ -64,7 +67,9 @@ pub struct FileHeader {
     pub file_count:     u32,
     pub algorithm:      u16,
     pub hash_type:      u8,
-    pub pad:            [u8; 5],
+    pub _pad1:          u8,
+    pub format_id:      u16,
+    pub _pad2:          [u8; 2],
     pub man_offset:     u64,
     pub man_length:     u64,
     pub dict_offset:    u64,
