@@ -7,7 +7,7 @@ use sprite_shrink::{
 };
 
 use crate::lib_structs::{
-    BlockRun, CueFile, CueSheet, CueSheetType, MsfTime, RleSectorMap,
+    ContentBlock, CueFile, CueSheet, CueSheetType, MsfTime, RleSectorMap,
     SectorMap, SectorType, Track, TrackType
 };
 
@@ -40,7 +40,7 @@ pub trait SectorDataProvider {
 pub fn build_block_map<H, R>(
     rle_sector_map: &RleSectorMap,
     source: &mut R,
-) -> Result<Vec<BlockRun<H>>, io::Error>
+) -> Result<Vec<ContentBlock<H>>, io::Error>
 where
     H: Hashable,
     R: Read + Seek,
@@ -72,10 +72,11 @@ where
                     stream.read_to_end(&mut buffer)?;
                     let content_hash = H::from_bytes_with_seed(&buffer);
 
-                    block_map.push(BlockRun {
-                        sector_type: *sector_type,
+                    block_map.push(ContentBlock {
+                        start_sector: segment_start,
                         sector_count: segment_size,
                         content_hash,
+                        sector_type: *sector_type,
                     });
 
                     sectors_in_run_processed += segment_size;
@@ -91,10 +92,11 @@ where
                 stream.read_to_end(&mut buffer)?;
                 let content_hash = H::from_bytes_with_seed(&buffer);
 
-                block_map.push(BlockRun {
-                    sector_type: *sector_type,
+                block_map.push(ContentBlock {
+                    start_sector: absolute_sector_offset,
                     sector_count: *run_count,
                     content_hash,
+                    sector_type: *sector_type,
                 });
             }
             // Ignore all others.

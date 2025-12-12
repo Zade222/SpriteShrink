@@ -9,6 +9,15 @@ pub struct BlobLocation {
 }
 
 
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ContentBlock<H> {
+    pub start_sector: u32,
+    pub sector_count: u32,
+    pub content_hash: H,
+    pub sector_type: SectorType,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CueFile {
     pub name: String,
@@ -31,28 +40,26 @@ pub enum CueSheetType {
 
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct DataChunkLayout<H> {
+    pub hash: H,
+    pub uncomp_len: u32,
+}
+
+
+#[derive(Clone, Copy, Debug)]
+pub struct DecodedSectorInfo {
+    pub sector_type: SectorType,
+    pub stream_offset: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DiscManifest<H> {
     pub title: String,
     pub collection_id: u8,
     pub normalized_cue_sheet: String,
-    pub sector_map: RleSectorMap,
-    pub block_map: Vec<BlockRun<H>>,
+    pub rle_sector_map: RleSectorMap,
+    pub block_map: Vec<ContentBlock<H>>,
     pub data_stream_layout: Vec<DataChunkLayout<H>>,
-}
-
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct BlockRun<H> {
-    pub sector_type: SectorType,
-    pub sector_count: u32,
-    pub content_hash: H,
-}
-
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct DataChunkLayout<H> {
-    pub hash: H,
-    pub uncompressed_len: u32,
 }
 
 
@@ -120,6 +127,26 @@ pub struct OpticalArchiveHeader {
 }
 
 
+pub struct ReconstructionContext<'a, H> {
+    pub manifest: &'a DiscManifest<H>,
+    pub decoded_map: Vec<DecodedSectorInfo>,
+}
+
+
+pub enum ReconstructionInfo<H> {
+    FromBlock {
+        content_hash: H,
+        offset_in_block: u32,
+    },
+
+    FromStream {
+        chunks: Vec<StreamChunkInfo<H>>,
+    },
+
+    None,
+}
+
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RleSectorMap {
     pub runs: Vec<(u32, SectorType)>,
@@ -148,6 +175,13 @@ pub enum SectorType {
     Audio,
     Pregap,
     None
+}
+
+
+pub struct StreamChunkInfo<H> {
+    pub chunk_hash: H,
+    pub read_from_offset: u32,
+    pub read_length: u32,
 }
 
 
