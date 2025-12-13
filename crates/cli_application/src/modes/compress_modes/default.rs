@@ -203,7 +203,7 @@ where
 
     /*Stores the size of threads used by the parallel task of running
     process_file_in_memory function.*/
-    let mut _process_threads: usize = 0;
+    let process_threads = 0usize;
 
     //Callback for getting all keys (hashes) in cache
     let key_ret_cb = {
@@ -250,7 +250,7 @@ where
     parallel process that follows it.*/
     let _process_pool = {
         let builder = rayon::ThreadPoolBuilder::new()
-            .num_threads(_process_threads);
+            .num_threads(process_threads);
 
         builder.build()
             .map_err(|e| CliError::InternalError(
@@ -388,7 +388,7 @@ where
                 let compressed_size = test_compression(
                     &temp_serialized_data.sorted_hashes,
                     total_data_size,
-                    _process_threads,
+                    process_threads,
                     8192,
                     level,
                     get_chunk_data_for_test,
@@ -496,7 +496,7 @@ where
                 let compressed_size = test_compression(
                     &temp_serialized_data.sorted_hashes,
                     chunk_sum,
-                    _process_threads,
+                    process_threads,
                     current_dict_size,
                     level,
                     get_chunk_data_for_test
