@@ -13,7 +13,8 @@ use std::{
     path::PathBuf,
     sync::{Arc, Mutex, atomic::{
         AtomicBool, Ordering
-    }}, thread, time::{Duration, Instant}
+    }},
+    thread, time::{Duration}
 };
 
 use dashmap::DashMap;
@@ -23,7 +24,7 @@ use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::{bounded};
 use sprite_shrink::{
     ArchiveBuilder, FileManifestParent, Hashable, Progress, SS_SEED,
-    SSAChunkMeta, serialize_uncompressed_data, test_compression,
+    SSAChunkMeta, serialize_uncompressed_data,
     verify_single_file
 };
 use rayon::prelude::*;
@@ -34,11 +35,11 @@ use thread_priority::*;
 use tracing::{
     debug,
     info,
-    warn
 };
 
 use crate::{
     arg_handling::Args,
+    auto_tune::{auto_tune_dict, auto_tune_win},
     cli_types::{
         ChunkMessage, FileData, FileCompleteData,
         TempFileGuard, APPIDENTIFIER
@@ -267,49 +268,16 @@ where
 
     //Autotune if flag was provided.
     if args.auto_tune {
-        let timeout_dur = args.autotune_timeout.
-            map(Duration::from_secs);
-        //Starting window size
-        let mut current_window_size = 512;
-
-        //Value used for testing each auto-tune step
-        let mut last_compressed_size = usize::MAX;
-
         //If window size was not specified, find optimal window size.
         if args.window.is_none() {
-            let window_bar = if args.progress {
-                let bar = ProgressBar::new_spinner();
-                bar.enable_steady_tick(Duration::from_millis(500));
-                bar.set_style(
-                    ProgressStyle::with_template("{msg} {spinner}")
-                        .unwrap()
-                        .tick_strings(&[
-                            "   ",
-                            ".  ",
-                            ".. ",
-                            "...",
-                            " ..",
-                            "  .",
-                            "   ",
-                        ]),
-                );
-                bar.set_message("Tuning window size");
-                Some(bar)
-            } else {
-                None
-            };
-            loop {
-                debug!("Testing window size: {current_window_size}");
-
-                /*Set starting time for determining the compressed size
-                using the current window size*/
-                let start_time = Instant::now();
-
+            let processor = |
+                    window_size: u64
+            | -> Result<(FileData<H>, Arc<TempCache<H>>), CliError> {
                 let at_temp_cache = Arc::new(
                     TempCache::<H>::new(
                         cache_info.at_cache_path.clone(),
                         process_in_memory
-                    )?
+                    ).unwrap()
                 );
 
                 let at_insert_batch_cb = {
@@ -327,104 +295,21 @@ where
                     }
                 };
 
-                //Process files with the current window size
-                let _temp_data = process_files(
+                let file_data = process_files(
                     &file_paths,
-                    current_window_size,
+                    window_size,
                     &input_data_size,
                     false,
                     at_insert_batch_cb,
                     &running
                 )?;
 
-                let fm = _temp_data.file_manifest;
-                //let _vh = _temp_data.veri_hashes;
-
-                /*Callback for getting all keys(hashes) from temporary
-                cache*/
-                let at_key_ret_cb = {
-                    let cache_clone = Arc::clone(&at_temp_cache);
-                    let running_clone = Arc::clone(&running);
-                    move || -> Result<Vec<H>, CliError> {
-                        if !running_clone.load(Ordering::SeqCst) {
-                            return Err(CliError::Cancelled);
-                        }
-
-                        cache_clone.get_keys()
-                    }
-                };
-
-                /*Callback for getting one or more chunks from the temporary
-                cache*/
-                let at_chunk_ret_cb = Arc::new({
-                    let cache_clone = Arc::clone(&at_temp_cache);
-                    let running_clone = Arc::clone(&running);
-                    move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
-                        if !running_clone.load(Ordering::SeqCst) {
-                            return Err(CliError::Cancelled);
-                        }
-
-                        cache_clone.get_chunks(hashes)
-                    }
-                });
-
-                //Serialize temporary data
-                let temp_serialized_data = serialize_uncompressed_data(
-                    &fm,
-                    &at_key_ret_cb,
-                    at_chunk_ret_cb.as_ref()
-                )?;
-
-                //Calc the sum of all chunks in auto-tune databse
-                let total_data_size = at_temp_cache.get_tot_data_size();
-
-                let get_chunk_data_for_test = {
-                    let cb = Arc::clone(&at_chunk_ret_cb);
-                    move |hashes: &[H]| cb(hashes)
-                };
-
-                /*Compress the data and measure the size
-                (dictionary size + compressed data size)*/
-                let compressed_size = test_compression(
-                    &temp_serialized_data.sorted_hashes,
-                    total_data_size,
-                    process_threads,
-                    8192,
-                    level,
-                    get_chunk_data_for_test,
-                )?;
-
-                /*Measure the time taken for determining the compressed size
-                for the current window size*/
-                let elapsed = start_time.elapsed();
-
-                if compressed_size > last_compressed_size {
-                    //Process passed the optimal point, stop.
-                    debug!("Optimal window size found to be \
-                        {best_window_size} bytes.");
-                    break;
-                }
+                Ok((file_data, at_temp_cache))
+            };
 
 
-                if let Some(timeout) = timeout_dur
-                    && elapsed > timeout
-                {
-                    warn!("Autotune for window size {current_window_size}\
-                        took too long (>{timeout:?}).Using best \
-                        result so far: {best_window_size}."
-                    );
-                }
+            best_window_size = auto_tune_win(args, &running, processor)?;
 
-                //This iteration was successful and an improvement
-                last_compressed_size = compressed_size;
-                best_window_size = current_window_size;
-
-                //Double value for next loop
-                current_window_size *= 2;
-            }
-            if let Some(bar) = &window_bar {
-                bar.finish_with_message("Optimal window size found.");
-            }
         }
 
         /*Using either the autotune best window size or the user set value,
@@ -451,82 +336,19 @@ where
         //Calc the sum of all chunks in cache
         chunk_sum = temp_cache.get_tot_data_size();
 
-        //Set value back to max to prepare it for the next auto-tune step/
-        last_compressed_size = usize::MAX;
-
-        //Starting dictionary size, 8kb
-        let mut current_dict_size: usize = 8192;
-
         //If dicionary size was not specified, find optimal dictionary size.
         if args.dictionary.is_none() {
-            let dictionary_bar = if args.progress {
-                let bar = ProgressBar::new_spinner();
-                bar.enable_steady_tick(Duration::from_millis(500));
-                bar.set_style(
-                    ProgressStyle::with_template("{msg} {spinner}")
-                        .unwrap()
-                        .tick_strings(&[
-                            "   ",
-                            ".  ",
-                            ".. ",
-                            "...",
-                            " ..",
-                            "  .",
-                            "   ",
-                        ]),
-                );
-                bar.set_message("Tuning dictionary size");
-                Some(bar)
-            } else {
-                None
+            let get_chunk_data_for_test = {
+                let cb = Arc::clone(&chunk_ret_cb);
+                move |hashes: &[H]| cb(hashes)
             };
-            loop {
-                debug!("Testing dictionary size: {current_dict_size}");
 
-                let get_chunk_data_for_test = {
-                    //Clone the Arc, which is a cheap reference count bump
-                    let cb = Arc::clone(&chunk_ret_cb);
-                    //This new closure takes ownership of the cloned Arc
-                    move |hashes: &[H]| cb(hashes)
-                };
-
-
-                /*Given the current dictionary size, determine the size of the
-                data*/
-                let compressed_size = test_compression(
-                    &temp_serialized_data.sorted_hashes,
-                    chunk_sum,
-                    process_threads,
-                    current_dict_size,
-                    level,
-                    get_chunk_data_for_test
-                )?;
-
-
-                if compressed_size > last_compressed_size {
-                    //Process passed the optimal point, stop.
-                    debug!("Optimal dictionary size found to be \
-                        {best_dictionary_size} bytes."
-                    );
-                    break;
-                }
-
-                //This iteration was successful and an improvement
-                last_compressed_size = compressed_size;
-                best_dictionary_size = current_dict_size as u64;
-
-                //Double value for next loop
-                current_dict_size *= 2;
-
-                /*Accept reasonable upper limit for dictionary size.
-                This will stop it at an accepted value of 1024 * 1024*/
-                if current_dict_size > 1024 * 1024 {
-                    break;
-                }
-            }
-            if let Some(bar) = &dictionary_bar {
-                bar.finish_with_message("Optimal dictionary size found.");
-            }
+            best_dictionary_size = auto_tune_dict(
+                args,
+                chunk_sum,
+                &temp_serialized_data,
+                get_chunk_data_for_test
+            )?;
         }
     } else {
         /*If not autotuning window or dictionary size, just process files.*/

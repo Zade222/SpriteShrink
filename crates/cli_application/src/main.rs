@@ -36,6 +36,8 @@ use archive_parser::{get_max_rom_index};
 mod arg_handling;
 use arg_handling::{merge_config_and_args, validate_args, Args};
 
+mod auto_tune;
+
 mod cli_types;
 
 mod error_handling;
