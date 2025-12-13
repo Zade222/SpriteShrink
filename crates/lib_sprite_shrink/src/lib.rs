@@ -13,7 +13,7 @@ pub use lib_error_handling::{
 mod lib_structs;
 pub use lib_structs::{
     ChunkLocation, FileData, FileHeader, FileManifestParent,
-    ProcessedFileData, Progress, SSAChunkMeta
+    ProcessedFileData, Progress, SerializedData, SSAChunkMeta
 };
 
 mod parsing;
