@@ -38,8 +38,6 @@ use arg_handling::{merge_config_and_args, validate_args, Args};
 
 mod cli_types;
 
-mod db_transactions;
-
 mod error_handling;
 use error_handling::{
     CliError, initiate_logging, offset_to_line_col};

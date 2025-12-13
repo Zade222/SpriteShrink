@@ -103,21 +103,6 @@ pub enum CliError {
     #[error("Argument parsing error: {0}")]
     ArgumentParsing(#[from] clap::Error),
 
-    #[error("Database error {0}")]
-    RedbDatabaseError(#[from] redb::DatabaseError),
-
-    #[error("Database table error {0}")]
-    RedbTableError(#[from] redb::TableError),
-
-    #[error("Database storage error {0}")]
-    RedbStorageError(#[from] redb::StorageError),
-
-    #[error("Database transaction error {0}")]
-    RedbTransactionError(#[from] redb::TransactionError),
-
-    #[error("Database commit error {0}")]
-    RedbCommitError(#[from] redb::CommitError),
-
     #[error("Key not found {0}")]
     KeyNotFound(String),
 

@@ -7,19 +7,30 @@
 //! designed to be robust and provide clear error handling.
 
 use std::{
+    collections::HashMap,
+    fmt::Display,
     fs::{self, File, OpenOptions, metadata, read_dir, remove_file},
-    io::{BufWriter, copy, Read, Seek, SeekFrom, Write},
+    hash::Hash,
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write, copy},
     path::{Path, PathBuf},
+    process::id,
+    sync::{Arc, Mutex},
     time::SystemTime
 };
 
+use dashmap::DashMap;
 use directories::ProjectDirs;
 use tracing::{
+    debug,
+    error,
     warn
 };
 
 use crate::{
-    cli_types::{APPIDENTIFIER, SpriteShrinkConfig},
+    cli_types::{
+        APPIDENTIFIER, CacheBackend, CacheInfo, LocationData,
+        SpriteShrinkConfig
+    },
     error_handling::CliError
 };
 
@@ -510,6 +521,222 @@ pub fn cleanup_old_logs(
 
     Ok(())
 }
+
+/// Generates unique paths for temporary cache.
+///
+/// This function creates platform-specific paths for two temporary cache
+/// files: one for the main compression process and another for auto-tuning.
+/// The paths are constructed using the application's cache directory and the
+/// current process ID (PID) to ensure uniqueness and avoid conflicts between
+/// multiple concurrent instances of the application.
+///
+/// # Returns
+///
+/// A tuple `(PathBuf, PathBuf, u32)` containing:
+/// - The path for the main temporary database (e.g., `.../cache/12345.tmp`).
+/// - The path for the auto-tuning temporary database (e.g.,
+///   `.../cache/auto_tune_12345.tmp`).
+/// - The process ID (PID) used to generate the unique filenames.
+pub fn get_cache_paths() -> CacheInfo {
+    let pid = id();
+
+    let cache_dir = ProjectDirs::from(
+        APPIDENTIFIER.qualifier,
+        APPIDENTIFIER.organization,
+        APPIDENTIFIER.application)
+    .unwrap()
+    .cache_dir()
+    .to_path_buf();
+
+    let cache_path = cache_dir.clone()
+        .join(format!("{pid}"))
+        .with_extension("tmp");
+
+    let at_cache_path = cache_dir.clone()
+        .join(format!("auto_tune_{pid}"))
+        .with_extension("tmp");
+
+    CacheInfo {
+        cache_path,
+        at_cache_path,
+        id: pid
+    }
+}
+
+
+pub struct TempCache<H: Hash + Eq> {
+    backend: Arc<Mutex<CacheBackend<H>>>,
+}
+
+impl<H: Hash + Eq + Copy + Display + Send + Sync + 'static> TempCache<H> {
+    pub fn new(file_path: PathBuf, use_in_memory: bool) -> io::Result<Self> {
+        let backend = if use_in_memory {
+
+            CacheBackend::InMemory{
+                map: Arc::new(DashMap::new()),
+                data_size: 0
+            }
+        } else {
+            File::create(&file_path)?;
+            CacheBackend::OnDisk {
+                file_path,
+                location_map: HashMap::new(),
+                current_offset: 0,
+            }
+        };
+
+        Ok(Self {
+            backend: Arc::new(Mutex::new(backend)),
+        })
+    }
+
+    pub fn insert_batch(&self, items: &[(H, Vec<u8>)]) -> Result<(), CliError> {
+        let mut backend_guard = self.backend.lock().unwrap();
+
+        match &mut *backend_guard {
+            CacheBackend::InMemory{map, data_size} => {
+                for (key, data) in items {
+                    map.entry(*key).or_insert_with(|| data.to_vec());
+                    *data_size += data.len() as u64;
+                }
+            }
+            CacheBackend::OnDisk {
+                file_path,
+                location_map,
+                current_offset
+            } => {
+                let mut tmp_file = OpenOptions::new()
+                    .append(true)
+                    .open(file_path)?;
+
+                for (key, data) in items {
+                    if !location_map.contains_key(key) {
+                        let data_len = data.len() as u32;
+
+                        tmp_file.write_all(data)?;
+
+                        location_map.insert(*key, LocationData {
+                            offset: *current_offset,
+                            length: data_len,
+                        });
+
+                        *current_offset += data_len as u64;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn get_chunks(
+        &self,
+        hashes: &[H],
+    ) -> Result<Vec<Vec<u8>>, CliError>{
+        let backend_guard = self.backend.lock().unwrap();
+
+        match &*backend_guard {
+            CacheBackend::InMemory{map, ..} => {
+                hashes
+                    .iter()
+                    .map(|hash| {
+                        map.get(hash)
+                            .map(|r| r.value().clone())
+                            .ok_or_else(|| CliError::KeyNotFound(format!(
+                                "Hash {} not found in data_store",
+                                hash
+                            )))
+                    })
+                    .collect()
+            }
+            CacheBackend::OnDisk{
+                file_path,
+                location_map,
+                ..
+            } => {
+                let mut tmp_file = File::open(file_path)?;
+                let mut ret_chunks: Vec<Vec<u8>> = Vec::with_capacity(
+                    hashes.len()
+                );
+
+                for hash in hashes{
+                    match location_map.get(hash){
+                        Some(location) => {
+                            let mut data_buffer: Vec<u8> =  vec![
+                                0;
+                                location.length as usize
+                            ];
+                            tmp_file.seek(SeekFrom::Start(location.offset))?;
+                            tmp_file.read_exact(&mut data_buffer)?;
+                            ret_chunks.push(data_buffer)
+                        }
+                        None => {
+                            return Err(CliError::KeyNotFound(
+                               format!("Hash {} not found in data_store", hash)
+                            ));
+                        }
+                    }
+                }
+                Ok(ret_chunks)
+            }
+        }
+    }
+
+    pub fn get_keys(&self) -> Result<Vec<H>, CliError> {
+        let backend_guard = self.backend.lock().unwrap();
+
+        let keys = match &*backend_guard {
+            CacheBackend::InMemory{map, ..} => {
+                map.iter()
+                .map(|entry| *entry.key())
+                .collect()
+            }
+            CacheBackend::OnDisk {location_map, ..} => {
+                location_map
+                    .keys()
+                    .cloned()
+                    .collect()
+            }
+        };
+
+        Ok(keys)
+    }
+
+    pub fn get_tot_data_size(&self) -> u64 {
+        let backend_guard = self.backend.lock().unwrap();
+
+        match &*backend_guard {
+            CacheBackend::InMemory{data_size, ..} => {
+                *data_size
+            }
+            CacheBackend::OnDisk {current_offset, ..} => {
+                *current_offset
+            }
+        }
+    }
+}
+
+
+impl <H: Hash + Eq> Drop for TempCache<H> {
+    fn drop(&mut self) {
+        let backend_guard = self.backend.lock().unwrap();
+
+        if let CacheBackend::OnDisk {file_path, .. } = &*backend_guard &&
+            file_path.exists()
+        {
+            if let Err(e) = remove_file(file_path) {
+                error!(
+                    "Failed to remove temporary file at {:?}: {}",
+                    file_path, e
+                );
+            } else {
+                debug!("Successfully removed temporary file: {:?}",
+                    file_path
+                );
+            }
+        }
+    }
+}
+
 
 /// Reads the entire metadata block (manifest, dictionary, and chunk index)
 /// from an archive file into a single byte vector.

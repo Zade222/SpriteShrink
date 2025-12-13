@@ -6,12 +6,14 @@
 //! resources, ensuring a clean and organized architecture.
 
 use std::{
+    collections::HashMap,
     fs::remove_file,
-    path::Path,
+    hash::Hash,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use dashmap::DashMap;
-use redb::{Database, Key, TableDefinition, Value};
 use serde::{Serialize, Deserialize};
 use tracing::{
     debug,
@@ -21,6 +23,27 @@ use tracing::{
 use sprite_shrink::{
     FileManifestParent, Hashable, SSAChunkMeta
 };
+
+
+pub enum CacheBackend<H: Hash + Eq> {
+    InMemory{
+        map: Arc<DashMap<H, Vec<u8>>>,
+        data_size: u64,
+    },
+    OnDisk {
+        file_path: PathBuf,
+        location_map: HashMap<H, LocationData>,
+        current_offset: u64,
+    },
+}
+
+
+pub struct CacheInfo {
+    pub cache_path: PathBuf,
+    pub at_cache_path: PathBuf,
+    pub id: u32,
+}
+
 
 /// A message containing a single data chunk and its hash.
 ///
@@ -33,24 +56,9 @@ use sprite_shrink::{
 /// * `chunk_data`: The raw binary data of the chunk.
 #[derive(Debug)]
 pub struct ChunkMessage<H: Hashable> {
-        pub chunk_hash: H,
-        pub chunk_data: Vec<u8>,
-        pub chunk_size: usize
-}
-
-/// A handle for accessing the application's temporary database.
-///
-/// This struct encapsulates the shared database connection (`Arc<Database>`)
-/// and the table definition, providing a convenient way to pass database
-/// access information between different parts of the application.
-///
-/// # Fields
-///
-/// * `db`: The database instance.
-/// * `db_def`: The definition for the table where chunk data is stored.
-pub struct DBInfo<'a, K: Key + 'static, V: Value + 'static>{
-    pub db: Database,
-    pub db_def: TableDefinition<'a, K, V>
+    pub chunk_hash: H,
+    pub chunk_data: Vec<u8>,
+    pub chunk_size: usize
 }
 
 /// A container for all metadata generated after processing a single file.
@@ -95,6 +103,12 @@ pub struct FileCompleteData<H: Hashable> {
 pub struct FileData<H: Hashable>{
     pub file_manifest: DashMap<String, FileManifestParent<H>>,
     pub veri_hashes: DashMap<String, [u8; 64]>,
+}
+
+
+pub struct LocationData{
+    pub offset: u64,
+    pub length: u32
 }
 
 /// Defines cross-platform identifiers for the application.
@@ -226,7 +240,6 @@ impl<'a> Drop for TempFileGuard<'a> {
                     self.path
                 );
             }
-
         }
     }
 }
