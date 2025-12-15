@@ -17,6 +17,11 @@ pub struct ContentBlock<H> {
     pub sector_type: SectorType,
 }
 
+pub struct CueAnalysisResult {
+    pub total_data_size: u64,
+    pub cue_sheets: Vec<CueSheet>,
+}
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CueFile {

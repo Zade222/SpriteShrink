@@ -1,7 +1,7 @@
 use thiserror::Error;
 
 use crate::{
-    analyze::AnalysisError,
+    analyze::AnalysisError, cue_parser::ParseError,
 };
 
 #[derive(Error, Debug)]
@@ -11,4 +11,7 @@ pub enum SpriteShrinkCDError {
 
     #[error("An I/O error occurred")]
     Io(#[from] std::io::Error),
+
+    #[error("A parse error occurred.")]
+    Parse(#[from] ParseError),
 }

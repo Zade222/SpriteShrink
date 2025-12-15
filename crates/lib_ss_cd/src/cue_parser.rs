@@ -58,7 +58,7 @@ fn parse_track_type(
 }
 
 
-pub fn parse(
+pub fn parse_cue(
     source_filename: &str,
     content: &str
 ) -> Result<CueSheet, ParseError> {

@@ -1,10 +1,18 @@
-use std::array::TryFromSliceError;
+use std::{
+    array::TryFromSliceError,
+    path::{Path, PathBuf},
+};
 
 use crc::{Crc, CRC_32_CD_ROM_EDC};
 use thiserror::Error;
 
-use crate::lib_structs::{
-    CueSheet, DiscValidationResult, SectorAnalysis, SectorType
+use crate::{
+    lib_structs::{
+        CueAnalysisResult, CueSheet, DiscValidationResult, SectorAnalysis,
+        SectorType
+    },
+    lib_error_handling::SpriteShrinkCDError,
+    cue_parser::parse_cue,
 };
 
 #[derive(Error, Debug)]
@@ -125,6 +133,44 @@ pub fn analyze_sector(
         )
     }
 }
+
+
+pub fn analyze_cue_sheets<F>(
+    cue_sheets: &[(&Path, &str)],
+    mut size_resolver: F,
+) -> Result<CueAnalysisResult, SpriteShrinkCDError>
+where
+    F: FnMut(&Path) -> Result<u64, SpriteShrinkCDError>,
+{
+    let mut total_data_size = 0u64;
+    let mut parsed_sheets: Vec<CueSheet> = Vec::with_capacity(
+        cue_sheets.len()
+    );
+
+
+    for (cue_path, cue_content) in cue_sheets {
+        let sheet = parse_cue(
+            &cue_path.file_name().unwrap().to_string_lossy(),
+            cue_content
+        )?;
+
+        let cue_dir = cue_path.parent().unwrap();
+
+        for file_entry in &sheet.files {
+            let data_file_path = cue_dir.join(&file_entry.name);
+
+            total_data_size += size_resolver(&data_file_path)?;
+        }
+
+        parsed_sheets.push(sheet);
+    }
+
+    Ok(CueAnalysisResult {
+        total_data_size,
+        cue_sheets: parsed_sheets
+    })
+}
+
 
 fn is_all_zeros(data: &[u8]) -> bool {
     data.iter().all(|&byte| byte == 0)
