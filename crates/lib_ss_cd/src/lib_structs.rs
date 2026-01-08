@@ -1,4 +1,7 @@
-use std::ops::Range;
+use std::{
+    fmt::{self, Display},
+    ops::Range
+};
 use serde::{Deserialize, Serialize};
 
 
@@ -37,11 +40,36 @@ pub struct CueSheet {
 }
 
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CueSheetType {
-    Absolute,
-    Relative,
+impl CueSheet {
+    /// Converts the CueSheet struct into a String with the format of a .cue
+    /// file.
+    ///
+    /// This is an alias for the standard `to_string()` method provided by
+    /// implementing the `Display` trait.
+    pub fn to_cue_string(&self) -> String {
+        self.to_string()
+    }
 }
+
+impl fmt::Display for CueSheet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for file in &self.files {
+            writeln!(f, "FILE \"{}\" BINARY", file.name)?;
+
+            for track in &file.tracks {
+                writeln!(f, "  TRACK {:02} {}", track.number, track.track_type)?;
+
+                for index in &track.indices {
+                    writeln!(f, "    INDEX {:02} {}", index.number, index.position)?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+
+
 
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
@@ -57,32 +85,50 @@ pub struct DecodedSectorInfo {
     pub stream_offset: u64,
 }
 
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct DiscManifest<H> {
     pub title: String,
     pub collection_id: u8,
     pub normalized_cue_sheet: String,
+    pub lba_map: Vec<(u32, u32)>,
     pub rle_sector_map: RleSectorMap,
     pub block_map: Vec<ContentBlock<H>>,
     pub data_stream_layout: Vec<DataChunkLayout<H>>,
+    pub exception_blob_offset: u64,
+    pub exception_index_length: u32,
+    pub subheader_map: Vec<(u32, u32, [u8; 8])>,
 }
 
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct DiscValidationResult {
-    pub is_multiple_of_2352: bool,
-    pub has_iso_pvd_marker: bool,
-    pub has_ps1_system_marker: bool,
-    pub has_ps1_xa_marker: bool,
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum ExceptionType {
+    Mode1,
+    Mode2Form1,
+    Mode2Form2,
+    None
 }
 
 
-impl DiscValidationResult {
-    pub fn is_high_confidence(&self) -> bool {
-        self.is_multiple_of_2352 &&
-            self.has_iso_pvd_marker &&
-            self.has_ps1_system_marker &&
-            self.has_ps1_xa_marker
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ExceptionInfo {
+    pub exception_type: ExceptionType,
+    pub data_offset: u32,
+}
+
+
+impl ExceptionType {
+    pub const MODE1_EXCEP_SIZE: u32 = 296;
+    pub const MODE2FORM1_EXCEP_SIZE: u32 = 296;
+    pub const MODE2FORM2_EXCEP_SIZE: u32 = 20;
+
+    pub fn metadata_size(&self) -> u32 {
+        match self {
+            ExceptionType::Mode1 => Self::MODE1_EXCEP_SIZE,
+            ExceptionType::Mode2Form1 => Self::MODE2FORM1_EXCEP_SIZE,
+            ExceptionType::Mode2Form2 => Self::MODE2FORM2_EXCEP_SIZE,
+            ExceptionType::None => 0
+        }
     }
 }
 
@@ -114,6 +160,12 @@ impl MsfTime {
             second: seconds as u8,
             frame: frames as u8,
         }
+    }
+}
+
+impl fmt::Display for MsfTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:02}:{:02}:{:02}", self.minute, self.second, self.frame)
     }
 }
 
@@ -161,7 +213,7 @@ pub struct RleSectorMap {
 pub struct SectorAnalysis{
     pub sector_type: SectorType,
     pub user_data_range: Range<usize>,
-    pub meta_data: Option<Vec<u8>>,
+    pub exception_data: Option<Vec<u8>>,
 }
 
 pub struct SectorMap {
@@ -169,17 +221,54 @@ pub struct SectorMap {
 }
 
 
+pub struct SectorMapResult {
+    pub sector_map: SectorMap,
+    pub exception_metadata: Vec<(u64, ExceptionType, Vec<u8>)>,
+    pub subheader_map: Vec<(u32, u32, [u8; 8])>,
+    pub normalized_cue_sheet: CueSheet,
+    pub lba_map: Vec<(u32, u32)>,
+}
+
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SectorType {
+    Audio,
     Mode1,
     Mode1Exception,
-    Mode1SbiException,
     Mode2Form1,
-    Mode2Form2,
     Mode2Form1Exception,
-    Audio,
-    Pregap,
+    Mode2Form2,
+    Mode2Form2Exception,
+    PregapMode1,
+    PregapMode1Exception,
+    PregapMode2,
+    PregapMode2Exception,
+    PregapAudio,
+    ZeroedAudio,
+    ZeroedData,
     None
+}
+
+impl SectorType {
+    pub fn data_size(&self) -> u16 {
+        match self {
+            SectorType::Audio => 2352,
+            SectorType::Mode1 => 2048,
+            SectorType::Mode1Exception => 2048,
+            SectorType::Mode2Form1 => 2048,
+            SectorType::Mode2Form1Exception => 2048,
+            SectorType::Mode2Form2 => 2324,
+            SectorType::Mode2Form2Exception => 2324,
+            SectorType::PregapMode1 => 2048,
+            SectorType::PregapMode1Exception => 2048,
+            SectorType::PregapMode2 => 2048,
+            SectorType::PregapMode2Exception => 2048,
+            SectorType::PregapAudio => 2352,
+            SectorType::ZeroedAudio => 2352,
+            SectorType::ZeroedData => 2352,
+            SectorType::None => 0
+        }
+    }
 }
 
 
@@ -210,4 +299,14 @@ pub enum TrackType {
     Audio,
     Mode1_2352,
     Mode2_2352,
+}
+
+impl fmt::Display for TrackType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            TrackType::Audio => write!(f, "AUDIO"),
+            TrackType::Mode1_2352 => write!(f, "MODE1/2352"),
+            TrackType::Mode2_2352 => write!(f, "MODE2/2352"),
+        }
+    }
 }

@@ -9,6 +9,8 @@ use std::{
     slice,
 };
 
+use bitcode::Encode;
+
 use crate::archive::{ArchiveBuilder, decompress_chunk};
 use crate::ffi::ffi_error_handling::{
     FFIResult
@@ -56,7 +58,7 @@ trait ArchiveBuilderTrait<H> {
 impl<'a, E, H, R, W> ArchiveBuilderTrait<H> for ArchiveBuilder<'a, E, H, R, W>
 where
     E: std::error::Error + IsCancelled + Send + Sync + 'static,
-    H: Copy + std::fmt::Debug + Eq + std::hash::Hash + serde::Serialize +
+    H: Copy + std::fmt::Debug + Encode + Eq + std::hash::Hash + serde::Serialize +
         Send + Sync + 'static + std::fmt::Display + Ord,
     R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
     W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,

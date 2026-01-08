@@ -29,4 +29,4 @@ pub use processing::{
     verify_single_file, test_compression};
 
 mod serialization;
-pub use serialization::{serialize_uncompressed_data};
+pub use serialization::{dashmap_values_to_vec, serialize_uncompressed_data};

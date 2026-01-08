@@ -8,6 +8,9 @@
 
 use std::collections::HashMap;
 
+use bitcode::{
+    Decode, decode
+};
 use serde::{Deserialize};
 use thiserror::Error;
 
@@ -97,7 +100,7 @@ pub fn parse_file_header(
 ///
 /// This function is responsible for parsing the binary representation
 /// of the file manifest, which contains metadata for every file in the
-/// archive. It uses `bincode` to decode the byte slice into a
+/// archive. It uses `bitcode` to decode the byte slice into a
 /// structured `Vec<FileManifestParent>`.
 ///
 /// # Arguments
@@ -114,13 +117,10 @@ pub fn parse_file_metadata<H>(
     manifest_data: &[u8]
 ) -> Result<Vec<FileManifestParent<H>>, SpriteShrinkError>
 where
-    for<'de> H: serde::Deserialize<'de>
+    for<'de> H: serde::Deserialize<'de> + Decode<'de>
 {
-    let config = bincode::config::standard();
-
-    let (file_manifest, _len) =
-        bincode::serde::decode_from_slice(manifest_data, config)
-            .map_err(|e| {ParsingError::ManifestDecodeError(e.to_string())})?;
+    let file_manifest = decode(manifest_data)
+        .map_err(|e| ParsingError::ManifestDecodeError(e.to_string()))?;
 
     Ok(file_manifest)
 }
@@ -129,7 +129,7 @@ where
 ///
 /// This function parses the binary data representing the chunk index,
 /// which maps each unique chunk hash to its `ChunkLocation`. It uses
-/// `bincode` to decode the data into a `HashMap` for efficient lookups
+/// `bitcode` to decode the data into a `HashMap` for efficient lookups
 /// during file extraction.
 ///
 /// # Arguments
@@ -145,14 +145,10 @@ pub fn parse_file_chunk_index<H>(
     chunk_index_data: &[u8]
 ) -> Result<HashMap<H, ChunkLocation>, SpriteShrinkError>
 where
-    for<'de> H: Eq + std::hash::Hash + Deserialize<'de>,
+    for<'de> H: Eq + std::hash::Hash + Deserialize<'de> + Decode<'de>,
 {
-    //Set default bincode config.
-    let config = bincode::config::standard();
-
-    let (bin_chunk_index, _len): (Vec<(H, ChunkLocation)>, usize) =
-        bincode::serde::decode_from_slice(chunk_index_data, config)
-            .map_err(|e| {ParsingError::IndexDecodeError(e.to_string())})?;
+    let bin_chunk_index: Vec<(H, ChunkLocation)> = decode(chunk_index_data)
+        .map_err(|e| ParsingError::IndexDecodeError(e.to_string()))?;
 
     let chunk_index: HashMap<H, ChunkLocation> = bin_chunk_index
         .into_iter()

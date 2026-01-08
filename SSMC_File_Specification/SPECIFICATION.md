@@ -52,7 +52,7 @@ The header provides a quick summary of the archive's contents and the location o
 
 ### 2.2. File Manifest (Variable Size)
 
-This section contains all the information needed to reconstruct the original files' directory structure and content. It is a single data block created by serializing a `Vec<FileManifestParent>` using Bincode.
+This section contains all the information needed to reconstruct the original files' directory structure and content. It is a single data block created by serializing a `Vec<FileManifestParent>` using Bitcode.
 
 The corresponding Rust structures would be:
 
@@ -80,7 +80,7 @@ This section contains the raw binary data of the compression dictionary (e.g., g
 
 ### 2.4. Chunk Index (Variable Size)
 
-This section acts as the master lookup table for finding the data of any given chunk. It is a single data block created by serializing a `Vec<H, ChunkLocation>` using Bincode.
+This section acts as the master lookup table for finding the data of any given chunk. It is a single data block created by serializing a `Vec<H, ChunkLocation>` using Bitcode.
 
 * **Key (`H (u64 or u128)`):** The hash of a unique data chunk. The type H is determined by the Hash Type field in the header (e.g., `u64` for `xxhash3_64`, `u128` for `xxhash3_128`).
 * **Value (`ChunkLocation`):** A struct containing the location and compressed size of the chunk.
@@ -107,7 +107,7 @@ This is the final section of the file. It is a single, contiguous block of binar
 2.  From the header, get the `Manifest Offset` and `Manifest Length`.
 3.  Seek to the `Manifest Offset` in the file.
 4.  Read `Manifest Length` bytes into a buffer.
-5.  Deserialize the buffer using Bincode into a `Vec<FileManifestParent>`.
+5.  Deserialize the buffer using Bitcode into a `Vec<FileManifestParent>`.
 6.  Iterate through the resulting vector and print the `filename` from each `FileManifestParent`.
 
 ### To Extract a Specific File ("example.txt"):

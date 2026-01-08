@@ -63,7 +63,7 @@ pub fn parse_cue(
     content: &str
 ) -> Result<CueSheet, ParseError> {
     let mut cue_sheet = CueSheet {
-        source_filename: source_filename[..255].to_string(),
+        source_filename: source_filename.chars().take(255).collect(),
         files: Vec::new()
     };
     let mut current_file: Option<CueFile> = None;

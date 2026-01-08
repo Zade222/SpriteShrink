@@ -7,6 +7,9 @@
 //! compression and extraction operations.
 
 use std::collections::HashMap;
+use bitcode::{
+    Decode, Encode
+};
 use bytemuck::{Pod, Zeroable};
 use fastcdc::v2020::{Chunk};
 use serde::{Deserialize, Serialize};
@@ -25,7 +28,7 @@ use zerocopy::{IntoBytes, FromBytes};
 /// * `offset`: The starting position of the chunk in bytes, relative
 ///   to the beginning of the archive's data section.
 /// * `compressed_length`: The size of the compressed chunk in bytes.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Decode, Encode, Serialize, Deserialize)]
 pub struct ChunkLocation {
     pub offset: u64,
     pub compressed_length: u32,
@@ -110,7 +113,7 @@ pub struct FileData{
 /// * `chunk_count`: The total number of chunks that make up the file.
 /// * `chunk_metadata`: A vector of metadata for each chunk, sorted in
 ///   the order needed for reconstruction.
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Decode, Deserialize, Encode, Serialize)]
 pub struct FileManifestParent<H> {
     pub filename:       String,
     pub chunk_count:    u64,
@@ -288,7 +291,7 @@ impl<H> Default for SerializedData<H> {
 /// * `offset`: The starting position of this chunk in bytes within the
 ///   original, uncompressed file.
 /// * `length`: The size of the chunk in bytes.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Decode, Deserialize, Encode, Serialize)]
 pub struct SSAChunkMeta<H>{
     pub hash:   H,
     pub offset: u64,

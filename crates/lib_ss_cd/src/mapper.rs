@@ -6,13 +6,14 @@ use sprite_shrink::{
     Hashable
 };
 
+use crate::lib_error_handling::SpriteShrinkCDError;
+
 use crate::lib_structs::{
-    ContentBlock, CueFile, CueSheet, CueSheetType, MsfTime, RleSectorMap,
-    SectorMap, SectorType, Track, TrackType
+    ContentBlock, CueFile, CueSheet, ExceptionType, MsfTime, RleSectorMap, SectorAnalysis, SectorMap, SectorMapResult, SectorType, Track, TrackType
 };
 
 use crate::{
-    analyze::analyze_sector,
+    analyze::analyze_data_sector,
     stream::SectorRegionStream
 };
 
@@ -82,7 +83,7 @@ where
                     sectors_in_run_processed += segment_size;
                 }
             }
-            SectorType::Pregap => {
+            SectorType::PregapAudio => {
                 let mut stream = SectorRegionStream::new(
                     source,
                     absolute_sector_offset,
@@ -110,16 +111,16 @@ where
 }
 
 
-pub fn build_sector_map(
+pub fn analyze_and_map_disc(
     cue_sheet: &CueSheet,
     file_sec_count: &[u32],
     provider: &mut impl SectorDataProvider,
-) -> Result<SectorMap, MapperError> {
-    let mut normalized_sheet= if cue_sheet.files.len() > 1 {
+) -> Result<SectorMapResult, SpriteShrinkCDError> {
+    let normalized_sheet= if cue_sheet.files.len() > 1 {
         Cow::Owned(normalize_cue_sheet(
             cue_sheet,
             file_sec_count,
-            cue_sheet.source_filename.as_str()
+            &cue_sheet.source_filename
         )?)
     } else {
         Cow::Borrowed(cue_sheet)
@@ -128,6 +129,8 @@ pub fn build_sector_map(
     let total_sectors = file_sec_count.iter().sum::<u32>();
 
     let mut sectors = vec![SectorType::None; total_sectors as usize];
+    let mut exception_metadata: Vec<(u64, ExceptionType, Vec<u8>)> = Vec::new();
+
     let tracks = &normalized_sheet.files
         .first()
         .ok_or(MapperError::EmptyCueSheet)?
@@ -136,42 +139,182 @@ pub fn build_sector_map(
 
     while let Some(track) = tracks_iter.next() {
         let track_start_sector = get_track_start_sector(track)?;
-        let track_end_sector = match tracks_iter.peek() {
+        let content_start = get_track_content_start(track)?;
+        let next_track_start = match tracks_iter.peek() {
             Some(next_track) => get_track_start_sector(next_track)?,
             None => total_sectors,
         };
 
-        let coarse_type = match track.track_type {
-            TrackType::Audio => SectorType::Audio,
-            _ => SectorType::Mode1,
+        let coarse_pregap_type = match track.track_type {
+            TrackType::Audio => SectorType::PregapAudio,
+            TrackType::Mode1_2352 => SectorType::PregapMode1,
+            TrackType::Mode2_2352 => SectorType::PregapMode2,
         };
 
-        for i in track_start_sector..track_end_sector {
+        for i in track_start_sector..content_start {
+            if let Some(sector) = sectors.get_mut(i as usize) {
+                *sector = coarse_pregap_type;
+            }
+        }
+
+        let coarse_type = match track.track_type {
+            TrackType::Audio => SectorType::Audio,
+            TrackType::Mode1_2352 | TrackType::Mode2_2352 => SectorType::Mode1,
+        };
+
+        for i in content_start..next_track_start {
             if let Some(sector) = sectors.get_mut(i as usize) {
                 *sector = coarse_type;
             }
         }
     }
 
+    let mut subheader_map: Vec<(u32, u32, [u8; 8])> = Vec::new();
+    let mut current_subheader: Option<[u8; 8]> = None;
+    let mut current_sub_count = 0;
+    let mut current_run_start = 0;
+    let mut lba_map: Vec<(u32, u32)> = Vec::new();
+    let mut current_offset: Option<u32> = None;
+
     for i in 0..total_sectors {
-        if sectors[i as usize] == SectorType::Mode1 {
-            let sector_data = provider.read_sector(i)?;
-            let analysis_result = analyze_sector(&sector_data)?;
+        let sector_data = provider.read_sector(i)?;
+        if sectors[i as usize] == SectorType::Mode1 ||
+            sectors[i as usize] == SectorType::PregapMode1 ||
+            sectors[i as usize] == SectorType::PregapMode2
+        {
+            let analysis_result = analyze_data_sector(
+                &sector_data,
+                sectors[i as usize]
+            )?;
+
+            let minute = from_bcd(sector_data[12]);
+            let second = from_bcd(sector_data[13]);
+            let frame = from_bcd(sector_data[14]);
+
+            let header_lba = (minute as u32 * 60 * 75) +
+                (second as u32 * 75) + frame as u32;
+
+            if header_lba >= i {
+                let detected_offset = header_lba - i;
+
+                if let Some(curr) = current_offset {
+                    if curr != detected_offset {
+                        //offset changed (likely GD-ROM gap)
+                        lba_map.push((i, detected_offset));
+                        current_offset = Some(detected_offset);
+                    }
+                } else {
+                    lba_map.push((i, detected_offset));
+                    current_offset = Some(detected_offset);
+                }
+            }
+
+
+            let subheader_val = if matches!(
+                analysis_result.sector_type,
+                SectorType::Mode2Form1 | SectorType::Mode2Form2 |
+                SectorType::Mode2Form1Exception |
+                SectorType::Mode2Form2Exception |
+                SectorType::PregapMode1Exception |
+                SectorType::PregapMode2Exception
+            ) {
+                let mut sh = [0u8; 8];
+                sh.copy_from_slice(&sector_data[16..24]);
+                Some(sh)
+            } else {
+                let mut sh = [0u8; 8];
+                sh.copy_from_slice(&sector_data[2068..2076]);
+                Some(sh)
+            };
+
             sectors[i as usize] = analysis_result.sector_type;
+
+            /*if let Some(val) = subheader_val {
+                if let Some(curr) = current_subheader {
+                    if curr == val {
+                        current_sub_count += 1;
+                    } else {
+                        // Push previous run
+                        subheader_map.push((current_sub_count, curr));
+                        // Start new run
+                        current_subheader = Some(val);
+                        current_sub_count = 1;
+                    }
+                } else {
+                    current_subheader = Some(val);
+                    current_sub_count = 1;
+                    current_run_start = i;
+                }
+            }*/
+
+            if let Some(val) = subheader_val {
+                if let Some(curr) = current_subheader {
+                    if curr == val {
+                        if i == (current_run_start + current_sub_count){
+                            current_sub_count += 1;
+                        } else {
+                            subheader_map.push((
+                                current_run_start,
+                                current_sub_count,
+                                curr
+                            ));
+                            current_subheader = Some(val);
+                            current_sub_count = 1;
+                            current_run_start = i;
+                        }
+                    } else {
+                        subheader_map.push((
+                            current_run_start,
+                            current_sub_count,
+                            curr
+                        ));
+                        current_subheader = Some(val);
+                        current_sub_count = 1;
+                        current_run_start = i;
+                    }
+                } else {
+                    current_subheader = Some(val);
+                    current_sub_count = 1;
+                    current_run_start = i;
+                }
+            }
+
+            if let Some(data) = analysis_result.exception_data {
+                let excep_type = match analysis_result.sector_type {
+                    SectorType::Mode1Exception => ExceptionType::Mode1,
+                    SectorType::Mode2Form1Exception => ExceptionType::Mode2Form1,
+                    SectorType::Mode2Form2Exception => ExceptionType::Mode2Form2,
+                    _ => ExceptionType::None
+                };
+
+                if excep_type != ExceptionType::None {
+                    exception_metadata.push((i as u64, excep_type, data));
+                };
+            }
         }
+    }
+
+    if let Some(curr) = current_subheader {
+        subheader_map.push((current_run_start, current_sub_count, curr));
     }
 
     for sector in sectors.iter_mut() {
         if *sector == SectorType::None {
-            *sector = SectorType::Pregap;
+            *sector = SectorType::PregapAudio;
         }
     }
 
-    Ok(SectorMap { sectors })
+    Ok(SectorMapResult{
+        sector_map: SectorMap { sectors },
+        exception_metadata,
+        subheader_map,
+        normalized_cue_sheet: normalized_sheet.into_owned(),
+        lba_map
+    })
 }
 
-
-fn detect_cue_type(cue_sheet: &CueSheet) -> CueSheetType {
+//Marked for removal.
+/*fn detect_cue_type(cue_sheet: &CueSheet) -> CueSheetType {
     let mut last_sector = 0;
     for file in &cue_sheet.files {
         for track in &file.tracks {
@@ -184,7 +327,7 @@ fn detect_cue_type(cue_sheet: &CueSheet) -> CueSheetType {
         }
     }
     CueSheetType::Absolute
-}
+}*/
 
 
 fn get_track_content_start(track: &Track) -> Result<u32, MapperError> {
@@ -221,7 +364,7 @@ fn normalize_cue_sheet(
         ))
     }
 
-    let cue_type = detect_cue_type(source_sheet);
+    //let cue_type = detect_cue_type(source_sheet);
     let mut normalized_tracks = Vec::new();
     let mut file_start_offset: u32 = 0;
 
@@ -230,11 +373,13 @@ fn normalize_cue_sheet(
             let mut new_track = track.clone();
             new_track.indices.clear();
 
-            let offset = if cue_type == CueSheetType::Relative {
+            /*let offset = if cue_type == CueSheetType::Relative {
                 file_start_offset
             } else {
                 0
-            };
+            };*/
+
+            let offset = file_start_offset;
 
             for index in &track.indices {
                 let relative_sectors = index.position.to_total_frames();
@@ -247,9 +392,9 @@ fn normalize_cue_sheet(
             normalized_tracks.push(new_track);
         }
 
-        if cue_type == CueSheetType::Relative {
-            file_start_offset += file_sec_count[file_idx];
-        }
+        //if cue_type == CueSheetType::Relative {
+        file_start_offset += file_sec_count[file_idx];
+        //}
     }
 
     Ok(CueSheet {
@@ -312,4 +457,10 @@ pub fn rle_encode_map(sector_map: &SectorMap) -> RleSectorMap {
     runs.push((current_count, current_type));
 
     RleSectorMap { runs }
+}
+
+const fn from_bcd (bcd: u8) -> u8 {
+    let tens = (bcd >> 4) * 10;
+    let ones = bcd & 0x0F;
+    tens + ones
 }

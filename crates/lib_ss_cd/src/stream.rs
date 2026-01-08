@@ -146,6 +146,25 @@ impl Read for MultiBinStream {
         Ok(bytes_read)
     }
 }
+/*
+/// A stream adapter that provides `Read` and `Seek` access to a specific range
+/// of sectors within an underlying source.
+///
+/// This struct allows treating a contiguous block of sectors from a larger
+/// `Read + Seek` source (like a `File` or `MultiBinStream`) as if it were
+/// a standalone stream. It operates on 2352-byte sectors, which is the standard
+/// size for CD-ROM raw sectors.
+///
+/// It manages an internal buffer to read sectors one by one from the source
+/// and presents their data to the caller. Seeking and reading outside the
+/// defined sector range will result in an error or an early end-of-file.
+pub struct SectorRegionStream<'a, R: Read + Seek> {
+    pub source: &'a mut R,
+    pub current_sector_idx: u32,
+    pub end_sector_idx: u32,
+    pub sector_buffer: Box<[u8; 2352]>,
+    pub pos_in_sector: usize,
+}*/
 
 /// A stream adapter that provides `Read` and `Seek` access to a specific range
 /// of sectors within an underlying source.
@@ -159,12 +178,13 @@ impl Read for MultiBinStream {
 /// and presents their data to the caller. Seeking and reading outside the
 /// defined sector range will result in an error or an early end-of-file.
 pub struct SectorRegionStream<'a, R: Read + Seek> {
-    source: &'a mut R,
-    current_sector_idx: u32,
-    end_sector_idx: u32,
-    sector_buffer: Box<[u8; 2352]>,
-    pos_in_sector: usize,
-}
+       source: &'a mut R,
+       start_sector: u32,
+       end_sector: u32,
+       virtual_pos: u64,
+       sector_buffer: Box<[u8; 2352]>,
+       loaded_sector_idx: Option<u32>,
+   }
 
 
 impl<'a, R: Read + Seek> SectorRegionStream<'a, R> {
@@ -195,13 +215,14 @@ impl<'a, R: Read + Seek> SectorRegionStream<'a, R> {
     ) -> Self {
         Self {
             source,
-            current_sector_idx: start_absolute_sector,
-            end_sector_idx: start_absolute_sector.saturating_add(sector_count),
-            sector_buffer: Box::new([0; 2352]),
-            pos_in_sector: 2352,
+            start_sector: start_absolute_sector,
+            end_sector: start_absolute_sector.saturating_add(sector_count),
+            virtual_pos: 0,
+            sector_buffer: Box::new([0u8; 2352]),
+            loaded_sector_idx: None,
         }
     }
-
+    /*
     /// Reads the next complete 2352-byte sector from the underlying source
     /// into the internal sector buffer.
     ///
@@ -232,22 +253,51 @@ impl<'a, R: Read + Seek> SectorRegionStream<'a, R> {
 
         self.current_sector_idx += 1;
         Ok(())
+    }*/
+}
+
+impl<'a, R: Read + Seek> Seek for SectorRegionStream<'a, R> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        let region_size_sectors = self.end_sector
+            .saturating_sub(self.start_sector);
+        let region_size_bytes = region_size_sectors as u64 * 2352;
+
+        let new_pos = match pos {
+            SeekFrom::Start(p) => p as i64,
+            SeekFrom::End(p) => region_size_bytes as i64 + p,
+            SeekFrom::Current(p) => self.virtual_pos as i64 + p,
+        };
+
+        // Ensure the new position is within the bounds of the region.
+        if new_pos < 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "seek to a negative or overflowing position",
+            ));
+        }
+
+        self.virtual_pos = new_pos as u64;
+        Ok(self.virtual_pos)
     }
 }
 
 
 impl<'a, R: Read + Seek> Read for SectorRegionStream<'a, R> {
-    /// Reads bytes from the `SectorRegionStream` into the provided buffer.
+    /// Reads bytes from the stream's current virtual position into the
+    /// provided buffer.
     ///
-    /// This method implements the `std::io::Read` trait, allowing the
-    /// `SectorRegionStream` to behave as a standard byte stream. It fills
-    /// `buf` by drawing data from its internal `sector_buffer`.
+    /// This method implements the `std::io::Read` trait. It uses the stream's
+    /// virtual position (`self.virtual_pos`), which can be manipulated by
+    /// `seek`, to determine where to read from within the defined sector
+    /// region.
     ///
-    /// When the `sector_buffer` is exhausted, it transparently calls
-    /// `process_next_sector` to load the subsequent 2352-byte sector from the
-    /// underlying `source`. Reading will continue until `buf` is full,
-    /// no more data is available within the defined sector region, or
-    /// an I/O error occurs.
+    /// Based on the virtual position, it calculates which underlying sector
+    /// needs to be read. If that sector is not already loaded into the
+    /// internal buffer, this method will perform a `seek` and `read_exact`
+    /// on the main `source` to load it.
+    ///
+    /// The method correctly handles read requests that span across multiple
+    /// sector boundaries, loading new sectors as needed to fill the buffer.
     ///
     /// # Arguments
     ///
@@ -257,35 +307,54 @@ impl<'a, R: Read + Seek> Read for SectorRegionStream<'a, R> {
     ///
     /// A `Result` which is:
     /// - `Ok(usize)`: The number of bytes successfully read into `buf`. A
-    ///   return value of `0` indicates that the end of the
-    ///   `SectorRegionStream` has been reached (i.e., all sectors in the
-    ///   defined region have been read).
-    /// - `Err(io::Error)`: If an I/O error occurs during the read operation,
-    ///   propagated from the underlying `source` or `process_next_sector`.
+    ///   return value of `0` indicates that the virtual cursor is at or beyond
+    ///   the end of the defined region.
+    /// - `Err(io::Error)`: If an I/O error occurs on the underlying `source`
+    ///   during a seek or read operation.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let region_size_bytes = (self.end_sector - self.start_sector) as u64 * 2352;
         let mut bytes_written_to_buf = 0;
 
         while bytes_written_to_buf < buf.len() {
-            if self.pos_in_sector >= self.sector_buffer.len() {
-                match self.process_next_sector() {
-                    Ok(()) => continue,
-                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                    Err(e) => return Err(e),
-                }
+            if self.virtual_pos >= region_size_bytes {
+                return Ok(0);
             }
 
-            let rem_in_sect = self.sector_buffer.len() - self.pos_in_sector;
-            let rem_in_caller_buf = buf.len() - bytes_written_to_buf;
-            let bytes_to_copy = std::cmp::min(rem_in_sect, rem_in_caller_buf);
+            let sector_num_in_region = (self.virtual_pos / 2352) as u32;
+            let absolute_sector_to_load = self.start_sector + sector_num_in_region;
 
-            let source_slice = &self.sector_buffer
-                [self.pos_in_sector..self.pos_in_sector + bytes_to_copy];
-            let dest_slice = &mut buf
-                [bytes_written_to_buf..bytes_written_to_buf + bytes_to_copy];
+            if self.loaded_sector_idx != Some(absolute_sector_to_load) {
+                if absolute_sector_to_load >= self.end_sector {
+                    return Err(io::Error::other(
+                        "Internal logic error: attempted to read past region boundary"
+                    ))
+                }
+
+                let seek_pos = absolute_sector_to_load as u64 * 2352;
+                self.source.seek(SeekFrom::Start(seek_pos))?;
+                self.source.read_exact(self.sector_buffer.as_mut())?;
+                self.loaded_sector_idx = Some(absolute_sector_to_load);
+            }
+
+            let pos_in_sector = (self.virtual_pos % 2352) as usize;
+
+            let bytes_in_buffer_available = 2352 - pos_in_sector;
+            let rem_in_caller_buf = buf.len() - bytes_written_to_buf;
+            let bytes_to_copy = std::cmp::min(
+                bytes_in_buffer_available,
+                rem_in_caller_buf
+            );
+
+            let source_slice = &self.sector_buffer[
+                pos_in_sector..pos_in_sector + bytes_to_copy
+            ];
+            let dest_slice = &mut buf[
+                bytes_written_to_buf..bytes_written_to_buf + bytes_to_copy
+            ];
             dest_slice.copy_from_slice(source_slice);
 
+            self.virtual_pos += bytes_to_copy as u64;
             bytes_written_to_buf += bytes_to_copy;
-            self.pos_in_sector += bytes_to_copy;
         }
 
         Ok(bytes_written_to_buf)
@@ -379,16 +448,18 @@ impl<'a, R: Read + Seek> UserDataStream<'a, R> {
             let sector_type = &self.sector_map.sectors[self.cur_sec_idx as usize];
 
             let user_data_range = match sector_type {
-                SectorType::Mode1 => Some(16..2064),
+                SectorType::Mode1 | SectorType::Mode1Exception =>
+                    Some(16..2064),
                 SectorType::Mode2Form1 | SectorType::Mode2Form1Exception =>
                     Some(24..2072),
-                SectorType::Mode2Form2 => Some(24..2348),
-                //Personal note, exceptions likely shouldn't be skipped.
-                // Mode2Form1Exception is used for LibCrypt DRM and needs to be
-                // retained with user_data.
-                // TODO, potentially reassess this logic.
-
-                // All other types (Audio, Pregap) are skipped.
+                SectorType::Mode2Form2 | SectorType::Mode2Form2Exception =>
+                    Some(24..2348),
+                SectorType::PregapMode1 | SectorType::PregapMode1Exception =>
+                    Some(16..2064),
+                SectorType::PregapMode2 | SectorType::PregapMode2Exception =>
+                    Some(24..2072),
+                SectorType::ZeroedData => Some(0..2352),
+                // All other types (Audio, Pregap and PregapAudio) are skipped.
                 _ => None,
             };
 

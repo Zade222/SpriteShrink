@@ -28,6 +28,7 @@ use crate::lib_structs::{
 use crate::parsing::{
     parse_file_chunk_index, parse_file_header, parse_file_metadata,
 };
+use bitcode::Decode;
 use serde::{Deserialize};
 
 /// Parses the file chunk index from a raw byte slice.
@@ -579,7 +580,7 @@ fn setup_chunk_index_lookup_internal<H>(
     map_ptr: *mut c_void
 ) -> FFIResult
 where
-    for<'de> H: Eq + std::hash::Hash + Deserialize<'de>,
+    for<'de> H: Eq + std::hash::Hash + Deserialize<'de> + Decode<'de>,
 {
     let raw_chunk_index_data = unsafe {
         slice::from_raw_parts(

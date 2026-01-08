@@ -12,6 +12,7 @@ path = "src/main.rs"
 sprite_shrink = {path = "../lib_sprite_shrink"}
 sprite_shrink_cd = {path = "../lib_ss_cd"}
 
+bitcode = "0.6"
 bytesize = "2.0"
 clap = { version = "4.5", features = ["derive"] }
 confy = "1.0"
@@ -36,6 +37,7 @@ tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["fmt", "json"] }
 xxhash-rust = {version = "0.8", features = ["xxh3"] }
+zstd-sys = { version = "2.0", features = ["zdict_builder", "experimental", "zstdmt"] }
 
 [features]
 dhat-heap = ["dhat"]

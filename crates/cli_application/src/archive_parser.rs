@@ -12,6 +12,7 @@ use std::{
     path::Path,
 };
 
+use bitcode::Decode;
 use serde::Serialize;
 
 use sprite_shrink::{
@@ -80,7 +81,8 @@ where
         + Ord
         + Display
         + Serialize
-        + for<'de> serde::Deserialize<'de>,
+        + for<'de> serde::Deserialize<'de>
+        + for<'de> Decode<'de>,
 {
     //Read file manifest from file.
     let bin_vec_manifest = read_file_data(
@@ -152,7 +154,8 @@ where
         + Ord
         + Display
         + Serialize
-        + for<'de> serde::Deserialize<'de>,
+        + for<'de> serde::Deserialize<'de>
+        + for<'de> Decode<'de>,
     {
     //Read the chunk_index from the file.
     let bin_vec_chunk_index = read_file_data(

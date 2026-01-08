@@ -596,8 +596,10 @@ impl<H: Hash + Eq + Copy + Display + Send + Sync + 'static> TempCache<H> {
         match &mut *backend_guard {
             CacheBackend::InMemory{map, data_size} => {
                 for (key, data) in items {
-                    map.entry(*key).or_insert_with(|| data.to_vec());
-                    *data_size += data.len() as u64;
+                    if let dashmap::mapref::entry::Entry::Vacant(entry) = map.entry(*key) {
+                        entry.insert(data.to_vec());
+                        *data_size += data.len() as u64;
+                    }
                 }
             }
             CacheBackend::OnDisk {

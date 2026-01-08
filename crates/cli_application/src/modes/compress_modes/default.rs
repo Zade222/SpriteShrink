@@ -7,7 +7,6 @@
 //! verify, and compress the unique data into a final archive file.
 
 use std::{
-    cmp::min,
     fmt::{Debug, Display},
     fs::{File, create_dir_all},
     path::PathBuf,
@@ -17,6 +16,7 @@ use std::{
     thread, time::{Duration}
 };
 
+use bitcode::Encode;
 use dashmap::DashMap;
 use directories::ProjectDirs;
 use indicatif::{ProgressBar, ProgressStyle};
@@ -30,8 +30,6 @@ use sprite_shrink::{
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest,Sha512};
-use sysinfo::System;
-use thread_priority::*;
 use tracing::{
     debug,
     info,
@@ -48,7 +46,8 @@ use crate::{
     storage_io::{
         append_data_to_file, calc_tot_input_size, get_cache_paths,
         write_final_archive, TempCache
-    }
+    },
+    utils::{process_in_memory_check, set_priority},
 };
 
 /// Executes the file compression and archiving process.
@@ -107,57 +106,14 @@ where
     H: Hashable
         + Debug
         + Display
+        + Encode
         + Ord
         + Serialize
         + for<'de> serde::Deserialize<'de>
 {
     debug!("Running default compression mode.");
 
-    /*Verify if the list of files paths is empty, throw error if true. */
-    if file_paths.is_empty() {
-        return Err(CliError::NoFilesFound());
-    }
-
-    let out_dir = args.output
-        .as_ref()
-        .unwrap()
-        .parent()
-        .unwrap();
-
-    if !out_dir.exists() && !args.force{
-        return Err(CliError::InvalidOutputPath())
-    } else {
-        create_dir_all(out_dir)?;
-    }
-
-    /*Set OS process priority to be undertypical user facing application
-    priority.*/
-    #[cfg(target_os = "linux")]
-    {
-        let priority = ThreadPriority::Crossplatform(
-            30.try_into().unwrap()
-        );
-
-        set_current_thread_priority(priority)?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let priority = ThreadPriority::Crossplatform(
-            30.try_into().unwrap()
-        );
-
-        set_current_thread_priority(priority)?;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let priority = ThreadPriority::Os(
-            WinAPIThreadPriority::BelowNormal.into()
-        );
-
-        set_current_thread_priority(priority)?;
-    }
+    set_priority()?;
 
     let input_data_size = calc_tot_input_size(&file_paths)?;
 
@@ -202,9 +158,9 @@ where
     /*Numerical compression level pulled from the args.*/
     let level: i32 = args.compression_level as i32;
 
-    /*Stores the size of threads used by the parallel task of running
+    /*Stores the amount of threads used by the parallel task of running
     process_file_in_memory function.*/
-    let process_threads = 0usize;
+    let process_threads = args.threads.map_or(0, |count| count);
 
     //Callback for getting all keys (hashes) in cache
     let key_ret_cb = {
@@ -664,6 +620,8 @@ where
             {final_output_path:?}"
     );
 
+
+
     Ok(())
 }
 
@@ -742,8 +700,10 @@ where
         None
     };
 
+    const BATCH_SIZE: usize = 1000;
+
     //Initialize flume channels for inter thread communication
-    let (sender, receiver) = bounded(1000);
+    let (sender, receiver) = bounded(BATCH_SIZE);
 
     let (batch_sender, batch_receiver) = bounded::<Vec<(H, Vec<u8>)>>(100);
 
@@ -826,7 +786,6 @@ where
         Ok(())
     });
 
-    const BATCH_SIZE: usize = 1000;
     let mut chunk_batch: Vec<(H, Vec<u8>)> = Vec::with_capacity(BATCH_SIZE);
 
     //While workers are processing files, loop until done.
@@ -988,49 +947,4 @@ where
         chunk_count,
         chunk_meta
     })
-}
-
-/// Determines whether the compression process should use an in-memory
-/// cache or a temporary file-based cache on disk.
-///
-/// This function assesses the trade-off between performance and memory usage.
-/// Using an in-memory cache is significantly faster but requires enough
-/// available RAM to hold all unique chunk data. Using a file-based cache
-/// is slower due to disk I/O but supports processing datasets much larger
-/// than the available memory.
-///
-/// The decision is made based on a heuristic: it checks if 80% of the
-/// system's currently available memory is greater than the total size of the
-/// input data plus a conservative buffer. This buffer accounts for the
-/// overhead of other data structures used during the compression pipeline,
-/// such as the file manifest and various temporary collections.
-///
-/// # Arguments
-///
-/// * `input_data_size`: The total combined size in bytes of all files to be
-///   processed.
-///
-/// # Returns
-///
-/// * `true` if there is likely sufficient memory to safely use an in-memory
-///   cache.
-/// * `false` if it is safer to use a temporary cache on disk to avoid
-///   potential out-of-memory errors.
-fn process_in_memory_check (
-    input_data_size: u64,
-) -> bool {
-    let mut system_info = System::new_all();
-    system_info.refresh_all();
-
-    let free_mem = system_info.available_memory();
-
-    if (0.8 * free_mem as f64) > (input_data_size +
-        min(input_data_size, u32::MAX as u64) +
-        ((u32::MAX / 4) as u64)) as f64 {
-            debug!("Processing in memory.");
-            true
-        } else {
-            debug!("Processing via disk cache.");
-            false
-        }
 }

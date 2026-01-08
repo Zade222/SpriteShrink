@@ -14,6 +14,7 @@ use std::{
     thread
 };
 
+use bitcode::Encode;
 use fastcdc::v2020::{Chunk, FastCDC, Normalization};
 use thiserror::Error;
 use sha2::{Digest,Sha512};
@@ -645,7 +646,7 @@ pub fn test_compression<E, F, H>(
 where
     E: std::error::Error + IsCancelled + Send + Sync + 'static,
     F: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
-    H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
+    H: Copy + Debug + Eq + Encode + Hash + Send + Sync + 'static,
 {
     //Prepare the samples for dictionary generation.
     let (samples_for_dict, sample_sizes) = build_train_samples(

@@ -16,6 +16,7 @@ use std::{
         Arc, atomic::{AtomicBool, Ordering},
     },
 };
+use bitcode::Decode;
 use rayon::join;
 use serde::{Deserialize, Serialize};
 use tracing::{
@@ -182,8 +183,14 @@ fn extract_data<H>(
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
 where
-    H: Hashable + Ord + Display + Serialize + for<'de> Deserialize<'de> + Eq +
-        Hash,
+    H: Hashable +
+        Display +
+        Eq +
+        Hash +
+        Ord +
+        Serialize +
+        for<'de> Deserialize<'de> +
+        for<'de> Decode<'de>,
 {
     /*Stores the length of each piece of the metadata from the archive as
      provided by the header.*/

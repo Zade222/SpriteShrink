@@ -14,6 +14,7 @@ use std::{
 use sprite_shrink::{
     IsCancelled, SpriteShrinkError
 };
+use sprite_shrink_cd::SpriteShrinkCDError;
 use directories::ProjectDirs;
 use range_parser::RangeError;
 use thiserror::Error;
@@ -87,6 +88,9 @@ pub enum CliError {
 
     #[error("Library error: {0}")]
     SpriteShrinkError(SpriteShrinkError),
+
+    #[error("Library error: {0}")]
+    SpriteShrinkCDError(#[from] SpriteShrinkCDError),
 
     #[error("Range parse error {0}")]
     RangeParse(#[from] RangeError),

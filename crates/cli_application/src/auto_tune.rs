@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant}
 };
 
+use bitcode::Encode;
 use indicatif::{ProgressBar, ProgressStyle};
 use sprite_shrink::{
     Hashable, SerializedData, serialize_uncompressed_data, test_compression
@@ -35,7 +36,7 @@ where
         + Send
         + Sync
         + 'static,
-    H: Hashable + Debug
+    H: Hashable + Debug + Encode
 {
     let timeout_dur = args.autotune_timeout.
         map(Duration::from_secs);
@@ -133,7 +134,8 @@ where
     H: Hashable
         + Debug
         + Display
-        + Ord,
+        + Ord
+        + Encode,
     F: FnMut(u64) -> Result<(FileData<H>, Arc<TempCache<H>>), CliError>,
 {
     let timeout_dur = args.autotune_timeout.

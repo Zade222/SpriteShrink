@@ -8,7 +8,7 @@
 //! other components of the CLI application.
 
 use std::{
-    fs,
+    fs::{self, create_dir_all},
     sync::{
         Arc, atomic::{AtomicBool, Ordering}
     },
@@ -32,14 +32,10 @@ use modes::{
 
 mod archive_parser;
 use archive_parser::{get_max_rom_index};
-
 mod arg_handling;
 use arg_handling::{merge_config_and_args, validate_args, Args};
-
 mod auto_tune;
-
 mod cli_types;
-
 mod error_handling;
 use error_handling::{
     CliError, initiate_logging, offset_to_line_col};
@@ -48,6 +44,7 @@ use crate::{cli_types::SpriteShrinkConfig, modes::compress_modes::run_optical_co
     cleanup_old_logs, files_from_dirs, load_config, organize_paths
     }
 };
+mod utils;
 
 #[cfg(feature = "dhat-heap")]
 use dhat::Profiler;
@@ -166,6 +163,24 @@ fn run(
         }
         (None, false) => {
             debug!("Mode: Compress");
+
+            /*Verify if the list of files paths is empty, throw error if true. */
+            if file_paths.is_empty() {
+                return Err(CliError::NoFilesFound());
+            }
+
+            let out_dir = args.output
+                .as_ref()
+                .unwrap()
+                .parent()
+                .unwrap();
+
+            if !out_dir.exists() && !args.force{
+                return Err(CliError::InvalidOutputPath())
+            } else {
+                create_dir_all(out_dir)?;
+            }
+
             let hash_bit_length = args.hash_bit_length.unwrap_or(64);
 
             match args.mode.as_str() {

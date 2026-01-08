@@ -20,6 +20,9 @@ use std::{
     thread
 };
 
+use bitcode::{
+    Encode, encode
+};
 use thiserror::Error;
 use serde::Serialize;
 use zerocopy::IntoBytes;
@@ -279,7 +282,7 @@ pub fn compress_chunks<ERead, EWrite, H, R, W>(
 where
     ERead: std::error::Error + IsCancelled + Send + Sync + 'static,
     EWrite: std::error::Error + IsCancelled + Send + Sync + 'static,
-    H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
+    H: Copy + Debug + Encode + Eq + Hash + Send + Sync + 'static,
     R: Fn(&[H]) -> Result<Vec<(H, Vec<u8>)>, ERead> + Send + Sync + 'static,
     W: Fn(&[u8]) -> Result<(), EWrite> + Send + Sync + 'static,
 {
@@ -528,7 +531,7 @@ where
 impl<'a, E, H, R, W> ArchiveBuilder<'a, E, H, R, W>
 where
     E: std::error::Error + IsCancelled + Send + Sync + 'static,
-    H: Copy + Debug + Eq + Hash + Serialize + Send + Sync + 'static + Display
+    H: Copy + Debug + Encode + Eq + Hash + Serialize + Send + Sync + 'static + Display
         + Ord,
     R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
     W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
@@ -798,17 +801,11 @@ where
         chunk_index
         dictionary*/
 
-        let config = bincode::config::standard();
-
-        let bin_file_manifest = bincode::serde::encode_to_vec(
-        &ser_file_manifest, config
-        ).map_err(|e| ArchiveError::ManifestEncodeError(e.to_string()))?;
+        let bin_file_manifest = encode(&ser_file_manifest);
 
         drop(ser_file_manifest);
 
-        let bin_chunk_index = bincode::serde::encode_to_vec(
-        &chunk_index, config
-        ).map_err(|e| ArchiveError::IndexEncodeError(e.to_string()))?;
+        let bin_chunk_index = encode(&chunk_index);
 
         drop(chunk_index);
 

@@ -23,6 +23,9 @@ use tracing::{
 use sprite_shrink::{
     FileManifestParent, Hashable, SSAChunkMeta
 };
+use sprite_shrink_cd::{
+    ContentBlock, DataChunkLayout, ExceptionInfo, RleSectorMap
+};
 
 
 pub enum CacheBackend<H: Hash + Eq> {
@@ -44,6 +47,11 @@ pub struct CacheInfo {
     pub id: u32,
 }
 
+#[derive(Debug)]
+pub enum CacheTarget {
+    Data,
+    Audio,
+}
 
 /// A message containing a single data chunk and its hash.
 ///
@@ -59,6 +67,27 @@ pub struct ChunkMessage<H: Hashable> {
     pub chunk_hash: H,
     pub chunk_data: Vec<u8>,
     pub chunk_size: usize
+}
+
+pub struct DiscExceptionBlob {
+    pub title: String,
+    pub exception_index: HashMap<u64, ExceptionInfo>,
+    pub disc_blob: Vec<u8>
+}
+
+
+#[derive(Debug)]
+pub struct DiscCompleteData<H: Hashable> {
+    pub title: String,
+    pub normalized_cue_sheet: String,
+    pub lba_map: Vec<(u32, u32)>,
+    pub rle_sector_map: RleSectorMap,
+    pub block_map: Vec<ContentBlock<H>>,
+    pub data_stream_layout: Vec<DataChunkLayout<H>>,
+    pub exception_index: HashMap<u64, ExceptionInfo>,
+    pub exception_blob: Vec<u8>,
+    pub subheader_map: Vec<(u32, u32, [u8; 8])>,
+    pub verification_hash: [u8; 64],
 }
 
 /// A container for all metadata generated after processing a single file.
@@ -109,6 +138,14 @@ pub struct FileData<H: Hashable>{
 pub struct LocationData{
     pub offset: u64,
     pub length: u32
+}
+
+#[derive(Debug)]
+pub struct OpticalChunkMessage<H: Hashable> {
+    pub cache_target: CacheTarget,
+    pub chunk_hash: H,
+    pub chunk_data: Vec<u8>,
+    pub chunk_size: usize
 }
 
 /// Defines cross-platform identifiers for the application.
