@@ -480,7 +480,7 @@ where
 
     let (chunk_sender, chunk_receiver) = flume::bounded::<
         OpticalChunkMessage<H>
-    >(1000);
+    >(BATCH_SIZE);
 
     let (batch_sender, batch_receiver) = bounded::<(
         CacheTarget,

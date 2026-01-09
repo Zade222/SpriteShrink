@@ -41,7 +41,7 @@ use crate::{
 pub fn process_in_memory_check (
     input_data_size: u64,
 ) -> bool {
-    let mut system_info = System::new_all();
+    let mut system_info = System::new();
     system_info.refresh_all();
 
     let free_mem = system_info.available_memory();

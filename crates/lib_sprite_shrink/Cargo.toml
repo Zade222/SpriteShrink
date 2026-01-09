@@ -10,20 +10,20 @@ name = "sprite_shrink"
 crate-type = ["cdylib", "rlib", "staticlib"]
 
 [dependencies]
-bitcode = "0.6"
-bytemuck = { version = "1.23", features = ["derive"] }
-dashmap = "6.1"
-fastcdc = "3.2"
-flume = "0.11"
-libc = "0.2.174"
-rayon = "1.10"
-serde = { version = "1.0", features = ["derive"] }
-sha2 = "0.10"
-thiserror = "2.0"
-xxhash-rust = {version = "0.8", features = ["xxh3"] }
-zerocopy = { version = "0.8", features = ["derive"] }
-zstd = { version = "0.13", features = ["zdict_builder"] }
-zstd-sys = { version = "2.0", features = ["zdict_builder", "experimental", "zstdmt"] }
+bitcode = { version = "0.6", default-features = false, features = ["derive"] }
+bytemuck = { version = "1.23", default-features = false, features = ["derive"] }
+dashmap = { version = "6.1", default-features = false }
+fastcdc = { version = "3.2", default-features = false }
+flume = { version = "0.11", default-features = false }
+libc =  { version = "0.2.174", default-features = false }
+rayon = { version = "1.10", default-features = false }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
+sha2 = { version = "0.10", default-features = false}
+thiserror = { version = "2.0", default-features = false}
+xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }
+zerocopy = { version = "0.8", default-features = false, features = ["derive"] }
+zstd = { version = "0.13", default-features = false, features = ["zdict_builder"] }
+zstd-sys = { version = "2.0", default-features = false, features = ["experimental"] }
 
 [build-dependencies]
 cbindgen = "0.29"
