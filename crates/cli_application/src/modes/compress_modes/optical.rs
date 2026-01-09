@@ -23,26 +23,29 @@ use directories::ProjectDirs;
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::bounded;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha512};
+use serde::{Serialize};
+use sha2::{Digest};
 use sprite_shrink::Hashable;
 use tracing::{
     debug,
 };
 use sprite_shrink::{
-    SS_SEED, FileManifestParent, test_compression, dashmap_values_to_vec
+    SS_SEED, ChunkLocation, FileManifestParent, test_compression,
+    dashmap_values_to_vec
 };
 use sprite_shrink_cd::{
     ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
     FileSizeProvider, ExceptionInfo, MultiBinStream,
     SectorDataProvider, SectorRegionStream, SectorMap, SectorType,
     UserDataStream, analyze_cue_sheets, analyze_and_map_disc,
-    resolve_file_sector_counts, rle_encode_map, verify_disc_integrity
+    compress_audio_blocks, resolve_file_sector_counts, rle_encode_map,
+    verify_disc_integrity
 };
 
 use crate::{
     arg_handling::Args,
-    cli_types::{DiscCompleteData, DiscExceptionBlob}
+    cli_types::{DiscCompleteData, DiscExceptionBlob, TempFileGuard},
+    storage_io::append_data_to_file,
 };
 use crate::cli_types::{
     APPIDENTIFIER, CacheTarget, OpticalChunkMessage
@@ -152,6 +155,10 @@ where
 
     let cache_info = get_cache_paths();
 
+    let pid = cache_info.id;
+
+    const BUFFER_SIZE: usize = 1000;
+
     let base_path = cache_info.cache_path.with_extension("");
     let stem = base_path.file_name().unwrap().to_str().unwrap();
 
@@ -240,13 +247,13 @@ where
         audio_temp_cache.get_tot_data_size() +
         tot_exception_data;
 
-
+    let audio_data_size = audio_temp_cache.get_tot_data_size();
 
     let total_input_size = cue_analysis.total_data_size;
 
     println!("Total input data size = {total_input_size}");
 
-    println!("Reg data size = {}", data_temp_cache.get_tot_data_size());
+    println!("Reg data size = {}", audio_data_size);
     println!("Audio data size = {}", audio_temp_cache.get_tot_data_size());
     println!("Exception data size = {}", tot_exception_data);
     println!("Processed data size = {data_sum}");
@@ -293,17 +300,17 @@ where
         get_chunk_data_for_test
     )?;
 
-    let size = audio_temp_cache.get_tot_data_size() + tot_exception_data + compressed_size as u64;
+    let size = tot_exception_data + compressed_size as u64;
 
     println!("Compressed data size = {compressed_size}");
-    println!("Compressed data + uncompressed audio and exception data = {size}");
+    println!("Compressed data + exception data = {size}");
 
     let mut ser_man = dashmap_values_to_vec(&disc_manifiests);
 
     ser_man.sort_by(|a, b| a.title.cmp(&b.title));
 
 
-
+    //This can be parallelized to accelerate the validation step.
     for manifest in ser_man {
         println!("Verifying {}", manifest.title);
         let arc_man = Arc::new(manifest);
@@ -372,6 +379,75 @@ where
     }
 
     println!("Verification passed!");
+
+    //Compress audio
+    let audio_block_index: Vec<(H, ChunkLocation)> = Vec::new();
+
+    let audio_tmp_file_path = Arc::new(
+        args.output
+        .as_ref()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("audio_{pid}"))
+        .with_extension("tmp")
+    );
+
+    let _audio_tmp_guard = TempFileGuard::new(&audio_tmp_file_path);
+
+    if audio_data_size > 0 {
+        let audio_chunk_hashes = audio_temp_cache.get_keys()?;
+
+        let mut audio_write_buffer: Vec<u8> = Vec::with_capacity(
+            BUFFER_SIZE * 2352 * 16
+        );
+
+        let mut audio_block_count = 0usize;
+
+        let get_audio_data_for_lib = {
+            let cb = Arc::clone(&audio_ret_cb);
+            let lib_running_clone = Arc::clone(&running);
+            move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
+                if !lib_running_clone.load(Ordering::SeqCst) {
+                    return Err(CliError::Cancelled);
+                }
+
+                let ret_chunks = cb(hashes)?;
+
+                Ok(ret_chunks)
+            }
+        };
+
+        let tmp_audio_write_cb = {
+            let tfp_clone = Arc::clone(&audio_tmp_file_path);
+            move |chunk: &[u8], flush_flag: bool| -> Result<(), CliError>{
+                audio_write_buffer.extend_from_slice(chunk);
+                audio_block_count += 1;
+
+                if (audio_block_count >= BUFFER_SIZE) || flush_flag {
+                    append_data_to_file(&tfp_clone, &audio_write_buffer)?;
+                    audio_write_buffer.clear();
+                    audio_block_count = 0;
+                };
+
+                Ok(())
+            }
+        };
+
+        println!("Audio block hash count = {}", audio_chunk_hashes.len());
+
+        let audio_block_index = compress_audio_blocks(
+            audio_chunk_hashes,
+            get_audio_data_for_lib,
+            tmp_audio_write_cb,
+            process_threads
+        )?;
+
+        let audio_blob_size = audio_block_index.last().unwrap().1.compressed_length as u64 +
+            audio_block_index.last().unwrap().1.offset;
+
+        println!("Audio blob size = {}", audio_blob_size);
+    }
 
 
 

@@ -8,6 +8,11 @@ mod cue_parser;
 
 mod ecc;
 
+mod flac;
+pub use flac::{
+    compress_audio_block, compress_audio_blocks, decompress_flac_block
+};
+
 mod lib_error_handling;
 pub use lib_error_handling::SpriteShrinkCDError;
 
@@ -24,10 +29,12 @@ pub use mapper::{
 
 mod reconstruction;
 pub use reconstruction::{
-    verify_disc_integrity
+    rebuild_sector_bitwise, rebuild_sector_simd, verify_disc_integrity
 };
 
 mod stream;
 pub use stream::{
     MultiBinStream, SectorRegionStream, UserDataStream
 };
+
+mod util;

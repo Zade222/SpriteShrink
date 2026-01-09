@@ -4,6 +4,7 @@ use crate::{
     analyze::AnalysisError,
     cue_parser::ParseError,
     ecc::EccError,
+    flac::FlacError,
     mapper::MapperError,
     reconstruction::ReconstructionError,
 };
@@ -15,6 +16,9 @@ pub enum SpriteShrinkCDError {
 
     #[error("An ECC error occurred.")]
     Ecc(#[from] EccError),
+
+    #[error("A flac error occurred. {0}")]
+    Flac(#[from] FlacError),
 
     #[error("An external error occurred: {0}")]
     External(Box<dyn std::error::Error + Send + Sync>),

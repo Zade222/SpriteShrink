@@ -1,5 +1,6 @@
 use std::{
-    collections::{HashMap,VecDeque}, io::Read, sync::Arc, thread, time::{Duration, Instant}
+    collections::{HashMap, VecDeque},
+    sync::Arc,
 };
 
 use crate::{
@@ -7,11 +8,11 @@ use crate::{
     ecc::{calc_ecc_simd_inplace, calc_ecc_bitwise, calculate_edc},
     lib_error_handling::SpriteShrinkCDError,
     lib_structs::{
-        ContentBlock, DataChunkLayout, DecodedSectorInfo, DiscManifest,
-        ExceptionInfo, MsfTime, ReconstructionContext, ReconstructionInfo,
-        RleSectorMap, SectorType, StreamChunkInfo
+        DecodedSectorInfo, DiscManifest, ExceptionInfo, MsfTime,
+        ReconstructionContext, ReconstructionInfo, RleSectorMap, SectorType,
+        StreamChunkInfo
     },
-
+    util::{spawn_data_fetcher},
 };
 
 use flume::{
@@ -218,77 +219,6 @@ impl<'a, H: Copy + Eq> ReconstructionContext<'a, H> {
 }
 
 
-fn spawn_audio_fetcher<H, A, E>(
-    blocks: Arc<Vec<ContentBlock<H>>>,
-    get_audio_blocks: A,
-    tx: flume::Sender<Result<Vec<Vec<u8>>, SpriteShrinkCDError>>,
-    batch_size: usize,
-) -> thread::JoinHandle<()>
-where
-    H: Hashable,
-    A: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
-    E: std::error::Error + Send + Sync + 'static,
-{
-    thread::spawn(move || {
-        for batch_configs in blocks.chunks(batch_size) {
-            let hashes: Vec<H> = batch_configs
-                .iter()
-                .map(|b| b.content_hash)
-                .collect();
-            match get_audio_blocks(&hashes) {
-                Ok(data) => {
-                    if tx.send(Ok(data)).is_err() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(
-                        SpriteShrinkCDError::External(Box::new(e))
-                    ));
-                    break;
-                }
-            }
-        }
-    })
-}
-
-
-fn spawn_data_fetcher<H, D, E>(
-    layout: Arc<Vec<DataChunkLayout<H>>>,
-    get_data_chunks: D,
-    tx: flume::Sender<Result<Vec<Vec<u8>>, SpriteShrinkCDError>>,
-    batch_size: usize,
-) -> thread::JoinHandle<()>
-where
-    H: Hashable,
-    D: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
-    E: std::error::Error + Send + Sync + 'static,
-{
-    thread::spawn(move || {
-        for batch_configs in layout.chunks(batch_size) {
-            let hashes: Vec<H> = batch_configs
-                .iter()
-                .map(|c| c.hash)
-                .collect();
-            match get_data_chunks(&hashes) {
-                Ok(data) => {
-                    if tx.send(Ok(data)).is_err() {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Data fetcher callback error: {}", e);
-                    let _ = tx.send(Err(
-                        SpriteShrinkCDError::External(Box::new(e))
-                    ));
-                    break;
-                }
-            }
-        }
-    })
-}
-
-
 pub fn verify_disc_integrity<A, D, E, H>(
     manifest: Arc<DiscManifest<H>>,
     exception_index: &HashMap<u64, ExceptionInfo>,
@@ -317,15 +247,23 @@ where
     let data_layout = Arc::new(manifest.data_stream_layout.clone());
     let audio_blocks = Arc::new(manifest.block_map.clone());
 
+    let chunk_hashes: Vec<H> = data_layout.iter().map(|data| {
+        data.hash
+    }).collect();
+
+    let audio_hashes: Vec<H> = audio_blocks.iter().map(|block|{
+        block.content_hash
+    }).collect();
+
     let data_fetch_handle = spawn_data_fetcher(
-        data_layout,
+        chunk_hashes,
         get_data_chunks,
         data_tx,
         BATCH_SIZE
     );
 
-    let audio_fetch_handle = spawn_audio_fetcher(
-        audio_blocks,
+    let audio_fetch_handle = spawn_data_fetcher(
+        audio_hashes,
         get_audio_blocks,
         audio_tx,
         BATCH_SIZE
@@ -360,9 +298,8 @@ where
     let mut audio_buffer:VecDeque<Vec<u8>> = VecDeque::new();
     let mut current_audio_buf_size = 0usize;
 
-    for i in 0..expanded_sector_types.len() {
+    for (i, sector_type) in expanded_sector_types.iter().enumerate() {
         let sector_idx = i as u32;
-        let sector_type = expanded_sector_types[i];
 
         let result = match sector_type {
             SectorType::Audio | SectorType::PregapAudio |
@@ -427,7 +364,7 @@ where
                 rebuild_sector_simd(
                     &user_data,
                     metadata,
-                    sector_type,
+                    *sector_type,
                     sector_idx + current_msf_offset,
                     exception,
                 )

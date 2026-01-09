@@ -62,7 +62,7 @@ pub enum ProcessingError {
 
 pub trait Hashable:
     //Specifies what capabilities H must have.
-    Copy + Clone + Eq + std::hash::Hash + serde::Serialize + Send + Sync +
+    Copy + Clone + Debug + Eq + std::hash::Hash + serde::Serialize + Send + Sync +
         'static
 {
     /// Create a new hash from a byte slice using the library's seed.

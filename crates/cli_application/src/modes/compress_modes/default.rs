@@ -517,7 +517,7 @@ where
     Vector made with capacity to hold 1000 chunks * the maximum window size
     fastcdc has used. (avg x 4)*/
     let mut write_buffer: Vec<u8> = Vec::with_capacity(
-        (1000 * (best_dictionary_size * 4)) as usize
+        BUFFER_SIZE * (best_window_size as usize * 4)
     );
 
     //Holds the amount of chunks that have been stored in the buffer.
