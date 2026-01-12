@@ -16,16 +16,15 @@ use std::{
     thread, time::{Duration}
 };
 
-use bitcode::Encode;
+use bitcode::{Encode, encode};
 use dashmap::DashMap;
 use directories::ProjectDirs;
 use indicatif::{ProgressBar, ProgressStyle};
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::{bounded};
 use sprite_shrink::{
-    ArchiveBuilder, FileManifestParent, Hashable, Progress, SS_SEED,
-    SSAChunkMeta, serialize_uncompressed_data,
-    verify_single_file
+    ArchiveBuilder, FileManifestParent, Hashable, Progress, SSAChunkMeta,
+    SS_SEED, build_file_header, serialize_uncompressed_data, verify_single_file
 };
 use rayon::prelude::*;
 use serde::Serialize;
@@ -34,6 +33,7 @@ use tracing::{
     debug,
     info,
 };
+use zerocopy::IntoBytes;
 
 use crate::{
     arg_handling::Args,
@@ -574,10 +574,7 @@ where
     it according to the ssmc spec and returns the byte data ready to be
     written.*/
     let mut builder = ArchiveBuilder::new(
-        serialized_data.ser_file_manifest,
         &serialized_data.sorted_hashes,
-        file_paths.len() as u32,
-        *hash_type_id,
         chunk_sum,
         get_chunk_data_for_lib,
         tmp_chunk_write_cb
@@ -589,9 +586,8 @@ where
         .optimize_dictionary(args.optimize_dictionary)
         .worker_threads(args.threads.unwrap_or(0));
 
-
     //Start the build process using the progress callback.
-    let ssmc_data = builder.with_progress(progress_callback)
+    let comp_data = builder.with_progress(progress_callback)
         .build()?;
 
     if let Some(bar) = progress_bar.lock().unwrap().take()
@@ -608,19 +604,38 @@ where
         .unwrap()
         .with_extension("ssmc");
 
+    let enc_file_manifest = encode(&serialized_data.ser_file_manifest);
+
+    let file_header = build_file_header(
+        file_paths.len() as u32,
+        98, //zstd
+        *hash_type_id,
+        enc_file_manifest.len() as u64,
+        comp_data.dictionary_size,
+        comp_data.enc_chunk_index_size
+    );
+
+    let mut final_data = Vec::with_capacity((
+        file_header.data_offset + enc_file_manifest.len() as u64 +
+            comp_data.dictionary_size + comp_data.enc_chunk_index_size
+    ) as usize );
+
+    final_data.extend_from_slice(file_header.as_bytes());
+    final_data.extend_from_slice(&enc_file_manifest);
+    final_data.extend_from_slice(&comp_data.dictionary);
+    final_data.extend_from_slice(&comp_data.enc_chunk_index);
+
     //Write ssmc header to disk and append it with compressed data.
     write_final_archive(
         &final_output_path,
         &tmp_file_path,
-        &ssmc_data
+        &final_data
     )?;
 
     info!(
         "Successfully created sprite-shrink multicart archive at: \
             {final_output_path:?}"
     );
-
-
 
     Ok(())
 }

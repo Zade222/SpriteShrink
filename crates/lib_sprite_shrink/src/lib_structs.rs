@@ -34,6 +34,14 @@ pub struct ChunkLocation {
     pub compressed_length: u32,
 }
 
+
+pub struct CompressionResult {
+    pub dictionary: Vec<u8>,
+    pub dictionary_size: u64,
+    pub enc_chunk_index: Vec<u8>,
+    pub enc_chunk_index_size: u64
+}
+
 /// Defines the header structure for an archive file.
 ///
 /// This struct represents the first block of data in an archive. It acts

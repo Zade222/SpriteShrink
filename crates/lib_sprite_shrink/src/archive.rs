@@ -25,14 +25,16 @@ use bitcode::{
 };
 use thiserror::Error;
 use serde::Serialize;
-use zerocopy::IntoBytes;
 
 
-use crate::{ffi::ffi_types::{
+use crate::{IsCancelled, SpriteShrinkError,
+    ffi::ffi_types::{
     FFIProgress, FFIProgressType, FFIUserData
-}, IsCancelled, SpriteShrinkError};
-use crate::lib_structs::{
-    ChunkLocation, FileHeader, FileManifestParent, Progress
+    },
+    lib_structs::{
+        ChunkLocation, CompressionResult, FileHeader,
+        Progress
+    }
 };
 
 use crate::parsing::{MAGIC_NUMBER, SUPPORTED_VERSION};
@@ -88,16 +90,12 @@ type CProgressCallback = extern "C" fn(FFIProgress, *mut c_void);
 
 pub struct ArchiveBuilder<'a, E, H, R, W> {
     //Required parameters
-    ser_file_manifest: Vec<FileManifestParent<H>>,
     sorted_hashes: &'a [H],
-    file_count: u32,
-    hash_type: u8,
     total_size: u64,
     get_chunk_data: R,
     write_comp_data: W,
 
     //Optional parameters, will be set with default values.
-    compression_algorithm: u16,
     compression_level: i32,
     dictionary_size: u64,
     worker_threads: usize,
@@ -131,7 +129,7 @@ pub struct ArchiveBuilder<'a, E, H, R, W> {
 /// # Returns
 ///
 /// Returns a `FileHeader` struct populated with the provided metadata.
-fn build_file_header(
+pub fn build_file_header(
     file_count: u32,
     algorithm_code: u16,
     hash_type: u8,
@@ -537,24 +535,19 @@ where
     W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
 {
     pub fn new(
-        ser_file_manifest: Vec<FileManifestParent<H>>,
+        //ser_file_manifest: Vec<FileManifestParent<H>>,
         sorted_hashes: &'a [H],
-        file_count: u32,
-        hash_type: u8,
         total_size: u64,
         get_chunk_data: R,
         write_comp_data: W,
     ) -> Self {
         Self {
-            ser_file_manifest,
+            //ser_file_manifest,
             sorted_hashes,
-            file_count,
-            hash_type,
             total_size,
             get_chunk_data,
             write_comp_data,
             //Set default values for optional parameters
-            compression_algorithm: 98, //Default to zstd numerical code.
             compression_level: 19,
             dictionary_size: 16 * 1024,
             worker_threads: 0, //Let Rayon decide
@@ -566,14 +559,15 @@ where
     }
 
     //The following 5 functions set optional parameters.
-
+    /*
     /// Sets the numerical compression code.
     ///
     /// The default value is `98` for zstd.
+
     pub fn compression_algorithm(&mut self, algorithm: u16) -> &mut Self {
         self.compression_algorithm = algorithm;
         self
-    }
+    }*/
 
     /// Sets the compression level.
     ///
@@ -645,17 +639,13 @@ where
     ///   header.
     /// - `Err(SpriteShrinkError)` if any step fails, such as dictionary
     ///   training, compression, or serialization.
-    pub fn build(self) -> Result<Vec<u8>, SpriteShrinkError> {
+    pub fn build(self) -> Result<CompressionResult, SpriteShrinkError> {
         //Destructure self into its fields
         let ArchiveBuilder {
-            ser_file_manifest,
             sorted_hashes,
-            file_count,
-            hash_type,
             total_size,
             get_chunk_data,
             write_comp_data,
-            compression_algorithm,
             compression_level,
             dictionary_size,
             worker_threads,
@@ -801,35 +791,37 @@ where
         chunk_index
         dictionary*/
 
-        let bin_file_manifest = encode(&ser_file_manifest);
-
-        drop(ser_file_manifest);
-
-        let bin_chunk_index = encode(&chunk_index);
-
-        drop(chunk_index);
+        let enc_chunk_index = encode(&chunk_index);
 
         //Build the file header
-        let file_header = build_file_header(
+        /*let file_header = build_file_header(
             file_count,
             compression_algorithm,
             hash_type,
             bin_file_manifest.len() as u64,
             _dictionary.len() as u64,
             bin_chunk_index.len() as u64,
+        );*/
+
+        let mut comp_data = Vec::with_capacity(
+            //file_header.data_offset as usize + //bin_file_manifest.len() as usize
+                 _dictionary.len() + enc_chunk_index.len() as usize
         );
 
-        let mut final_data = Vec::with_capacity(
-            file_header.data_offset as usize + bin_file_manifest.len()
-                as usize + _dictionary.len() + bin_chunk_index.len() as usize
-        );
+        //final_data.extend_from_slice(file_header.as_bytes());
+        //final_data.extend_from_slice(&bin_file_manifest);
+        comp_data.extend_from_slice(&_dictionary);
+        comp_data.extend_from_slice(&enc_chunk_index);
 
-        final_data.extend_from_slice(file_header.as_bytes());
-        final_data.extend_from_slice(&bin_file_manifest);
-        final_data.extend_from_slice(&_dictionary);
-        final_data.extend_from_slice(&bin_chunk_index);
+        let dictionary_size = _dictionary.len() as u64;
+        let enc_chunk_index_size = enc_chunk_index.len() as u64;
 
-        Ok(final_data)
+        Ok(CompressionResult {
+            dictionary: _dictionary,
+            dictionary_size,
+            enc_chunk_index,
+            enc_chunk_index_size
+        })
     }
 }
 

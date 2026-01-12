@@ -1188,6 +1188,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "zerocopy",
 ]
 
 [[package]]

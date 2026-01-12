@@ -314,7 +314,7 @@ pub struct CreateFileManifestAndChunksArgs{
     pub chunks_len: usize,
 }
 
-/// Represents a buffer containing the final, compressed archive data.
+/// Represents a buffer containing the final, dictionary and compressed data.
 ///
 /// This struct is returned by a successful build operation (e.g., from
 /// `archive_builder_build_u64`). When a C caller receives a pointer to this
@@ -335,10 +335,13 @@ pub struct CreateFileManifestAndChunksArgs{
 /// free it with a different allocator will lead to heap corruption and
 /// undefined behavior.
 #[repr(C)]
-pub struct FFIArchiveData {
-    pub data: *mut u8,
-    pub data_len: usize,
-    pub data_cap: usize,
+pub struct FFICompData {
+    pub dictionary_data_ptr: *mut u8,
+    pub dictionary_data_len: usize,
+    pub dictionary_data_cap: usize,
+    pub enc_chunk_index_data_ptr: *mut u8,
+    pub enc_chunk_index_data_len: usize,
+    pub enc_chunk_index_data_cap: usize,
 }
 
 /// FFI-safe equivalent of a `fastcdc::Chunk`, representing a content-defined

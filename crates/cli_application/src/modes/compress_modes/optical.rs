@@ -30,8 +30,8 @@ use tracing::{
     debug,
 };
 use sprite_shrink::{
-    SS_SEED, ChunkLocation, FileManifestParent, test_compression,
-    dashmap_values_to_vec
+    SS_SEED, ArchiveBuilder, ChunkLocation, FileManifestParent,
+    test_compression, dashmap_values_to_vec
 };
 use sprite_shrink_cd::{
     ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
@@ -157,6 +157,7 @@ where
 
     let pid = cache_info.id;
 
+    //Const for the max amount of chunks to cache before writing to disk.
     const BUFFER_SIZE: usize = 1000;
 
     let base_path = cache_info.cache_path.with_extension("");
@@ -212,8 +213,13 @@ where
                 format!("Failed to create thread pool: {e}")))?
     };
 
+    //Sets the window size from cmd argument or default of 2kib
     let mut best_window_size = args.window.map_or(
         2 * 1024, |byte| byte.as_u64());
+
+    //Sets the dictionary size from cmd argument or default of 16kib
+    let mut best_dictionary_size = args.dictionary.map_or(
+        16 * 1024, |byte| byte.as_u64());
 
     //autotune logic
     if args.auto_tune {
@@ -284,7 +290,7 @@ where
         }
     });
 
-    let get_chunk_data_for_test = {
+    /*let get_chunk_data_for_test = {
         let cb = Arc::clone(&chunk_ret_cb);
         move |hashes: &[H]| cb(hashes)
     };
@@ -303,7 +309,7 @@ where
     let size = tot_exception_data + compressed_size as u64;
 
     println!("Compressed data size = {compressed_size}");
-    println!("Compressed data + exception data = {size}");
+    println!("Compressed data + exception data = {size}");*/
 
     let mut ser_man = dashmap_values_to_vec(&disc_manifiests);
 
@@ -449,7 +455,81 @@ where
         println!("Audio blob size = {}", audio_blob_size);
     }
 
+    let chunk_hashes = data_temp_cache.get_keys()?;
+    let chunk_sum = data_temp_cache.get_tot_data_size();
 
+    /*Write buffer holds chunk byte data prior to being written.
+    Vector made with capacity to hold 1000 chunks * the maximum window size
+    fastcdc has used. (avg x 4)*/
+    let mut write_buffer: Vec<u8> = Vec::with_capacity(
+        BUFFER_SIZE * (best_window_size as usize * 4)
+    );
+
+    //Holds the amount of chunks that have been stored in the buffer.
+    let mut chunk_count = 0usize;
+
+    let chunk_tmp_file_path = Arc::new(
+        args.output
+        .as_ref()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join(format!("chunk_{pid}"))
+        .with_extension("tmp")
+    );
+
+    let get_chunk_data_for_lib = {
+        let cb = Arc::clone(&chunk_ret_cb);
+        let lib_running_clone = Arc::clone(&running);
+        move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
+            if !lib_running_clone.load(Ordering::SeqCst) {
+                return Err(CliError::Cancelled);
+            }
+
+            let ret_chunks = cb(hashes)?;
+
+            Ok(ret_chunks)
+        }
+    };
+
+    /*Set file guard to clean up tmp files on error. */
+    let _tmp_guard = TempFileGuard::new(&chunk_tmp_file_path);
+
+    /*Callback for storing and writing chunk data.
+    Flush flag can be used to force the data to be written if the buffer has
+    not reached the BUFFER_SIZE.*/
+    let tmp_chunk_write_cb = {
+        let tfp_clone = Arc::clone(&chunk_tmp_file_path);
+        move |chunk: &[u8], flush_flag: bool| -> Result<(), CliError>{
+            write_buffer.extend_from_slice(chunk);
+            chunk_count += 1;
+
+            if (chunk_count >= BUFFER_SIZE) || flush_flag {
+                append_data_to_file(&tfp_clone, &write_buffer)?;
+                write_buffer.clear();
+                chunk_count = 0;
+            };
+
+            Ok(())
+        }
+    };
+
+    let mut comp_data_builder = ArchiveBuilder::new(
+        &chunk_hashes,
+        chunk_sum,
+        get_chunk_data_for_lib,
+        tmp_chunk_write_cb
+    );
+
+    comp_data_builder.compression_level(level)
+        .dictionary_size(best_dictionary_size)
+        .optimize_dictionary(args.optimize_dictionary)
+        .worker_threads(args.threads.unwrap_or(0));
+
+    let comp_data = comp_data_builder.build()?;
+
+    println!("Dictionary size = {}", comp_data.dictionary_size);
+    println!("Encoded Chunk Index size = {}", comp_data.enc_chunk_index_size);
 
     Ok(())
 }

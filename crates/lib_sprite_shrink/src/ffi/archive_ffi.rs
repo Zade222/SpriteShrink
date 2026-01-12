@@ -18,13 +18,13 @@ use crate::ffi::ffi_error_handling::{
 use crate::ffi::ffi_types::{
     ArchiveBuilderU64, ArchiveBuilderU128,
     ArchiveBuilderArgsU64, ArchiveBuilderArgsU128,
-    FFIArchiveData, FFIChunkDataArray,
+    FFIChunkDataArray, FFICompData,
     FFIProgress
 };
 use crate::lib_error_handling::{
     IsCancelled, SpriteShrinkError
 };
-use crate::lib_structs::{FileManifestParent};
+use crate::lib_structs::{CompressionResult};
 
 //Type alias for clarity in other functions
 trait FFIBuilderHandle {
@@ -40,7 +40,7 @@ impl FFIBuilderHandle for ArchiveBuilderU128 {
 }
 
 trait ArchiveBuilderTrait<H> {
-    fn set_compression_algorithm(&mut self, algorithm: u16);
+    //fn set_compression_algorithm(&mut self, algorithm: u16);
     fn set_compression_level(&mut self, level: i32);
     fn set_dictionary_size(&mut self, size: u64);
     fn with_c_progress(
@@ -52,7 +52,7 @@ trait ArchiveBuilderTrait<H> {
     fn set_optimize_dictionary(&mut self, optimize: bool);
 
     //This method consumes the builder
-    fn build(self: Box<Self>) -> Result<Vec<u8>, SpriteShrinkError>;
+    fn build(self: Box<Self>) -> Result<CompressionResult, SpriteShrinkError>;
 }
 
 impl<'a, E, H, R, W> ArchiveBuilderTrait<H> for ArchiveBuilder<'a, E, H, R, W>
@@ -63,9 +63,9 @@ where
     R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
     W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
 {
-    fn set_compression_algorithm(&mut self, algorithm: u16) {
+    /*fn set_compression_algorithm(&mut self, algorithm: u16) {
         self.compression_algorithm(algorithm);
-    }
+    }*/
     fn set_compression_level(&mut self, level: i32) {
         self.compression_level(level);
     }
@@ -86,7 +86,7 @@ where
     }
 
 
-    fn build(self: Box<Self>) -> Result<Vec<u8>, SpriteShrinkError> {
+    fn build(self: Box<Self>) -> Result<CompressionResult, SpriteShrinkError> {
         (*self).build()
     }
 }
@@ -150,18 +150,6 @@ pub unsafe extern "C" fn archive_builder_new_u64(
         args_int.sorted_hashes_len
     )};
 
-    let ffi_manifests = unsafe {
-        slice::from_raw_parts(
-            args_int.manifest_array_ptr,
-            args_int.manifest_len
-        )
-    };
-
-    let ser_file_manifest: Vec<FileManifestParent<u64>> = ffi_manifests
-    .iter()
-    .map(FileManifestParent::<u64>::from)
-    .collect();
-
     let user_data_addr = args_int.user_data as usize;
 
     let get_chunks_closure = {
@@ -223,10 +211,8 @@ pub unsafe extern "C" fn archive_builder_new_u64(
     }};
 
     let builder = ArchiveBuilder::new(
-        ser_file_manifest,
+        //ser_file_manifest,
         sorted_hashes,
-        args_int.file_count,
-        1,
         args_int.total_size,
         get_chunks_closure,
         write_data_closure
@@ -311,20 +297,6 @@ pub unsafe extern "C" fn archive_builder_new_u128(
         })
         .collect();
 
-    let ffi_manifests = unsafe {
-        slice::from_raw_parts(
-            args_int.manifest_array_ptr,
-            args_int.manifest_len
-        )
-    };
-
-    let ser_file_manifest: Vec<FileManifestParent<u128>> = ffi_manifests
-        .iter()
-        .map(|ffi_man|{
-            FileManifestParent::<u128>::from(ffi_man)
-        })
-        .collect();
-
     let user_data_addr = args_int.user_data as usize;
 
     let get_chunks_closure = {
@@ -393,10 +365,8 @@ pub unsafe extern "C" fn archive_builder_new_u128(
     }};
 
     let builder = ArchiveBuilder::new(
-        ser_file_manifest,
+        //ser_file_manifest,
         hashes_vec.as_slice(),
-        args_int.file_count,
-        2,
         args_int.total_size,
         get_chunks_closure,
         write_data_closure
@@ -564,6 +534,7 @@ where
     }
 }
 
+/*
 /// Sets the compression algorithm on the ArchiveBuilder for a u64 hash.
 ///
 /// # Safety
@@ -582,6 +553,7 @@ pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u64(
     )
 }
 
+
 /// Sets the compression algorithm on the ArchiveBuilder for a u128 hash.
 ///
 /// # Safety
@@ -599,6 +571,7 @@ pub unsafe extern "C" fn archive_builder_set_compression_algorithm_u128(
         |b| b.set_compression_algorithm(code)
     )
 }
+*/
 
 /// Sets the compression level on the ArchiveBuilder for a u64 hash.
 ///
@@ -880,22 +853,31 @@ pub unsafe extern "C" fn archive_builder_set_c_progress_u128(
 ///   be passed to `archive_data_free` to deallocate the struct and the
 ///   underlying byte buffer, preventing a memory leak.
 unsafe fn handle_build_result(
-    result: Result<Vec<u8>, SpriteShrinkError>,
-    out_ptr: *mut *mut FFIArchiveData,
+    result: Result<CompressionResult, SpriteShrinkError>,
+    out_ptr: *mut *mut FFICompData,
 ) -> FFIResult {
     match result {
-        Ok(mut archive_data) => {
-            let data_ptr = archive_data.as_mut_ptr();
-            let data_len = archive_data.len();
-            let data_cap = archive_data.capacity();
+        Ok(mut comp_data) => {
+            let dictionary_data_ptr = comp_data.dictionary.as_mut_ptr();
+            let dictionary_data_len = comp_data.dictionary_size as usize;
+            let dictionary_data_cap = comp_data.dictionary.capacity();
+
+            let enc_chunk_index_data_ptr = comp_data.enc_chunk_index
+                .as_mut_ptr();
+            let enc_chunk_index_data_len = comp_data.enc_chunk_index_size as usize;
+            let enc_chunk_index_data_cap = comp_data.enc_chunk_index
+                .capacity();
 
             // Give ownership to C parent application
-            std::mem::forget(archive_data);
+            std::mem::forget(comp_data);
 
-            let output = Box::new(FFIArchiveData {
-                data: data_ptr,
-                data_len,
-                data_cap,
+            let output = Box::new(FFICompData {
+                dictionary_data_ptr,
+                dictionary_data_len,
+                dictionary_data_cap,
+                enc_chunk_index_data_ptr,
+                enc_chunk_index_data_len,
+                enc_chunk_index_data_cap
             });
             unsafe {
                     *out_ptr = Box::into_raw(output);
@@ -922,7 +904,7 @@ unsafe fn handle_build_result(
 #[must_use]
 pub unsafe extern "C" fn archive_builder_build_u64(
     builder_handle: *mut ArchiveBuilderU64,
-    out_ptr: *mut *mut FFIArchiveData,
+    out_ptr: *mut *mut FFICompData,
 ) -> FFIResult {
     if builder_handle.is_null() || out_ptr.is_null() {
         return FFIResult::NullArgument;
@@ -957,7 +939,7 @@ pub unsafe extern "C" fn archive_builder_build_u64(
 #[must_use]
 pub unsafe extern "C" fn archive_builder_build_u128(
     builder_handle: *mut ArchiveBuilderU128,
-    out_ptr: *mut *mut FFIArchiveData,
+    out_ptr: *mut *mut FFICompData,
 ) -> FFIResult {
     if builder_handle.is_null() || out_ptr.is_null() {
         return FFIResult::NullArgument;
@@ -1062,15 +1044,21 @@ pub unsafe extern "C" fn archive_builder_free_u128(
 /// `archive_builder_build`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn archive_data_free(
-    archive_data_ptr: *mut FFIArchiveData)
+    comp_data_ptr: *mut FFICompData)
 {
     unsafe{
-        if !archive_data_ptr.is_null() {
-            let archive_box = Box::from_raw(archive_data_ptr);
-            let _ = Vec::from_raw_parts(
-                archive_box.data,
-                archive_box.data_len,
-                archive_box.data_cap,
+        if !comp_data_ptr.is_null() {
+            let comp_box = Box::from_raw(comp_data_ptr);
+            let _dict = Vec::from_raw_parts(
+                comp_box.dictionary_data_ptr,
+                comp_box.dictionary_data_len,
+                comp_box.dictionary_data_cap
+            );
+
+            let _enc_chunk_index = Vec::from_raw_parts(
+                comp_box.enc_chunk_index_data_ptr,
+                comp_box.enc_chunk_index_data_len,
+                comp_box.enc_chunk_index_data_cap
             );
         }
     }
