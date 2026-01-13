@@ -1,6 +1,9 @@
-use std::borrow::Cow;
-use std::io::{self, Read, Seek};
-use std::iter::repeat_n;
+use std::{
+    borrow::Cow,
+    collections::HashMap,
+    io::{self, Read, Seek},
+    iter::repeat_n,
+};
 
 use sprite_shrink::{
     Hashable
@@ -9,7 +12,9 @@ use sprite_shrink::{
 use crate::lib_error_handling::SpriteShrinkCDError;
 
 use crate::lib_structs::{
-    ContentBlock, CueFile, CueSheet, ExceptionType, MsfTime, RleSectorMap, SectorAnalysis, SectorMap, SectorMapResult, SectorType, Track, TrackType
+    ContentBlock, CueFile, CueSheet, ExceptionType, MsfTime, RleSectorMap,
+    SectorAnalysis, SectorMap, SectorMapResult, SectorType, SubHeaderEntry,
+    SubheaderRegistry, Track, TrackType
 };
 
 use crate::{
@@ -115,6 +120,7 @@ pub fn analyze_and_map_disc(
     cue_sheet: &CueSheet,
     file_sec_count: &[u32],
     provider: &mut impl SectorDataProvider,
+    subheader_registry: &SubheaderRegistry,
 ) -> Result<SectorMapResult, SpriteShrinkCDError> {
     let normalized_sheet= if cue_sheet.files.len() > 1 {
         Cow::Owned(normalize_cue_sheet(
@@ -169,8 +175,10 @@ pub fn analyze_and_map_disc(
         }
     }
 
-    let mut subheader_map: Vec<(u32, u32, [u8; 8])> = Vec::new();
-    let mut current_subheader: Option<[u8; 8]> = None;
+    let mut subheader_index: Vec<SubHeaderEntry> = Vec::new();
+
+    let mut current_subheader_id: Option<u16> = None;
+
     let mut current_sub_count = 0;
     let mut current_run_start = 0;
     let mut lba_map: Vec<(u32, u32)> = Vec::new();
@@ -232,24 +240,6 @@ pub fn analyze_and_map_disc(
             /*if let Some(val) = subheader_val {
                 if let Some(curr) = current_subheader {
                     if curr == val {
-                        current_sub_count += 1;
-                    } else {
-                        // Push previous run
-                        subheader_map.push((current_sub_count, curr));
-                        // Start new run
-                        current_subheader = Some(val);
-                        current_sub_count = 1;
-                    }
-                } else {
-                    current_subheader = Some(val);
-                    current_sub_count = 1;
-                    current_run_start = i;
-                }
-            }*/
-
-            if let Some(val) = subheader_val {
-                if let Some(curr) = current_subheader {
-                    if curr == val {
                         if i == (current_run_start + current_sub_count){
                             current_sub_count += 1;
                         } else {
@@ -277,7 +267,41 @@ pub fn analyze_and_map_disc(
                     current_sub_count = 1;
                     current_run_start = i;
                 }
+            }*/
+
+            if let Some(val) = subheader_val {
+                let val_id = subheader_registry.get_or_register(val);
+
+                if let Some(curr_id) = current_subheader_id {
+                    if curr_id == val_id {
+                        if i == (current_run_start + current_sub_count) {
+                            current_sub_count += 1;
+                        } else {
+                            subheader_index.push(SubHeaderEntry {
+                                start_lba: current_run_start,
+                                count: current_sub_count,
+                                data_id: curr_id
+                            });
+                            current_sub_count = 1;
+                            current_run_start = i;
+                        }
+                    } else {
+                        subheader_index.push(SubHeaderEntry {
+                            start_lba: current_run_start,
+                            count: current_sub_count,
+                            data_id: curr_id
+                        });
+                        current_subheader_id = Some(val_id);
+                        current_sub_count = 1;
+                        current_run_start = i;
+                    }
+                } else {
+                    current_subheader_id = Some(val_id);
+                    current_sub_count = 1;
+                    current_run_start = i;
+                }
             }
+
 
             if let Some(data) = analysis_result.exception_data {
                 let excep_type = match analysis_result.sector_type {
@@ -294,8 +318,12 @@ pub fn analyze_and_map_disc(
         }
     }
 
-    if let Some(curr) = current_subheader {
-        subheader_map.push((current_run_start, current_sub_count, curr));
+    if let Some(curr_id) = current_subheader_id {
+        subheader_index.push(SubHeaderEntry {
+            start_lba: current_run_start,
+            count: current_sub_count,
+            data_id: curr_id
+        });
     }
 
     for sector in sectors.iter_mut() {
@@ -307,8 +335,7 @@ pub fn analyze_and_map_disc(
     Ok(SectorMapResult{
         sector_map: SectorMap { sectors },
         exception_metadata,
-        subheader_map,
-        normalized_cue_sheet: normalized_sheet.into_owned(),
+        subheader_index,
         lba_map
     })
 }

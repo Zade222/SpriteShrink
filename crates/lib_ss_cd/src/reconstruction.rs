@@ -10,7 +10,7 @@ use crate::{
     lib_structs::{
         DecodedSectorInfo, DiscManifest, ExceptionInfo, MsfTime,
         ReconstructionContext, ReconstructionInfo, RleSectorMap, SectorType,
-        StreamChunkInfo
+        StreamChunkInfo, SubHeaderEntry
     },
     util::{spawn_data_fetcher},
 };
@@ -154,17 +154,18 @@ pub fn expand_sector_map(rle_map: &RleSectorMap) -> Vec<SectorType> {
 }
 
 
-pub fn expand_metadata_map(
-    subheader_map: &[(u32, u32, [u8; 8])]
-) -> HashMap<u64, [u8; 8]> {
-    let mut metadata_map: HashMap<u64, [u8; 8]> = HashMap::new();
+pub fn expand_subheader_map(
+    index: &[SubHeaderEntry],
+    total_sectors: usize
+) -> Vec<Option<u16>> {
+    let mut metadata_map = vec![None; total_sectors];
 
-    for (start_sector, count, data) in subheader_map {
-        for offset in 0..*count {
-            metadata_map.insert(
-                (*start_sector + offset) as u64,
-                *data
-            );
+    for entry in index {
+        for offset in 0..entry.count {
+            let idx = (entry.start_lba + offset) as usize;
+            if idx < total_sectors {
+                metadata_map[idx] = Some(entry.data_id);
+            }
         }
     };
 
@@ -187,7 +188,7 @@ impl<'a, H: Copy + Eq> ReconstructionContext<'a, H> {
 
         match sector_info.sector_type {
             SectorType::Audio | SectorType::PregapAudio => {
-                for block in &self.manifest.block_map {
+                for block in &self.manifest.audio_block_map {
                     if target_sector >= block.start_sector &&
                         target_sector < (
                             block.start_sector + block.sector_count
@@ -223,6 +224,7 @@ pub fn verify_disc_integrity<A, D, E, H>(
     manifest: Arc<DiscManifest<H>>,
     exception_index: &HashMap<u64, ExceptionInfo>,
     exception_blob: &[u8],
+    subheader_data: &[[u8; 8]],
     veri_hash: &[u8; 64],
     get_data_chunks: D,
     get_audio_blocks: A,
@@ -245,7 +247,7 @@ where
     let (audio_tx, audio_rx) = bounded(4);
 
     let data_layout = Arc::new(manifest.data_stream_layout.clone());
-    let audio_blocks = Arc::new(manifest.block_map.clone());
+    let audio_blocks = Arc::new(manifest.audio_block_map.clone());
 
     let chunk_hashes: Vec<H> = data_layout.iter().map(|data| {
         data.hash
@@ -271,7 +273,10 @@ where
 
     //let recon_ctx = ReconstructionContext::new(&manifest);
     let expanded_sector_types = expand_sector_map(&manifest.rle_sector_map);
-    let subheader_map = expand_metadata_map(&manifest.subheader_map);
+    let subheader_map = expand_subheader_map(
+        &manifest.subheader_index,
+        expanded_sector_types.len()
+    );
     let lba_map = &manifest.lba_map;
     let mut current_msf_offset = lba_map[0].1;
     let mut lba_index = 0;
@@ -351,7 +356,9 @@ where
                     &exception_blob[start..end]
                 });
 
-                let metadata = subheader_map.get(&(i as u64))
+                let metadata = subheader_map.get(i)
+                    .and_then(|opt| *opt)
+                    .map(|did| &subheader_data[did as usize])
                     .ok_or(ReconstructionError::MissingSubheader(i))?;
 
                 if lba_map.len() - 1 > lba_index &&

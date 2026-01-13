@@ -1,7 +1,9 @@
 use std::{
     fmt::{self, Display},
-    ops::Range
+    ops::Range,
+    sync::atomic::{AtomicU16, Ordering,}
 };
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 
 
@@ -90,14 +92,13 @@ pub struct DecodedSectorInfo {
 pub struct DiscManifest<H> {
     pub title: String,
     pub collection_id: u8,
-    pub normalized_cue_sheet: String,
     pub lba_map: Vec<(u32, u32)>,
     pub rle_sector_map: RleSectorMap,
-    pub block_map: Vec<ContentBlock<H>>,
+    pub audio_block_map: Vec<ContentBlock<H>>,
     pub data_stream_layout: Vec<DataChunkLayout<H>>,
-    pub exception_blob_offset: u64,
-    pub exception_index_length: u32,
-    pub subheader_map: Vec<(u32, u32, [u8; 8])>,
+    pub subheader_index: Vec<SubHeaderEntry>,
+    pub integrity_hash: u64,
+    pub exception_blob: BlobLocation,
 }
 
 
@@ -131,6 +132,43 @@ impl ExceptionType {
         }
     }
 }
+
+
+pub struct SubheaderRegistry {
+    map: DashMap<[u8; 8], u16>,
+    next_id: AtomicU16,
+}
+
+
+impl SubheaderRegistry {
+    pub fn get_or_register(&self, data: [u8; 8]) -> u16 {
+        *self.map.entry(data).or_insert_with(|| {
+            self.next_id.fetch_add(1, Ordering::SeqCst)
+        })
+    }
+
+    /// Converts the map into sorted vector
+    pub fn generate_blob(&self) -> Vec<[u8; 8]> {
+        let mut pairs: Vec<([u8; 8], u16)> = self.map
+            .iter()
+            .map(|pair| (*pair.key(), *pair.value()))
+            .collect();
+
+        pairs.sort_by_key(|(_data, id)| *id);
+
+        pairs.into_iter().map(|(data, _)| data).collect()
+    }
+}
+
+impl Default for SubheaderRegistry {
+    fn default() -> Self {
+        Self {
+            map: DashMap::new(),
+            next_id: AtomicU16::new(0),
+        }
+    }
+}
+
 
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -224,8 +262,7 @@ pub struct SectorMap {
 pub struct SectorMapResult {
     pub sector_map: SectorMap,
     pub exception_metadata: Vec<(u64, ExceptionType, Vec<u8>)>,
-    pub subheader_map: Vec<(u32, u32, [u8; 8])>,
-    pub normalized_cue_sheet: CueSheet,
+    pub subheader_index: Vec<SubHeaderEntry>,
     pub lba_map: Vec<(u32, u32)>,
 }
 
@@ -278,6 +315,13 @@ pub struct StreamChunkInfo<H> {
     pub read_length: u32,
 }
 
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SubHeaderEntry {
+    pub start_lba: u32,
+    pub count: u32,
+    pub data_id: u16
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Track {

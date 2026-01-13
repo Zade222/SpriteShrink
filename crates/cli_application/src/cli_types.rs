@@ -24,7 +24,7 @@ use sprite_shrink::{
     FileManifestParent, Hashable, SSAChunkMeta
 };
 use sprite_shrink_cd::{
-    ContentBlock, DataChunkLayout, ExceptionInfo, RleSectorMap
+    ContentBlock, DataChunkLayout, ExceptionInfo, RleSectorMap, SubHeaderEntry
 };
 
 
@@ -79,15 +79,15 @@ pub struct DiscExceptionBlob {
 #[derive(Debug)]
 pub struct DiscCompleteData<H: Hashable> {
     pub title: String,
-    pub normalized_cue_sheet: String,
     pub lba_map: Vec<(u32, u32)>,
     pub rle_sector_map: RleSectorMap,
-    pub block_map: Vec<ContentBlock<H>>,
+    pub audio_block_map: Vec<ContentBlock<H>>,
     pub data_stream_layout: Vec<DataChunkLayout<H>>,
     pub exception_index: HashMap<u64, ExceptionInfo>,
     pub exception_blob: Vec<u8>,
-    pub subheader_map: Vec<(u32, u32, [u8; 8])>,
+    pub subheader_index: Vec<SubHeaderEntry>,
     pub verification_hash: [u8; 64],
+    pub integrity_hash: u64,
 }
 
 /// A container for all metadata generated after processing a single file.

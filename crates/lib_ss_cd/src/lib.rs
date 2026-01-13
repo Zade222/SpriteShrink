@@ -18,8 +18,9 @@ pub use lib_error_handling::SpriteShrinkCDError;
 
 mod lib_structs;
 pub use lib_structs::{
-    CueSheet, ContentBlock, DataChunkLayout, DiscManifest, ExceptionInfo,
-    ExceptionType, RleSectorMap, SectorMap, SectorType,
+    BlobLocation, CueSheet, ContentBlock, DataChunkLayout, DiscManifest,
+    ExceptionInfo, ExceptionType, RleSectorMap, SectorMap, SectorType,
+    SubHeaderEntry, SubheaderRegistry
 };
 
 mod mapper;

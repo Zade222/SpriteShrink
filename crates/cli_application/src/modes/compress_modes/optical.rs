@@ -1,20 +1,12 @@
 use std::{
-    cmp::min,
-    collections::{HashMap, HashSet},
-    ffi::OsStr,
-    fmt::{Debug, Display},
-    fs::{
+    cmp::min, collections::{HashMap, HashSet}, ffi::OsStr, fmt::{Debug, Display}, fs::{
         File, read_to_string
-    },
-    io::{
+    }, hash::Hasher, io::{
         self, Read, Seek, SeekFrom
-    },
-    path::{Path, PathBuf},
-    sync::{
+    }, path::{Path, PathBuf}, sync::{
         Arc, Mutex, atomic::{
         AtomicBool, Ordering,
-    }},
-    thread,
+    }}, thread
 };
 
 use bitcode::Encode;
@@ -34,13 +26,14 @@ use sprite_shrink::{
     test_compression, dashmap_values_to_vec
 };
 use sprite_shrink_cd::{
-    ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
+    BlobLocation, ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
     FileSizeProvider, ExceptionInfo, MultiBinStream,
     SectorDataProvider, SectorRegionStream, SectorMap, SectorType,
-    UserDataStream, analyze_cue_sheets, analyze_and_map_disc,
-    compress_audio_blocks, resolve_file_sector_counts, rle_encode_map,
-    verify_disc_integrity
+    SubheaderRegistry, UserDataStream, analyze_cue_sheets,
+    analyze_and_map_disc, compress_audio_blocks, resolve_file_sector_counts,
+    rle_encode_map, verify_disc_integrity
 };
+use xxhash_rust::xxh3::Xxh3;
 
 use crate::{
     arg_handling::Args,
@@ -238,11 +231,13 @@ where
         best_window_size
     )?;
 
+    let disc_manifiests = temp_data.0;
+
     veri_hashes = temp_data.1;
 
     let exceptions = temp_data.2;
 
-    let disc_manifiests = temp_data.0;
+    let subheader_table = temp_data.3;
 
     let tot_exception_data: u64 = exceptions
         .iter()
@@ -376,6 +371,7 @@ where
             arc_man,
             &disc_exception_blob.exception_index,
             &disc_exception_blob.disc_blob,
+            &subheader_table,
             &veri_hash,
             get_chunk_data_for_verify,
             get_chunk_audio_for_verify,
@@ -402,6 +398,7 @@ where
     let _audio_tmp_guard = TempFileGuard::new(&audio_tmp_file_path);
 
     if audio_data_size > 0 {
+        println!("Now compressing audio.");
         let audio_chunk_hashes = audio_temp_cache.get_keys()?;
 
         let mut audio_write_buffer: Vec<u8> = Vec::with_capacity(
@@ -526,10 +523,51 @@ where
         .optimize_dictionary(args.optimize_dictionary)
         .worker_threads(args.threads.unwrap_or(0));
 
+    println!("Now compressing chunks.");
+
     let comp_data = comp_data_builder.build()?;
 
     println!("Dictionary size = {}", comp_data.dictionary_size);
     println!("Encoded Chunk Index size = {}", comp_data.enc_chunk_index_size);
+
+    let mut manifest_size = 0usize;
+
+    for man in disc_manifiests.iter() {
+        println!("{}:", man.title);
+        let mut size = 0usize;
+        size += man.title.len();
+        println!("Title size = {}", man.title.len());
+        size += 1;
+        size += man.lba_map.len() * 8;
+        println!("LBA Map: Count = {}, Size = {}",
+            man.lba_map.len(),
+            man.lba_map.len() * 8
+        );
+        size += man.rle_sector_map.runs.len();
+        println!("rle_map: Count = {}, Size = {}",
+            man.rle_sector_map.runs.len(),
+            man.rle_sector_map.runs.len() * 5
+        );
+        size += man.audio_block_map.len() * 17;
+        println!("audio_map: Count = {}, Size = {}",
+            man.audio_block_map.len(),
+            man.audio_block_map.len() * 17
+        );
+        size += man.data_stream_layout.len() * 12;
+        println!("data_stream_layout: Count = {}, Size = {}",
+            man.data_stream_layout.len(),
+            man.data_stream_layout.len() * 12
+        );
+        size += man.subheader_index.len() * 10;
+        println!("subheader_index: Count = {}, Size = {}",
+            man.subheader_index.len(),
+            man.subheader_index.len() * 10
+        );
+        size += 8;
+        manifest_size += size;
+    }
+
+    println!("Total size of all manifests = {}", manifest_size);
 
     Ok(())
 }
@@ -546,7 +584,8 @@ fn process_optical_discs<H>(
 ) -> Result<(
     DashMap<String, DiscManifest<H>>, //The list of manifests
     DashMap<String, [u8; 64]>, //Associated veri hashes
-    DashMap<String, DiscExceptionBlob> //Final DiscExceptionBlob
+    DashMap<String, DiscExceptionBlob>, //Final DiscExceptionBlob
+    Vec<[u8; 8]>,
 ), CliError>
 where
     H: Hashable
@@ -591,9 +630,7 @@ where
         [u8; 64]
     >> = Arc::new(DashMap::new());
 
-    /*let shared_exception_blob: Arc<Mutex<
-        Vec<DiscExceptionBlob>
-    >> = Arc::new(Mutex::new(Vec::new()));*/
+    let shared_subheader_registry = Arc::new(SubheaderRegistry::default());
 
     let shared_exception_blobs: Arc<
         DashMap<String,
@@ -626,6 +663,7 @@ where
     let worker_file_manifest = shared_disc_manifest.clone();
     let worker_veri_hashes = shared_veri_hashes.clone();
     let worker_excep_blob = shared_exception_blobs.clone();
+    let worker_subheader_reg = shared_subheader_registry.clone();
 
     let cue_sheets_owned = cue_sheets.to_owned();
     let base_dir_owned = base_dir.to_owned();
@@ -640,7 +678,8 @@ where
                         cue_sheet,
                         &base_dir_owned,
                         window_size,
-                        sender_clone
+                        sender_clone,
+                        &worker_subheader_reg
                     )?;
 
                     worker_veri_hashes.insert(
@@ -648,19 +687,19 @@ where
                         dcd.verification_hash
                     );
 
-                    //collection_id, exception_blob_offset and
-                    // exception_index_length to be set elsewhere
                     let dm = DiscManifest {
                         title: dcd.title.clone(),
                         collection_id: 255,
-                        normalized_cue_sheet: dcd.normalized_cue_sheet,
                         lba_map: dcd.lba_map,
                         rle_sector_map: dcd.rle_sector_map,
-                        block_map: dcd.block_map,
+                        audio_block_map: dcd.audio_block_map,
                         data_stream_layout: dcd.data_stream_layout,
-                        exception_blob_offset: 0,
-                        exception_index_length: 0,
-                        subheader_map: dcd.subheader_map
+                        subheader_index: dcd.subheader_index,
+                        integrity_hash: dcd.integrity_hash,
+                        exception_blob: BlobLocation{
+                            offset: 0,
+                            length: 0
+                        }
                     };
 
                     let deb = DiscExceptionBlob {
@@ -757,8 +796,9 @@ where
             "Failed to unwrap Arc for exception blob".to_string()
         ))?;
 
+    let subheader_table = shared_subheader_registry.generate_blob();
 
-    Ok((final_disc_man, final_hashes, final_exception_blob))
+    Ok((final_disc_man, final_hashes, final_exception_blob, subheader_table))
 }
 
 
@@ -766,7 +806,8 @@ fn cue_sheet_worker<H>(
     cue_sheet: &CueSheet,
     base_dir: &Path,
     window_size: u64,
-    send_channel: flume::Sender<OpticalChunkMessage<H>>
+    send_channel: flume::Sender<OpticalChunkMessage<H>>,
+    subheader_registry: &SubheaderRegistry
 ) -> Result<DiscCompleteData<H>, CliError>
 where
     H: Hashable + Send + Display
@@ -785,13 +826,15 @@ where
         base_dir: base_dir.to_path_buf(),
     };
 
-    let mut hasher = sha2::Sha512::new();
+    let mut sha_hasher = sha2::Sha512::new();
+    let mut xxh3_hasher = Xxh3::with_seed(SS_SEED);
     let mut buffer = [0u8; 65536];
     source_stream.seek(SeekFrom::Start(0))?;
     loop {
         let count = source_stream.read(&mut buffer)?;
         if count == 0 { break; }
-        hasher.update(&buffer[..count]);
+        sha_hasher.update(&buffer[..count]);
+        xxh3_hasher.update(&buffer[..count]);
     }
     source_stream.seek(SeekFrom::Start(0))?;
 
@@ -807,12 +850,13 @@ where
     let sector_result = analyze_and_map_disc(
         cue_sheet,
         &sector_count,
-        &mut sector_provider
+        &mut sector_provider,
+        subheader_registry
     )?;
 
     let sector_map = &sector_result.sector_map;
 
-    let subheader_map = sector_result.subheader_map;
+    let subheader_index = sector_result.subheader_index;
 
     //Personal note: I'm thinking that the building of the sector map,
     // processing of its result, the building of the exception index/blob and
@@ -846,7 +890,7 @@ where
     let mut curr_sector_offset: u32 = 0;
 
     let mut data_stream_layout: Vec<DataChunkLayout<H>> = Vec::new();
-    let mut block_map: Vec<ContentBlock<H>> = Vec::new();
+    let mut audio_block_map: Vec<ContentBlock<H>> = Vec::new();
 
     for (run_length, sector_type) in &rle_sector_map.runs {
         let mut run_stream = SectorRegionStream::new(
@@ -946,7 +990,7 @@ where
                         content_hash: block_hash,
                         sector_type: *sector_type,
                     };
-                    block_map.push(block_info);
+                    audio_block_map.push(block_info);
 
                     sectors_proc_in_run += sectors_to_read;
                 }
@@ -962,15 +1006,15 @@ where
     //  set elsewhere
     Ok(DiscCompleteData {
         title: cue_sheet.source_filename.clone(),
-        normalized_cue_sheet: sector_result.normalized_cue_sheet.to_string(),
+        lba_map: sector_result.lba_map,
         rle_sector_map,
-        block_map,
+        audio_block_map,
         data_stream_layout,
         exception_index,
         exception_blob,
-        subheader_map,
-        verification_hash: hasher.finalize().into(),
-        lba_map: sector_result.lba_map
+        subheader_index,
+        verification_hash: sha_hasher.finalize().into(),
+        integrity_hash: xxh3_hasher.finish()
     })
 }
 
