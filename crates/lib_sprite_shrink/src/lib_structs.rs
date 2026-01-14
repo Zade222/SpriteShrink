@@ -93,8 +93,8 @@ pub struct FileHeader {
     pub _pad1:              u8,
     pub format_id:          u16,
     pub _pad2:              [u8; 2],
-    pub toc_offset:         u32,
-    pub toc_length:         u32,
+    pub enc_toc_offset:         u32,
+    pub enc_toc_length:         u32,
     pub format_data_offset: u32,
 }
 
@@ -106,7 +106,7 @@ impl FileHeader {
         algorithm_code: u16,
         hash_type: u8,
         format_id: u16,
-        toc_length: u32,
+        enc_toc_length: u32,
     ) -> FileHeader {
         FileHeader {
             magic_num:      MAGIC_NUMBER,
@@ -117,9 +117,9 @@ impl FileHeader {
             _pad1:          0,
             format_id,
             _pad2:          [0, 0],
-            toc_offset:     Self::HEADER_SIZE,
-            toc_length,
-            format_data_offset: Self::HEADER_SIZE + toc_length
+            enc_toc_offset:     Self::HEADER_SIZE,
+            enc_toc_length,
+            format_data_offset: Self::HEADER_SIZE + enc_toc_length
         }
     }
 }
@@ -344,12 +344,12 @@ pub struct SSAChunkMeta<H>{
 #[repr(C)]
 #[derive(Copy, Clone, FromBytes, Immutable, IntoBytes, Pod, Zeroable)]
 pub struct SSMCFormatData {
-    pub man_offset: u64,
-    pub man_length: u64,
-    pub dict_offset: u64,
-    pub dict_length: u64,
-    pub chunk_index_offset: u64,
-    pub chunk_index_length: u64,
+    pub enc_man_offset: u64,
+    pub enc_man_length: u64,
+    pub data_dict_offset: u64,
+    pub data_dict_length: u64,
+    pub enc_chunk_idx_offset: u64,
+    pub enc_chunk_idx_length: u64,
     pub data_offset: u64,
 }
 
@@ -359,26 +359,27 @@ impl SSMCFormatData {
 
     pub fn build_format_data(
         format_data_offset: usize,
-        man_length: usize,
-        dict_length: u64,
-        chunk_index_length: u64,
+        enc_man_length: usize,
+        data_dict_length: u64,
+        enc_chunk_idx_length: u64,
     ) -> Self {
-        let internal_blocks_start = format_data_offset as u64 + Self::SIZE;
+        let enc_man_offset = format_data_offset as u64 + Self::SIZE;
+        let data_dict_offset = enc_man_offset + enc_man_length as u64;
+        let enc_chunk_idx_offset = data_dict_offset + data_dict_length;
+        let data_offset = enc_chunk_idx_offset + enc_chunk_idx_length;
+
 
         SSMCFormatData {
-            man_offset:         internal_blocks_start,
-            man_length:         man_length as u64,
-            dict_offset:        internal_blocks_start + man_length as u64,
-            dict_length,
-            chunk_index_offset: internal_blocks_start + man_length as u64 +
-                                dict_length,
-            chunk_index_length,
-            data_offset:        internal_blocks_start + man_length as u64 +
-                                dict_length + chunk_index_length
+            enc_man_offset,
+            enc_man_length:         enc_man_length as u64,
+            data_dict_offset,
+            data_dict_length,
+            enc_chunk_idx_offset,
+            enc_chunk_idx_length,
+            data_offset,
         }
     }
 }
-
 
 #[derive(Decode, Encode, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct TocEntry {

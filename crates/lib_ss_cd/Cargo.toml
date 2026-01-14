@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib", "staticlib"]
 [dependencies]
 sprite_shrink = {path = "../lib_sprite_shrink"}
 
+bitcode = { version = "0.6", default-features = false, features = ["derive"] }
 bytemuck = { version = "1.23", default-features = false, features = ["derive"] }
 crc-fast = { version = "1.10", default-features = false, features = ["alloc", "std"] }
 dashmap = { version = "6.1", default-features = false }

@@ -57,10 +57,10 @@ pub fn run_info(
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
 
-    let toc_offset = header.toc_offset;
+    let toc_offset = header.enc_toc_offset;
 
     /*Stores the length of the table of contents from the header.*/
-    let toc_length = header.toc_length as usize;
+    let toc_length = header.enc_toc_length as usize;
 
     let toc = get_toc(file_path, toc_offset, toc_length)?;
 

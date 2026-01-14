@@ -40,7 +40,10 @@ mod error_handling;
 use error_handling::{
     CliError, initiate_logging, offset_to_line_col};
 mod storage_io;
-use crate::{cli_types::SpriteShrinkConfig, modes::compress_modes::run_optical_compression, storage_io::{
+use crate::{
+    cli_types::SpriteShrinkConfig,
+    modes::compress_modes::run_optical_compression,
+    storage_io::{
     cleanup_old_logs, files_from_dirs, load_config, organize_paths
     }
 };
@@ -109,6 +112,7 @@ fn run(
             let file_path = file_paths.first().ok_or_else(
                 CliError::NoFilesFound
             )?;
+
             let indices: Vec<u8> = range_parser::parse::<u8>(
                 extract_str
             )?;

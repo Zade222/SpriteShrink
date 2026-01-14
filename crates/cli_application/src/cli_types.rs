@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashMap,
-    fs::remove_file,
+    fs::{Metadata, metadata, remove_file},
     hash::Hash,
     path::{Path, PathBuf},
     sync::Arc,
@@ -244,6 +244,11 @@ pub struct TempFileGuard<'a> {
 impl<'a> TempFileGuard<'a> {
     pub fn new(path: &'a Path) -> Self {
         Self { path }
+    }
+
+    
+    pub fn size(&self) -> u64 {
+        metadata(self.path).map_or(0, |meta| meta.len())
     }
 }
 

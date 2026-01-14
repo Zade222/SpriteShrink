@@ -229,7 +229,6 @@ pub fn verify_disc_integrity<A, D, E, H>(
     get_data_chunks: D,
     get_audio_blocks: A,
     //mut progress_cb: P
-    //original_file: &mut R,
 ) -> Result<(), SpriteShrinkCDError>
 where
     A: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
@@ -280,22 +279,6 @@ where
     let lba_map = &manifest.lba_map;
     let mut current_msf_offset = lba_map[0].1;
     let mut lba_index = 0;
-
-    println!("Starting offset = {}", current_msf_offset);
-
-    let total_data_sectors: u32 = expanded_sector_types.iter()
-        .filter(|&&t| !matches!(
-            t,
-            SectorType::Audio | SectorType::PregapAudio
-        )).count() as u32;
-
-    let layout_total_bytes: u64 = manifest.data_stream_layout.iter()
-        .map(|c| c.uncomp_len as u64)
-        .sum();
-
-
-    println!("Reconstruction Sector Count: {}", total_data_sectors);
-    println!("Manifest Layout Byte Count: {}", layout_total_bytes);
 
     let mut hasher = Sha512::new();
     let mut data_buffer: VecDeque<Vec<u8>> = VecDeque::new();
@@ -381,64 +364,6 @@ where
         let reconstructed_sector = result.map_err(|e| {
             SpriteShrinkCDError::Reconstruction(e)
         })?;
-
-        /*let mut original_sector = [0u8; 2352];
-        original_file.read_exact(&mut original_sector)
-            .map_err(|e| SpriteShrinkCDError::Io(e))?;
-
-        if reconstructed_sector != original_sector {
-            println!("Mismatch at Sector {}", i);
-            for b in 0..2352 {
-                if reconstructed_sector[b] != original_sector[b] {
-                    println!("First mismatch at byte {}: Expected {:02X}, Got {:02X}",
-                        b, original_sector[b], reconstructed_sector[b]);
-                    break;
-                }
-            }
-
-            println!("Recon Sync bytes:");
-            for b in 0..12 {
-                print!("{:02x}", reconstructed_sector[b])
-            }
-            println!("\nOrig Sync bytes:");
-            for b in 0..12 {
-                print!("{:02x}", original_sector[b])
-            }
-
-            println!("\nRecon Header bytes:");
-            for b in 12..16 {
-                print!("{:02x}", reconstructed_sector[b])
-            }
-            println!("\nOrig Header bytes:");
-            for b in 12..16 {
-                print!("{:02x}", original_sector[b])
-            }
-
-            println!("\nRecon EDC bytes:");
-            for b in 2072..2076 {
-                print!("{:02x}", reconstructed_sector[b])
-            }
-            println!("\nOrig EDC bytes:");
-            for b in 2072..2076 {
-                print!("{:02x}", original_sector[b])
-            }
-
-            println!("\nRecon Subheader bytes:");
-            for b in 16..20 {
-                print!("{:02x}", reconstructed_sector[b])
-            }
-            println!("\nOrig Subheader bytes:");
-            for b in 16..20 {
-                print!("{:02x}", original_sector[b])
-            }
-
-            println!("\nRecon Sector Mode/Form {:?}", sector_type);
-
-            println!();
-
-            return Err(ReconstructionError::ReconstructionFailure.into())
-        }*/
-
 
         hasher.update(reconstructed_sector);
         //progress_cb(2352);

@@ -90,12 +90,12 @@ pub fn run_extraction(
 
     let format_data = parse_format_data(&bin_format_data)?;
 
-    let toc = get_toc(file_path, header.toc_offset, header.toc_length as usize)?;
+    let toc = get_toc(file_path, header.enc_toc_offset, header.enc_toc_length as usize)?;
 
     //Read all required metadata.
     let metadata_block = read_metadata_block(file_path, &format_data)?;
 
-    /*Get the identifier for the hash type stored in the archive.*/
+    /*Get the identifier for the hash type stored in the archive header.*/
     let hash_bit_length = header.hash_type;
 
     match hash_bit_length {
@@ -209,8 +209,8 @@ where
 {
     /*Stores the length of each piece of the metadata from the archive as
      provided by the header.*/
-    let man_length = format_data.man_length as usize;
-    let dict_length = format_data.dict_length as usize;
+    let man_length = format_data.enc_man_length as usize;
+    let dict_length = format_data.data_dict_length as usize;
 
     let manifest_slice = &metadata_block[0..man_length];
     let dict_slice = &metadata_block[man_length..man_length + dict_length];

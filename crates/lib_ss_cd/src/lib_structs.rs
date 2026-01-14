@@ -5,6 +5,7 @@ use std::{
     sync::atomic::{AtomicU16, Ordering,}
 };
 
+use bitcode::{Decode, Encode};
 use bytemuck::{Pod, Zeroable};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
@@ -12,14 +13,14 @@ use zerocopy::{Immutable, IntoBytes, FromBytes};
 
 pub const SSMD_UID: u16 = 0xd541;
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
 pub struct BlobLocation {
     pub offset: u64,
     pub length: u64,
 }
 
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
 pub struct ContentBlock<H> {
     pub start_sector: u32,
     pub sector_count: u32,
@@ -79,7 +80,7 @@ impl fmt::Display for CueSheet {
 
 
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq,  Serialize)]
 pub struct DataChunkLayout<H> {
     pub hash: H,
     pub uncomp_len: u32,
@@ -93,7 +94,7 @@ pub struct DecodedSectorInfo {
 }
 
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Deserialize, Debug, Decode, Encode, Eq, PartialEq, Serialize)]
 pub struct DiscManifest<H> {
     pub collection_id: u8,
     pub lba_map: Vec<(u32, u32)>,
@@ -102,7 +103,6 @@ pub struct DiscManifest<H> {
     pub data_stream_layout: Vec<DataChunkLayout<H>>,
     pub subheader_index: Vec<SubHeaderEntry>,
     pub integrity_hash: u64,
-    pub exception_blob: BlobLocation,
 }
 
 
@@ -246,7 +246,7 @@ pub enum ReconstructionInfo<H> {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
 pub struct RleSectorMap {
     pub runs: Vec<(u32, SectorType)>,
 }
@@ -271,7 +271,9 @@ pub struct SectorMapResult {
 }
 
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize
+)]
 pub enum SectorType {
     Audio,
     Mode1,
@@ -315,17 +317,19 @@ impl SectorType {
 #[repr(C)]
 #[derive(Copy, Clone, FromBytes, Immutable, IntoBytes, Pod, Zeroable)]
 pub struct SSMDFormatData {
-    pub man_offset: u64,
-    pub man_length: u64,
-    pub data_dict_offset: u64,
-    pub data_dict_length: u64,
-    pub chunk_index_offset: u64,
-    pub chunk_index_length: u64,
-    pub subheader_table_offset: u64,
-    pub subheader_table_length: u64,
-    pub audio_data_offset: u64,
-    pub audio_data_length: u64,
-    pub data_offset: u64,
+    pub man_offset:             u64,
+    pub man_length:             u64,
+    pub data_dict_offset:       u64,
+    pub data_dict_length:       u64,
+    pub enc_chunk_idx_offset:   u64,
+    pub enc_chunk_idx_length:   u64,
+    pub enc_audio_idx_offset:   u64,
+    pub enc_audio_idx_length:   u64,
+    pub subheader_tbl_offset:   u64,
+    pub subheader_tbl_length:   u64,
+    pub audio_data_offset:      u64,
+    pub audio_data_length:      u64,
+    pub data_offset:            u64,
 }
 
 
@@ -333,33 +337,36 @@ impl SSMDFormatData {
     pub const SIZE: u64 = mem::size_of::<SSMDFormatData>() as u64;
 
     pub fn build_format_data (
-        format_data_offset: usize,
-        man_length: usize,
-        data_dict_length: u64,
-        chunk_index_length: u64,
-        subheader_table_length: u64,
-        audio_data_length: u64,
+        format_data_offset:     usize,
+        man_length:             usize,
+        data_dict_length:       u64,
+        enc_chunk_idx_length:   u64,
+        enc_audio_idx_length:   u64,
+        subheader_tbl_length:   u64,
+        audio_data_length:      u64,
     ) -> Self {
-        let internal_blocks_start = format_data_offset as u64 + Self::SIZE;
+        let man_offset = format_data_offset as u64 + Self::SIZE;
+        let data_dict_offset = man_offset + man_length as u64;
+        let enc_chunk_idx_offset = data_dict_offset + data_dict_length;
+        let enc_audio_idx_offset = enc_chunk_idx_offset + enc_chunk_idx_length;
+        let subheader_tbl_offset = enc_audio_idx_offset + enc_audio_idx_length;
+        let audio_data_offset = subheader_tbl_offset + subheader_tbl_length;
+        let data_offset = audio_data_offset + audio_data_length;
 
         SSMDFormatData {
-            man_offset:             internal_blocks_start,
+            man_offset,
             man_length:             man_length as u64,
-            data_dict_offset:       internal_blocks_start + man_length as u64,
+            data_dict_offset,
             data_dict_length,
-            chunk_index_offset:     internal_blocks_start + man_length as u64 +
-                                    data_dict_length,
-            chunk_index_length,
-            subheader_table_offset: internal_blocks_start + man_length as u64 +
-                                    data_dict_length + chunk_index_length,
-            subheader_table_length,
-            audio_data_offset:      internal_blocks_start + man_length as u64 +
-                                    data_dict_length + chunk_index_length +
-                                    subheader_table_length,
+            enc_chunk_idx_offset,
+            enc_chunk_idx_length,
+            enc_audio_idx_offset,
+            enc_audio_idx_length,
+            subheader_tbl_offset,
+            subheader_tbl_length,
+            audio_data_offset,
             audio_data_length,
-            data_offset:            internal_blocks_start + man_length as u64 +
-                                    data_dict_length + chunk_index_length +
-                                    subheader_table_length + audio_data_length
+            data_offset
         }
     }
 }
@@ -372,7 +379,7 @@ pub struct StreamChunkInfo<H> {
 }
 
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
 pub struct SubHeaderEntry {
     pub start_lba: u32,
     pub count: u32,

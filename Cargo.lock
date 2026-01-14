@@ -1196,6 +1196,7 @@ dependencies = [
 name = "sprite_shrink_cd"
 version = "0.1.0"
 dependencies = [
+ "bitcode",
  "bytemuck",
  "cbindgen",
  "crc-fast",

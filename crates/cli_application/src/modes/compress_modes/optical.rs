@@ -9,7 +9,7 @@ use std::{
     }}, thread
 };
 
-use bitcode::Encode;
+use bitcode::{Encode, encode};
 use dashmap::DashMap;
 use directories::ProjectDirs;
 use fastcdc::v2020::{StreamCDC, Normalization};
@@ -23,23 +23,25 @@ use tracing::{
 };
 use sprite_shrink::{
     SS_SEED,
-    ArchiveBuilder, ChunkLocation, FileManifestParent, TocEntry,
+    ArchiveBuilder, ChunkLocation, FileHeader, FileManifestParent, TocEntry,
     test_compression, dashmap_values_to_vec
 };
 use sprite_shrink_cd::{
+    SSMD_UID,
     BlobLocation, ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
     FileSizeProvider, ExceptionInfo, MultiBinStream, ReconstructionError,
     SectorDataProvider, SectorRegionStream, SectorMap, SectorType,
-    SpriteShrinkCDError, SubheaderRegistry, UserDataStream,
+    SpriteShrinkCDError, SSMDFormatData, SubheaderRegistry, UserDataStream,
     analyze_cue_sheets, analyze_and_map_disc, compress_audio_blocks,
     resolve_file_sector_counts, rle_encode_map, verify_disc_integrity
 };
 use xxhash_rust::xxh3::Xxh3;
+use zerocopy::IntoBytes;
 
 use crate::{
     arg_handling::Args,
     cli_types::{DiscCompleteData, DiscExceptionBlob, TempFileGuard},
-    storage_io::append_data_to_file,
+    storage_io::{append_data_to_file, write_final_archive},
 };
 use crate::cli_types::{
     APPIDENTIFIER, CacheTarget, OpticalChunkMessage
@@ -255,15 +257,6 @@ where
 
     let total_input_size = cue_analysis.total_data_size;
 
-    println!("Total input data size = {total_input_size}");
-
-    println!("Reg data size = {}", audio_data_size);
-    println!("Audio data size = {}", audio_temp_cache.get_tot_data_size());
-    println!("Exception data size = {}", tot_exception_data);
-    println!("Processed data size = {data_sum}");
-
-    let all_data_hashes = collect_all_data_hashes(&disc_manifiests);
-
     let chunk_ret_cb = Arc::new({
         let cache_clone = Arc::clone(&data_temp_cache);
         let running_clone = Arc::clone(&running);
@@ -288,31 +281,34 @@ where
         }
     });
 
-    let mut ser_man: Vec<(String, DiscManifest<H>)> = disc_manifiests
+    let mut entries: Vec<(String, DiscManifest<H>)> = disc_manifiests
         .iter()
         .map(|entry| (entry.key().clone(), entry.value().clone()))
         .collect();
 
-    ser_man.sort_by(|a, b| a.0.cmp(&b.0));
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let archive_toc: Vec<TocEntry> = ser_man.iter().map(|(title, man)| {
-        let sector_count: u64 = man.rle_sector_map.runs.iter()
+    let mut archive_toc = Vec::with_capacity(entries.len());
+    let mut disc_manifests = Vec::with_capacity(entries.len());
+
+    for (title, manifest) in entries {
+        let sector_count: u64 = manifest.rle_sector_map.runs.iter()
             .map(|(run, _)| *run as u64)
             .sum();
 
-        TocEntry {
-            title: title.clone(),
+        archive_toc.push(TocEntry {
+            title,
             uncompressed_size: sector_count * 2352
-        }
-    }).collect();
+        });
 
-    let archive_toc_arc = Arc::new(archive_toc);
+        disc_manifests.push(manifest);
+    }
+
+    let archive_toc_arc = Arc::new(&archive_toc);
 
     //This can be parallelized to accelerate the validation step.
-    for (i, manifest) in ser_man.iter().enumerate() {
+    for (i, manifest) in disc_manifests.iter().enumerate() {
         let archive_toc_clone = archive_toc_arc.clone();
-        println!("Verifying {}", archive_toc_clone[i].title.clone());
-
 
         let hashes_entry = veri_hashes.get(&archive_toc_clone[i].title.clone())
             .ok_or_else(|| CliError::InternalError(format!(
@@ -351,7 +347,7 @@ where
         };
 
         let result = verify_disc_integrity(
-            &manifest.1,
+            manifest,
             &disc_exception_blob.exception_index,
             &disc_exception_blob.disc_blob,
             &subheader_table,
@@ -384,22 +380,23 @@ where
     println!("Verification passed!");
 
     //Compress audio
-    let audio_block_index: Vec<(H, ChunkLocation)> = Vec::new();
+    let mut audio_block_index: Vec<(H, ChunkLocation)> = Vec::new();
 
-    let audio_tmp_file_path = Arc::new(
+    let tmp_file_path = Arc::new(
         args.output
         .as_ref()
         .unwrap()
         .parent()
         .unwrap()
-        .join(format!("audio_{pid}"))
+        .join(format!("{pid}"))
         .with_extension("tmp")
     );
 
-    let _audio_tmp_guard = TempFileGuard::new(&audio_tmp_file_path);
+    /*Set file guard to clean up tmp files on error. */
+    let _tmp_guard = TempFileGuard::new(&tmp_file_path);
+    let mut audio_blob_size = 0u64;
 
     if audio_data_size > 0 {
-        println!("Now compressing audio.");
         let audio_chunk_hashes = audio_temp_cache.get_keys()?;
 
         let mut audio_write_buffer: Vec<u8> = Vec::with_capacity(
@@ -423,10 +420,12 @@ where
         };
 
         let tmp_audio_write_cb = {
-            let tfp_clone = Arc::clone(&audio_tmp_file_path);
-            move |chunk: &[u8], flush_flag: bool| -> Result<(), CliError>{
-                audio_write_buffer.extend_from_slice(chunk);
+            let tfp_clone = Arc::clone(&tmp_file_path);
+            move |data: &[u8], flush_flag: bool| -> Result<(), CliError>{
+
+                audio_write_buffer.extend_from_slice(data);
                 audio_block_count += 1;
+                audio_blob_size += data.len() as u64;
 
                 if (audio_block_count >= BUFFER_SIZE) || flush_flag {
                     append_data_to_file(&tfp_clone, &audio_write_buffer)?;
@@ -438,19 +437,12 @@ where
             }
         };
 
-        println!("Audio block hash count = {}", audio_chunk_hashes.len());
-
-        let audio_block_index = compress_audio_blocks(
+        audio_block_index = compress_audio_blocks(
             audio_chunk_hashes,
             get_audio_data_for_lib,
             tmp_audio_write_cb,
             process_threads
         )?;
-
-        let audio_blob_size = audio_block_index.last().unwrap().1.compressed_length as u64 +
-            audio_block_index.last().unwrap().1.offset;
-
-        println!("Audio blob size = {}", audio_blob_size);
     }
 
     let chunk_hashes = data_temp_cache.get_keys()?;
@@ -466,16 +458,6 @@ where
     //Holds the amount of chunks that have been stored in the buffer.
     let mut chunk_count = 0usize;
 
-    let chunk_tmp_file_path = Arc::new(
-        args.output
-        .as_ref()
-        .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("chunk_{pid}"))
-        .with_extension("tmp")
-    );
-
     let get_chunk_data_for_lib = {
         let cb = Arc::clone(&chunk_ret_cb);
         let lib_running_clone = Arc::clone(&running);
@@ -490,14 +472,11 @@ where
         }
     };
 
-    /*Set file guard to clean up tmp files on error. */
-    let _tmp_guard = TempFileGuard::new(&chunk_tmp_file_path);
-
     /*Callback for storing and writing chunk data.
     Flush flag can be used to force the data to be written if the buffer has
     not reached the BUFFER_SIZE.*/
     let tmp_chunk_write_cb = {
-        let tfp_clone = Arc::clone(&chunk_tmp_file_path);
+        let tfp_clone = Arc::clone(&tmp_file_path);
         move |chunk: &[u8], flush_flag: bool| -> Result<(), CliError>{
             write_buffer.extend_from_slice(chunk);
             chunk_count += 1;
@@ -524,53 +503,69 @@ where
         .optimize_dictionary(args.optimize_dictionary)
         .worker_threads(args.threads.unwrap_or(0));
 
-    println!("Now compressing chunks.");
-
     let comp_data = comp_data_builder.build()?;
 
-    println!("Dictionary size = {}", comp_data.dictionary_size);
-    println!("Encoded Chunk Index size = {}", comp_data.enc_chunk_index_size);
+    let enc_toc = encode(&archive_toc);
 
-    /*let mut manifest_size = 0usize;
+    let enc_disc_manifest = encode(&disc_manifests);
 
-    for man in disc_manifiests.iter() {
-        println!("{}:", man.title);
-        let mut size = 0usize;
-        size += man.title.len();
-        println!("Title size = {}", man.title.len());
-        size += 1;
-        size += man.lba_map.len() * 8;
-        println!("LBA Map: Count = {}, Size = {}",
-            man.lba_map.len(),
-            man.lba_map.len() * 8
-        );
-        size += man.rle_sector_map.runs.len();
-        println!("rle_map: Count = {}, Size = {}",
-            man.rle_sector_map.runs.len(),
-            man.rle_sector_map.runs.len() * 5
-        );
-        size += man.audio_block_map.len() * 17;
-        println!("audio_map: Count = {}, Size = {}",
-            man.audio_block_map.len(),
-            man.audio_block_map.len() * 17
-        );
-        size += man.data_stream_layout.len() * 12;
-        println!("data_stream_layout: Count = {}, Size = {}",
-            man.data_stream_layout.len(),
-            man.data_stream_layout.len() * 12
-        );
-        size += man.subheader_index.len() * 10;
-        println!("subheader_index: Count = {}, Size = {}",
-            man.subheader_index.len(),
-            man.subheader_index.len() * 10
-        );
-        size += 8;
-        manifest_size += size;
+    let enc_audio_index = if !audio_block_index.is_empty() {
+        encode(&audio_block_index)
+    } else {
+        vec![0u8; 0]
+    };
+
+
+    let file_header = FileHeader::build_file_header(
+        archive_toc.len() as u32,
+        98, //zstd
+        *hash_type_id,
+        SSMD_UID,
+        enc_toc.len() as u32
+    );
+
+    let format_data = SSMDFormatData::build_format_data(
+        FileHeader::HEADER_SIZE as usize + enc_toc.len(),
+        enc_disc_manifest.len(),
+        comp_data.dictionary_size,
+        comp_data.enc_chunk_index_size,
+        enc_audio_index.len() as u64,
+        subheader_table.len() as u64,
+        audio_blob_size
+    );
+
+    let mut final_data = Vec::with_capacity(
+        FileHeader::HEADER_SIZE as usize + enc_toc.len() +
+            SSMDFormatData::SIZE as usize + enc_disc_manifest.len() +
+            comp_data.dictionary_size as usize +
+            comp_data.enc_chunk_index_size as usize +
+            subheader_table.len()
+    );
+
+    final_data.extend_from_slice(file_header.as_bytes());
+    final_data.extend_from_slice(&enc_toc);
+    final_data.extend_from_slice(format_data.as_bytes());
+    final_data.extend_from_slice(&enc_disc_manifest);
+    final_data.extend_from_slice(&comp_data.dictionary);
+    final_data.extend_from_slice(&comp_data.enc_chunk_index);
+    if !audio_block_index.is_empty() {
+        final_data.extend_from_slice(&enc_audio_index);
     }
+    final_data.extend_from_slice(subheader_table.as_bytes());
 
-    println!("Total size of all manifests = {}", manifest_size);*/
+    let blob_size = _tmp_guard.size();
+    println!("Estimated final data size with blob: {}", final_data.len() + blob_size as usize);
 
+    let final_output_path = args.output
+        .as_ref()
+        .unwrap()
+        .with_extension("ssmd");
 
+    write_final_archive(
+        &final_output_path,
+        &tmp_file_path,
+        &final_data
+    )?;
 
     Ok(())
 }
@@ -693,10 +688,6 @@ where
                         data_stream_layout: dcd.data_stream_layout,
                         subheader_index: dcd.subheader_index,
                         integrity_hash: dcd.integrity_hash,
-                        exception_blob: BlobLocation{
-                            offset: 0,
-                            length: 0
-                        }
                     };
 
                     let deb = DiscExceptionBlob {
@@ -1019,28 +1010,3 @@ where
         integrity_hash: xxh3_hasher.finish()
     })
 }
-
-
-fn collect_all_data_hashes<H>(
-       manifests: &DashMap<String, DiscManifest<H>>
-   ) -> Vec<H>
-   where
-       H: Hashable + Eq + Copy,
-   {
-       let mut unique_hashes = HashSet::new();
-
-       // Iterate through all the manifests in the DashMap
-       for entry in manifests.iter() {
-           let manifest = entry.value();
-
-           // For each manifest, iterate through its data chunk layout
-           for chunk_layout in &manifest.data_stream_layout {
-               // Insert the hash into the HashSet.
-               // HashSet automatically handles ensuring uniqueness.
-               unique_hashes.insert(chunk_layout.hash);
-           }
-       }
-
-       // Convert the HashSet of unique hashes into a Vec to return
-       unique_hashes.into_iter().collect()
-   }
