@@ -20,7 +20,7 @@ mod lib_structs;
 pub use lib_structs::{
     BlobLocation, CueSheet, ContentBlock, DataChunkLayout, DiscManifest,
     ExceptionInfo, ExceptionType, RleSectorMap, SectorMap, SectorType,
-    SubHeaderEntry, SubheaderRegistry
+    SSMDFormatData, SubHeaderEntry, SubheaderRegistry
 };
 
 mod mapper;

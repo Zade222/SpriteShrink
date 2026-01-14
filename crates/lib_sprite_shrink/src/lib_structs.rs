@@ -16,11 +16,9 @@ use bitcode::{
 use bytemuck::{Pod, Zeroable};
 use fastcdc::v2020::{Chunk};
 use serde::{Deserialize, Serialize};
-use zerocopy::Immutable;
-use zerocopy::{IntoBytes, FromBytes};
+use zerocopy::{Immutable, IntoBytes, FromBytes};
 
 use crate::{
-    SpriteShrinkError,
     MAGIC_NUMBER, SUPPORTED_VERSION
 };
 
@@ -110,7 +108,6 @@ impl FileHeader {
         format_id: u16,
         toc_length: u32,
     ) -> FileHeader {
-        //Build, file and return a FileHeader struct with data.
         FileHeader {
             magic_num:      MAGIC_NUMBER,
             file_version:   SUPPORTED_VERSION,
@@ -361,22 +358,23 @@ impl SSMCFormatData {
     pub const SIZE: u64 = mem::size_of::<SSMCFormatData>() as u64;
 
     pub fn build_format_data(
-        starting_offset: usize, //Header + TOC size
+        format_data_offset: usize,
         man_length: usize,
         dict_length: u64,
         chunk_index_length: u64,
-    ) -> SSMCFormatData {
+    ) -> Self {
+        let internal_blocks_start = format_data_offset as u64 + Self::SIZE;
+
         SSMCFormatData {
-            man_offset: starting_offset as u64 + Self::SIZE,
-            man_length: man_length as u64,
-            dict_offset: starting_offset as u64 + Self::SIZE +
-                man_length as u64,
+            man_offset:         internal_blocks_start,
+            man_length:         man_length as u64,
+            dict_offset:        internal_blocks_start + man_length as u64,
             dict_length,
-            chunk_index_offset: starting_offset as u64 + Self::SIZE +
-                man_length as u64 + dict_length,
+            chunk_index_offset: internal_blocks_start + man_length as u64 +
+                                dict_length,
             chunk_index_length,
-            data_offset: starting_offset as u64 + Self::SIZE +
-                man_length as u64 + dict_length + chunk_index_length
+            data_offset:        internal_blocks_start + man_length as u64 +
+                                dict_length + chunk_index_length
         }
     }
 }
