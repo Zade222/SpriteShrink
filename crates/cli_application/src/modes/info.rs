@@ -10,14 +10,14 @@ use std::{
 };
 
 use crate::archive_parser::{
-    get_file_header, get_file_manifest
+    get_file_header, get_file_manifest, get_toc
 };
 
 use human_bytes::human_bytes;
 use serde_json::{self, json, Value, to_string_pretty};
 
 use sprite_shrink::{
-    FileManifestParent
+    FileHeader, FileManifestParent, TocEntry
 };
 
 use crate::error_handling::CliError;
@@ -57,35 +57,14 @@ pub fn run_info(
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
 
-    /*Stores the length of the file_manifest from the header.*/
-    let man_length = header.man_length as usize;
+    let toc_offset = header.toc_offset;
 
-    /*Get the identifier for the hash type stored in the archive.*/
-    let hash_bit_length = header.hash_type;
+    /*Stores the length of the table of contents from the header.*/
+    let toc_length = header.toc_length as usize;
 
-    macro_rules! process_and_print {
-        ($hash_type:ty) => {{
-            let file_manifest =
-                get_file_manifest::<$hash_type>(
-                    file_path,
-                    &header.man_offset,
-                    &man_length
-                )?;
-            dispatch_print_info(file_manifest, list, metadata)?
-        }};
-    }
+    let toc = get_toc(file_path, toc_offset, toc_length)?;
 
-    /*Read and store the file manifest from the target file in memory in
-    the file_manifest variable*/
-    match hash_bit_length {
-        1 => process_and_print!(u64),
-        2 => process_and_print!(u128),
-        _ => {
-            //Handle other cases or return an error for unsupported hash types
-            return Err(CliError::InternalError(
-                "Unsupported hash type in archive header.".to_string()));
-        }
-    };
+    dispatch_print_info(toc, metadata)?;
 
     Ok(())
 }
@@ -102,25 +81,16 @@ pub fn run_info(
 ///
 /// * `file_manifest`: A vector of `FileManifestParent` structs, where each
 ///   struct contains the metadata for a single file in the archive.
-/// * `list`: A user provided boolean flag that determines the plain text
-///   output format. If `true`, the output will be a plain text table.
 /// * `metadata`: A user provided boolean flag that determines the json
 ///   output format. If `true`, the output will be JSON.
-///
-/// # Type Parameters
-///
-/// * `H`: A generic type parameter representing the hash type used in the
-///   file manifest. It must implement the `Clone` trait to allow the data
-///   to be passed to the underlying print functions.
-fn dispatch_print_info<H: Clone>(
-    file_manifest: Vec<FileManifestParent<H>>,
-    _list: bool,
+fn dispatch_print_info(
+    toc: Vec<TocEntry>,
     metadata: bool
 ) -> Result<(), CliError>{
     if metadata {
-        print_info_json::<H>(file_manifest)?;
+        print_info_json(toc)?;
     } else {
-        print_info_table::<H>(file_manifest);
+        print_info_table(toc);
     }
 
     Ok(())
@@ -131,11 +101,6 @@ fn dispatch_print_info<H: Clone>(
 /// # Arguments
 ///
 /// * `file_manifest`: A vector of `FileManifestParent` structs to display.
-///
-/// # Type Parameters
-///
-/// * `H`: The hash type used in the file manifest, which must implement
-///   the necessary traits for serialization and display.
 ///
 /// # Examples
 ///
@@ -148,22 +113,20 @@ fn dispatch_print_info<H: Clone>(
 /// 2       | 8.00 MiB      | file_b.rom
 /// 3       | 8.00 MiB      | file_c.rom
 /// ```
-fn print_info_table<H: Clone>(
-    file_manifest: Vec<FileManifestParent<H>>
+fn print_info_table(
+    file_manifest: Vec<TocEntry>
 ){
     println!("Index\t| Filesize\t| Filename");
     println!("----------------------------------");
 
     /*For each FileManifestParent in the file manifest print the index
     + 1 to be easily understood by the user and the filename of that index.*/
-    file_manifest.iter().enumerate().for_each(|(index, fmp)|{
-        let file_size = fmp.chunk_metadata.last().map_or(0, |last_chunk| {
-            last_chunk.offset + last_chunk.length as u64
-        });
+    file_manifest.iter().enumerate().for_each(|(index, toc_entry)|{
+        let file_size = toc_entry.uncompressed_size;
         println!("{}\t| {}\t| {}",
             index + 1,
             human_bytes(file_size as f64),
-            fmp.filename
+            toc_entry.title
         );
     });
 
@@ -174,24 +137,17 @@ fn print_info_table<H: Clone>(
 /// # Arguments
 ///
 /// * `file_manifest`: A vector of `FileManifestParent` structs to display.
-///
-/// # Type Parameters
-///
-/// * `H`: The hash type used in the file manifest, which must implement
-///   the necessary traits for serialization and display.
-fn print_info_json<H: Clone>(
-    file_manifest: Vec<FileManifestParent<H>>
+fn print_info_json(
+    file_manifest: Vec<TocEntry>
 ) -> Result<(), CliError>{
     let files_json: Vec<Value> = file_manifest.iter()
         .enumerate()
-        .map(|(index, fmp)| {
-            let file_size = fmp.chunk_metadata.last().map_or(0, |last_chunk| {
-                last_chunk.offset + last_chunk.length as u64
-            });
+        .map(|(index, toc_entry)| {
+            let file_size = toc_entry.uncompressed_size;
 
             json!({
                 "index": index + 1,
-                "filename": &fmp.filename,
+                "filename": &toc_entry.title,
                 "size(bytes)": file_size
             })
         })

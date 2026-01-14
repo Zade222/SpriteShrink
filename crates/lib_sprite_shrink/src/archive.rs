@@ -33,7 +33,7 @@ use crate::{IsCancelled, SpriteShrinkError,
     },
     lib_structs::{
         ChunkLocation, CompressionResult, FileHeader,
-        Progress
+        Progress, SSMCFormatData
     }
 };
 
@@ -105,60 +105,6 @@ pub struct ArchiveBuilder<'a, E, H, R, W> {
 
     //Add this field
     _error_type: PhantomData<E>,
-}
-
-/// Constructs the file header for a new archive.
-///
-/// This function assembles a `FileHeader` struct, which is the starting
-/// block of an archive. It contains critical metadata, including magic
-/// numbers, versioning info, and the precise offsets and lengths for all
-/// major data sections. This header is essential for allowing extraction
-/// logic to properly navigate and decompress the archive.
-///
-/// # Arguments
-///
-/// * `file_count`: The total number of files to be included.
-/// * `algorithm_code`: Numerical value representing the compression used on
-///   the compressed data.
-/// * `hash_type`: Numerical value representing the hash type used when
-///   the data was hashed.
-/// * `man_length`: The total length in bytes of the file manifest.
-/// * `dict_length`: The total length in bytes of the dictionary.
-/// * `chunk_index_length`: The total length of the chunk index.
-///
-/// # Returns
-///
-/// Returns a `FileHeader` struct populated with the provided metadata.
-pub fn build_file_header(
-    file_count: u32,
-    algorithm_code: u16,
-    hash_type: u8,
-    man_length: u64,
-    dict_length: u64,
-    chunk_index_length: u64,
-) -> FileHeader {
-    //Get the size of the current FileHeader struct.
-    let header_size = mem::size_of::<FileHeader>() as u64;
-
-    //Build, file and return a FileHeader struct with data.
-    FileHeader {
-        magic_num:      MAGIC_NUMBER,
-        file_version:   SUPPORTED_VERSION,
-        file_count,
-        algorithm:      algorithm_code,
-        hash_type,
-        _pad1:          0,
-        format_id:      0u16,
-        _pad2:          [0, 0],
-        man_offset:     header_size,
-        man_length,
-        dict_offset:    header_size + man_length,
-        dict_length,
-        chunk_index_offset: header_size + man_length + dict_length,
-        chunk_index_length,
-        data_offset: header_size + man_length + dict_length +
-            chunk_index_length
-    }
 }
 
 /// Compresses a data slice using a shared dictionary.

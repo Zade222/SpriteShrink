@@ -15,21 +15,29 @@ use serde::{Deserialize};
 use thiserror::Error;
 
 use crate::lib_error_handling::SpriteShrinkError;
-use crate::lib_structs::{FileHeader, FileManifestParent, ChunkLocation};
+use crate::lib_structs::{
+    ChunkLocation, FileHeader, FileManifestParent, TocEntry, SSMCFormatData
+};
 
 #[derive(Error, Debug)]
 pub enum ParsingError {
-    #[error("File header is malformed. {0}")]
-    InvalidHeader(String),
+    #[error("Failed to decode chunk index: {0}")]
+    IndexDecodeError(String),
 
     #[error("Read file is of a newer version than what this library supports.")]
     InvalidFileVersion(),
 
+    #[error("File header is malformed. {0}")]
+    InvalidHeader(String),
+
+    #[error("Format data is malformed. {0}")]
+    InvalidFormatData(String),
+
     #[error("Failed to decode file manifest: {0}")]
     ManifestDecodeError(String),
 
-    #[error("Failed to decode chunk index: {0}")]
-    IndexDecodeError(String),
+    #[error("Failed to decode table of contents: {0}")]
+    TOCDecodeError(String)
 }
 
 /// The magic number used to identify a sprite-shrink archive file.
@@ -75,7 +83,7 @@ pub static SS_SEED: u64 = 0x4202803010192019;
 ///   incorrect, or the file version is unsupported.
 pub fn parse_file_header(
     header_data: &[u8]
-) -> Result<FileHeader, SpriteShrinkError>{
+) -> Result<FileHeader, SpriteShrinkError> {
     //Attempt to cast the byte slice to a FileHeader.
     let file_header =
         bytemuck::try_from_bytes::<FileHeader>(header_data)
@@ -155,4 +163,24 @@ where
         .collect();
 
     Ok(chunk_index)
+}
+
+
+pub fn parse_file_toc(
+    enc_toc_data: &[u8]
+) -> Result<Vec<TocEntry>, SpriteShrinkError> {
+    let bin_toc: Vec<TocEntry> = decode(enc_toc_data)
+        .map_err(|e| ParsingError::TOCDecodeError(e.to_string()))?;
+
+    Ok(bin_toc)
+}
+
+
+pub fn parse_format_data(
+    format_data: &[u8]
+) -> Result<SSMCFormatData, SpriteShrinkError> {
+    let parsed_format_data = bytemuck::try_from_bytes::<SSMCFormatData>(format_data)
+        .map_err(|e| ParsingError::InvalidFormatData(e.to_string()))?;
+
+    Ok(*parsed_format_data)
 }

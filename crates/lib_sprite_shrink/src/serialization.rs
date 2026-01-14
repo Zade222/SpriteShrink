@@ -14,7 +14,9 @@ use thiserror::Error;
 use crate::lib_error_handling::{
     IsCancelled, SpriteShrinkError
 };
-use crate::lib_structs::{ChunkLocation, FileManifestParent, SerializedData};
+use crate::lib_structs::{
+    ChunkLocation, FileManifestParent, SerializedData, TocEntry
+};
 
 #[derive(Error, Debug)]
 pub enum SerializationError {
@@ -208,14 +210,38 @@ where
     H: Copy + Ord + Eq + std::hash::Hash + std::fmt::Display,
     K: Fn() -> Result<Vec<H>, E>
 {
+    let mut entries: Vec<(String, FileManifestParent<H>)> = file_manifest
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.value().clone()))
+        .collect();
+
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut toc = Vec::with_capacity(entries.len());
+    let mut manifests = Vec::with_capacity(entries.len());
+
+    for (filename, mut manifest) in entries {
+        let uncomp_size = if let Some(chunk) = manifest.chunk_metadata.last() {
+            chunk.offset + chunk.length as u64
+        } else {
+            0
+        };
+
+        toc.push(TocEntry {
+            title: filename,
+            uncompressed_size: uncomp_size,
+        });
+
+        manifest.chunk_metadata.sort_by_key(|metadata| metadata.offset);
+
+        manifests.push(manifest);
+    }
+
     let mut serialized_data = SerializedData::<H> {
-        ser_file_manifest: dashmap_values_to_vec(file_manifest),
+        ser_file_manifest: manifests,
+        archive_toc: toc,
         ..Default::default()
     };
-
-    serialized_data
-        .ser_file_manifest
-        .sort_by(|a, b| a.filename.cmp(&b.filename));
 
     /*Put each files chunks in order from the beginning of the file to the end
     for easier processing when rebuilding file. */

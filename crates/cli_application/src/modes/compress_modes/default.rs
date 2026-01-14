@@ -23,8 +23,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::{bounded};
 use sprite_shrink::{
-    ArchiveBuilder, FileManifestParent, Hashable, Progress, SSAChunkMeta,
-    SS_SEED, build_file_header, serialize_uncompressed_data, verify_single_file
+    ArchiveBuilder, FileHeader, FileManifestParent, Hashable, Progress,
+    SSAChunkMeta, SSMCFormatData, SS_SEED, serialize_uncompressed_data,
+    verify_single_file
 };
 use rayon::prelude::*;
 use serde::Serialize;
@@ -351,6 +352,8 @@ where
     verifying files.*/
     drop(file_manifest);
 
+    let archive_toc = serialized_data.archive_toc;
+
     let verification_pb = if args.progress {
         let bar = ProgressBar::new(input_data_size);
         bar.set_style(
@@ -367,19 +370,19 @@ where
 
     let verification_pb_arc = Arc::new(verification_pb);
 
-    //Clone ser_file_manifest for use in verification loop
-    let sfm_clone = serialized_data.ser_file_manifest.clone();
-
     //Vector used to track status of each thread.
     let mut thread_handles = vec![];
 
     /*Pulls each chunk for a file, generating a hash for the file,
     and verifies the hash matches the hash of original file.*/
-    for fmp in sfm_clone{
-        let entry = veri_hashes.get(&fmp.filename)
+    for (i, fmp) in serialized_data.ser_file_manifest.iter().enumerate() {
+        let file_title = archive_toc[i].title.clone();
+        let fmp_owned = fmp.clone();
+
+        let entry = veri_hashes.get(&file_title)
             .ok_or_else(|| CliError::InternalError(format!(
             "Verification hash missing for file: {}",
-            fmp.filename
+            file_title
         )))?;
 
         let veri_hash = *entry.value();
@@ -404,7 +407,9 @@ where
         };
 
         let handle = thread::spawn(move ||{
-            verify_single_file(&fmp,
+            verify_single_file(
+                file_title,
+                &fmp_owned,
                 &veri_hash,
                 get_chunk_data_for_verify,
                 progress_closure
@@ -604,23 +609,34 @@ where
         .unwrap()
         .with_extension("ssmc");
 
+    let enc_toc = encode(&archive_toc);
+
     let enc_file_manifest = encode(&serialized_data.ser_file_manifest);
 
-    let file_header = build_file_header(
+    let file_header = FileHeader::build_file_header(
         file_paths.len() as u32,
         98, //zstd
         *hash_type_id,
-        enc_file_manifest.len() as u64,
+        0u16,
+        enc_toc.len() as u32,
+    );
+
+    let format_data = SSMCFormatData::build_format_data(
+        enc_toc.len() + FileHeader::HEADER_SIZE as usize,
+        enc_file_manifest.len(),
         comp_data.dictionary_size,
         comp_data.enc_chunk_index_size
     );
 
-    let mut final_data = Vec::with_capacity((
-        file_header.data_offset + enc_file_manifest.len() as u64 +
-            comp_data.dictionary_size + comp_data.enc_chunk_index_size
-    ) as usize );
+    let mut final_data = Vec::with_capacity(
+        FileHeader::HEADER_SIZE as usize + enc_toc.len() +
+            SSMCFormatData::SIZE as usize + enc_file_manifest.len() +
+            comp_data.dictionary.len() + comp_data.enc_chunk_index.len()
+    );
 
     final_data.extend_from_slice(file_header.as_bytes());
+    final_data.extend_from_slice(&enc_toc);
+    final_data.extend_from_slice(format_data.as_bytes());
     final_data.extend_from_slice(&enc_file_manifest);
     final_data.extend_from_slice(&comp_data.dictionary);
     final_data.extend_from_slice(&comp_data.enc_chunk_index);
@@ -780,7 +796,6 @@ where
                     );
 
                     let mut fmp = FileManifestParent{
-                        filename: fcd.file_name,
                         chunk_count: fcd.chunk_count,
                         chunk_metadata: fcd.chunk_meta
                     };
@@ -790,7 +805,7 @@ where
                     );
 
                     worker_file_manifest.insert(
-                        fmp.filename.clone(),
+                        fcd.file_name.clone(),
                         fmp
                     );
 

@@ -24,11 +24,13 @@ use tracing::{
 };
 
 use sprite_shrink::{
-    Hashable, decompress_chunk, parse_file_metadata, parse_file_chunk_index
+    Hashable, SSMCFormatData, TocEntry,
+    decompress_chunk, parse_file_metadata, parse_file_chunk_index,
+    parse_format_data
 };
 
 use crate::{
-    archive_parser::get_file_header,
+    archive_parser::{get_file_header, get_toc},
     arg_handling::Args,
     cli_types::TempFileGuard,
     error_handling::CliError,
@@ -80,8 +82,18 @@ pub fn run_extraction(
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
 
+    let bin_format_data = read_file_data(
+        file_path,
+        header.format_data_offset as u64,
+        SSMCFormatData::SIZE as usize
+    )?;
+
+    let format_data = parse_format_data(&bin_format_data)?;
+
+    let toc = get_toc(file_path, header.toc_offset, header.toc_length as usize)?;
+
     //Read all required metadata.
-    let metadata_block = read_metadata_block(file_path, &header)?;
+    let metadata_block = read_metadata_block(file_path, &format_data)?;
 
     /*Get the identifier for the hash type stored in the archive.*/
     let hash_bit_length = header.hash_type;
@@ -91,7 +103,8 @@ pub fn run_extraction(
             file_path,
             out_dir,
             rom_indices,
-            &header,
+            &format_data,
+            &toc,
             &metadata_block,
             args,
             running,
@@ -100,7 +113,8 @@ pub fn run_extraction(
             file_path,
             out_dir,
             rom_indices,
-            &header,
+            &format_data,
+            &toc,
             &metadata_block,
             args,
             running,
@@ -177,7 +191,8 @@ fn extract_data<H>(
     file_path: &Path,
     out_dir: &Path,
     rom_indices: &Vec<u8>,
-    header: &sprite_shrink::FileHeader,
+    format_data: &SSMCFormatData,
+    toc: &[TocEntry],
     metadata_block: &[u8],
     args: &Args,
     running: Arc<AtomicBool>,
@@ -194,8 +209,8 @@ where
 {
     /*Stores the length of each piece of the metadata from the archive as
      provided by the header.*/
-    let man_length = header.man_length as usize;
-    let dict_length = header.dict_length as usize;
+    let man_length = format_data.man_length as usize;
+    let dict_length = format_data.dict_length as usize;
 
     let manifest_slice = &metadata_block[0..man_length];
     let dict_slice = &metadata_block[man_length..man_length + dict_length];
@@ -223,7 +238,7 @@ where
         ))?;
 
         let final_output_path = out_dir.join(
-            &fmp.filename);
+            toc[(*rom as usize) - 1].title.clone());
 
         let tmp_output_path = final_output_path.with_extension("tmp");
 
@@ -249,12 +264,12 @@ where
             store, from the ChunkLocation struct.*/
             let absolute_offset =
                 chunk_location.offset +
-                header.data_offset;
+                format_data.data_offset;
 
             let comp_chunk_data = read_file_data(
                 file_path,
-                &absolute_offset,
-                &(chunk_location.compressed_length as usize)
+                absolute_offset,
+                chunk_location.compressed_length as usize
             )?;
 
             let decomp_chunk_data = decompress_chunk(
@@ -286,7 +301,7 @@ where
         //The file is fully written, rename it to final name.
         rename(&tmp_output_path, final_output_path)?;
 
-        debug!("{} extracted successfully", &fmp.filename);
+        debug!("{} extracted successfully", toc[(*rom as usize) - 1].title);
     }
 
     Ok(())

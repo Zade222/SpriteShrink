@@ -192,7 +192,6 @@ fn chunk_data(
 /// - A `FileManifestParent` for the processed file.
 /// - A `Vec` where each element is a tuple of a chunk's hash and its data.
 pub fn create_file_manifest_and_chunks<H: Hashable>(
-    file_name: &str,
     file_data: &[u8],
     chunks: &[Chunk],
 ) -> (FileManifestParent<H>, Vec<(H, Vec<u8>)>) {
@@ -217,7 +216,6 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 
     //Build file_manifest
     let file_manifest = FileManifestParent {
-        filename: file_name.to_string(),
         chunk_count: chunks.len() as u64,
         chunk_metadata,
     };
@@ -267,6 +265,7 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 /// * `H`: The generic hash type, which must be `Eq`, `Hash`, `Display`,
 ///   `Clone`, `Send`, `Sync`, and have a `'static` lifetime.
 pub fn verify_single_file<D, E, H, P>(
+    title: String,
     fmp: &FileManifestParent<H>,
     veri_hash: &[u8; 64],
     get_chunk_data: D,
@@ -362,7 +361,7 @@ where
     if calculated_hash.as_slice() == veri_hash {
         Ok(())
     } else {
-        Err(ProcessingError::HashMismatchError(fmp.filename.clone()).into())
+        Err(ProcessingError::HashMismatchError(title).into())
     }
 }
 

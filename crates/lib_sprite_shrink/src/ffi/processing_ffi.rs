@@ -131,7 +131,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u64(
 
     /*Call original function to process data.*/
     let (fmp, hashed_chunks) = create_file_manifest_and_chunks(
-        &file_name, file_data,
+        file_data,
         &chunks
     );
 
@@ -144,13 +144,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u64(
     let fmp_meta_cap = ffi_chunk_metadata.capacity();
     std::mem::forget(ffi_chunk_metadata);
 
-    let c_filename = match CString::new(fmp.filename.clone()) {
-        Ok(s) => s.into_raw(),
-        Err(_) => return FFIResult::InvalidString,
-    };
-
     let ffi_fmp = FFIFileManifestParent::<u64> {
-        filename: c_filename,
         chunk_metadata: fmp_meta_ptr,
         chunk_metadata_len: fmp_meta_len,
         chunk_metadata_cap: fmp_meta_cap,
@@ -284,7 +278,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u128(
     };
 
     let (fmp, hashed_chunks) = create_file_manifest_and_chunks::<u128>(
-        &file_name, file_data,
+        file_data,
         &chunks
     );
 
@@ -303,13 +297,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u128(
     let fmp_meta_cap = ffi_chunk_metadata.capacity();
     std::mem::forget(ffi_chunk_metadata);
 
-    let c_filename = match CString::new(fmp.filename.clone()) {
-        Ok(s) => s.into_raw(),
-        Err(_) => return FFIResult::InvalidString,
-    };
-
     let ffi_fmp = FFIFileManifestParent::<U128Bytes> {
-        filename: c_filename,
         chunk_metadata: fmp_meta_ptr,
         chunk_metadata_len: fmp_meta_len,
         chunk_metadata_cap: fmp_meta_cap,
@@ -399,8 +387,6 @@ fn free_file_manifest_and_chunks_internal<H>(
         let output_box = Box::from_raw(ptr);
 
         //Deallocate contents of the FFIFileManifestParent
-        let _ = CString::from_raw(output_box.fmp.filename);
-
         //Reclaim and drop the Vec for the chunk metadata.
         let _ = Vec::from_raw_parts(
             output_box.fmp.chunk_metadata as *mut FFISSAChunkMeta<H>,
@@ -648,16 +634,39 @@ pub unsafe extern "C" fn verify_single_file_u64(
             return FFIResult::NullArgument;
     }
 
-    let(fmp, veri_hash) = unsafe {
+    let(fmp, veri_hash, filename) = unsafe {
         /*Dereference the main struct pointer and convert using from.*/
-        let fmp = FileManifestParent::<u64>::from(&*args_int.file_manifest_parent);
+        let ffi_fmp = &*args_int.file_manifest_parent;
+
+        let chunk_metadata_slice = slice::from_raw_parts(
+            ffi_fmp.chunk_metadata,
+            ffi_fmp.chunk_metadata_len
+        );
+
+        let chunk_metadata = chunk_metadata_slice
+            .iter()
+            .map(|meta| SSAChunkMeta {
+                hash: meta.hash.into(),
+                offset: meta.offset,
+                length: meta.length,
+            })
+            .collect();
+
+        let fmp = FileManifestParent {
+            chunk_metadata,
+            chunk_count: ffi_fmp.chunk_metadata_len as u64,
+        };
 
         /*Prepare and reconstruct veri_hash, which is the fourth
         parameter of the original verify_single_file
         function, from C input.*/
         let veri_hash: [u8; 64] = *(args_int.veri_hash_array_ptr as *const [u8; 64]);
 
-        (fmp, veri_hash)
+        let filename = std::ffi::CStr::from_ptr(args_int.filename)
+            .to_string_lossy()
+            .into_owned();
+
+        (fmp, veri_hash, filename)
     };
 
     let get_chunks_cb = args_int.get_chunks_cb;
@@ -695,7 +704,7 @@ pub unsafe extern "C" fn verify_single_file_u64(
     };
 
     match verify_single_file(
-        &fmp, &veri_hash, get_chunks_closure, progress_closure
+        filename, &fmp, &veri_hash, get_chunks_closure, progress_closure
     ){
         Ok(()) => FFIResult::StatusOk,
         Err(e) => e.into(),
@@ -746,12 +755,9 @@ pub unsafe extern "C" fn verify_single_file_u128(
             return FFIResult::NullArgument;
     }
 
-    let(fmp, veri_hash) = unsafe {
+    let(fmp, veri_hash, filename) = unsafe {
         /*Dereference the main struct pointer and convert using from.*/
         let ffi_fmp = &*args_int.file_manifest_parent;
-        let filename = std::ffi::CStr::from_ptr(ffi_fmp.filename)
-            .to_string_lossy()
-            .into_owned();
 
         let chunk_metadata_slice = slice::from_raw_parts(
             ffi_fmp.chunk_metadata,
@@ -768,7 +774,6 @@ pub unsafe extern "C" fn verify_single_file_u128(
             .collect();
 
         let fmp = FileManifestParent {
-            filename,
             chunk_metadata,
             chunk_count: ffi_fmp.chunk_metadata_len as u64,
         };
@@ -778,7 +783,11 @@ pub unsafe extern "C" fn verify_single_file_u128(
         function, from C input.*/
         let veri_hash: [u8; 64] = *(args_int.veri_hash_array_ptr as *const [u8; 64]);
 
-        (fmp, veri_hash)
+        let filename = std::ffi::CStr::from_ptr(args_int.filename)
+            .to_string_lossy()
+            .into_owned();
+
+        (fmp, veri_hash, filename)
     };
 
     let get_chunks_cb = args_int.get_chunks_cb;
@@ -821,7 +830,7 @@ pub unsafe extern "C" fn verify_single_file_u128(
     };
 
     match verify_single_file(
-        &fmp, &veri_hash, get_chunks_closure, progress_closure
+        filename, &fmp, &veri_hash, get_chunks_closure, progress_closure
     ){
         Ok(()) => FFIResult::StatusOk,
         Err(e) => e.into(),

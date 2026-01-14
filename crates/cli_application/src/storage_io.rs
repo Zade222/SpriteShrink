@@ -20,6 +20,7 @@ use std::{
 
 use dashmap::DashMap;
 use directories::ProjectDirs;
+use sprite_shrink::{FileHeader, SSMCFormatData};
 use tracing::{
     debug,
     error,
@@ -227,8 +228,8 @@ pub fn files_from_dirs(
 /// # Arguments
 ///
 /// * `filepath`: A `Path` pointing to the file to be read.
-/// * `data_index`: A `u64` reference for the starting offset.
-/// * `data_length`: A `usize` reference for the number of bytes to read.
+/// * `data_index`: A `u64` for the starting offset.
+/// * `data_length`: A `u64` for the number of bytes to read.
 ///
 /// # Returns
 ///
@@ -237,17 +238,17 @@ pub fn files_from_dirs(
 /// - `Err(CliError::Io)` if the file cannot be opened or read.
 pub fn read_file_data(
     filepath: &Path,
-    data_index: &u64,
-    data_length: &usize
+    data_index: u64,
+    data_length: usize
 ) -> Result<Vec<u8>, CliError> {
     //Open file, but don't read whole file data into memory.
     let mut file = File::open(filepath)?;
 
     //Create mutable vector the size of the data length to be read.
-    let mut file_buffer: Vec<u8> =  vec![0; *data_length];
+    let mut file_buffer: Vec<u8> =  vec![0; data_length as usize];
 
     //Offset the start of where the read will begin.
-    file.seek(SeekFrom::Start(*data_index))?;
+    file.seek(SeekFrom::Start(data_index))?;
 
     //Read the data data from the file.
     file.read_exact(&mut file_buffer)?;
@@ -776,17 +777,15 @@ impl <H: Hash + Eq> Drop for TempCache<H> {
 ///   indicated by `total_length` cannot be read from the file.
 pub fn read_metadata_block(
     file_path: &Path,
-    header: &sprite_shrink::FileHeader,
+    ssmc_format_data: &SSMCFormatData
 ) -> Result<Vec<u8>, CliError> {
-    let start_offset = header.man_offset;
+    let read_start = ssmc_format_data.man_offset;
 
-    /*The block is contiguous, so the total length is the sum of the three
-    sections.*/
-    let total_length = (
-        header.man_length +
-        header.dict_length +
-        header.chunk_index_length
+    let read_amount = (
+        ssmc_format_data.man_length +
+        ssmc_format_data.dict_length +
+        ssmc_format_data.chunk_index_length
     ) as usize;
 
-    read_file_data(file_path, &start_offset, &total_length)
+    read_file_data(file_path, read_start, read_amount)
 }

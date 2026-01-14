@@ -6,7 +6,10 @@
 //! serialized format on disk. They are designed to be efficient for both
 //! compression and extraction operations.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    mem
+};
 use bitcode::{
     Decode, Encode
 };
@@ -15,6 +18,17 @@ use fastcdc::v2020::{Chunk};
 use serde::{Deserialize, Serialize};
 use zerocopy::Immutable;
 use zerocopy::{IntoBytes, FromBytes};
+
+use crate::{
+    SpriteShrinkError,
+    MAGIC_NUMBER, SUPPORTED_VERSION
+};
+
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveTOC {
+    pub entries: Vec<TocEntry>,
+}
 
 /// Represents the location of a data chunk within the archive.
 ///
@@ -73,21 +87,44 @@ pub struct CompressionResult {
 #[repr(C)]
 #[derive(FromBytes, IntoBytes, Immutable, Debug, Copy, Clone, Pod, Zeroable)]
 pub struct FileHeader {
-    pub magic_num:      [u8; 8],
-    pub file_version:   u32,
-    pub file_count:     u32,
-    pub algorithm:      u16,
-    pub hash_type:      u8,
-    pub _pad1:          u8,
-    pub format_id:      u16,
-    pub _pad2:          [u8; 2],
-    pub man_offset:     u64,
-    pub man_length:     u64,
-    pub dict_offset:    u64,
-    pub dict_length:    u64,
-    pub chunk_index_offset: u64,
-    pub chunk_index_length: u64,
-    pub data_offset:    u64
+    pub magic_num:          [u8; 8],
+    pub file_version:       u32,
+    pub file_count:         u32,
+    pub algorithm:          u16,
+    pub hash_type:          u8,
+    pub _pad1:              u8,
+    pub format_id:          u16,
+    pub _pad2:              [u8; 2],
+    pub toc_offset:         u32,
+    pub toc_length:         u32,
+    pub format_data_offset: u32,
+}
+
+impl FileHeader {
+    pub const HEADER_SIZE: u32 = mem::size_of::<FileHeader>() as u32;
+
+    pub fn build_file_header(
+        file_count: u32,
+        algorithm_code: u16,
+        hash_type: u8,
+        format_id: u16,
+        toc_length: u32,
+    ) -> FileHeader {
+        //Build, file and return a FileHeader struct with data.
+        FileHeader {
+            magic_num:      MAGIC_NUMBER,
+            file_version:   SUPPORTED_VERSION,
+            file_count,
+            algorithm:      algorithm_code,
+            hash_type,
+            _pad1:          0,
+            format_id,
+            _pad2:          [0, 0],
+            toc_offset:     Self::HEADER_SIZE,
+            toc_length,
+            format_data_offset: Self::HEADER_SIZE + toc_length
+        }
+    }
 }
 
 /// Encapsulates the in-memory representation of a single file.
@@ -123,7 +160,6 @@ pub struct FileData{
 ///   the order needed for reconstruction.
 #[derive(Clone, Debug, Decode, Deserialize, Encode, Serialize)]
 pub struct FileManifestParent<H> {
-    pub filename:       String,
     pub chunk_count:    u64,
     pub chunk_metadata: Vec<SSAChunkMeta<H>>,
 }
@@ -254,6 +290,7 @@ impl<H> SeekMetadata<H> {
 #[derive(Debug)]
 pub struct SerializedData<H>{
     pub ser_file_manifest: Vec<FileManifestParent<H>>,
+    pub archive_toc: Vec<TocEntry>,
     pub chunk_index: HashMap<H, ChunkLocation>,
     pub sorted_hashes: Vec<H>,
 }
@@ -280,6 +317,7 @@ impl<H> Default for SerializedData<H> {
     fn default() -> Self {
         SerializedData {
             ser_file_manifest: Vec::new(),
+            archive_toc: Vec::new(),
             chunk_index: HashMap::new(),
             sorted_hashes: Vec::new(),
         }
@@ -304,4 +342,48 @@ pub struct SSAChunkMeta<H>{
     pub hash:   H,
     pub offset: u64,
     pub length: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, FromBytes, Immutable, IntoBytes, Pod, Zeroable)]
+pub struct SSMCFormatData {
+    pub man_offset: u64,
+    pub man_length: u64,
+    pub dict_offset: u64,
+    pub dict_length: u64,
+    pub chunk_index_offset: u64,
+    pub chunk_index_length: u64,
+    pub data_offset: u64,
+}
+
+
+impl SSMCFormatData {
+    pub const SIZE: u64 = mem::size_of::<SSMCFormatData>() as u64;
+
+    pub fn build_format_data(
+        starting_offset: usize, //Header + TOC size
+        man_length: usize,
+        dict_length: u64,
+        chunk_index_length: u64,
+    ) -> SSMCFormatData {
+        SSMCFormatData {
+            man_offset: starting_offset as u64 + Self::SIZE,
+            man_length: man_length as u64,
+            dict_offset: starting_offset as u64 + Self::SIZE +
+                man_length as u64,
+            dict_length,
+            chunk_index_offset: starting_offset as u64 + Self::SIZE +
+                man_length as u64 + dict_length,
+            chunk_index_length,
+            data_offset: starting_offset as u64 + Self::SIZE +
+                man_length as u64 + dict_length + chunk_index_length
+        }
+    }
+}
+
+
+#[derive(Decode, Encode, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct TocEntry {
+    pub title: String,
+    pub uncompressed_size: u64,
 }
