@@ -30,10 +30,10 @@ pub enum ReconstructionError {
     #[error("ECC Reconstruction failed at sector {sector_idx}: {source}")]
     EccError { sector_idx: u32, source: crate::ecc::EccError },
 
-    #[error("Verification failed for file:  {title}\n
+    #[error("Verification failed.\n
         Original Hash: {orig_hash}\n
         Calculated Hash: {calc_hash}")]
-    HashMismatchError{title: String, orig_hash: String, calc_hash: String},
+    HashMismatchError{orig_hash: String, calc_hash: String},
 
     #[error("An internal logic error occurred: {0}")]
     InternalError(String),
@@ -221,7 +221,7 @@ impl<'a, H: Copy + Eq> ReconstructionContext<'a, H> {
 
 
 pub fn verify_disc_integrity<A, D, E, H>(
-    manifest: Arc<DiscManifest<H>>,
+    manifest: &DiscManifest<H>,
     exception_index: &HashMap<u64, ExceptionInfo>,
     exception_blob: &[u8],
     subheader_data: &[[u8; 8]],
@@ -464,7 +464,6 @@ where
             .collect();
 
         Err(ReconstructionError::HashMismatchError{
-            title: manifest.title.clone(),
             orig_hash: orig_hash_string,
             calc_hash: calc_hash_string
         }.into())

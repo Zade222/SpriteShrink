@@ -4,7 +4,7 @@ use std::{
     }, hash::Hasher, io::{
         self, Read, Seek, SeekFrom
     }, path::{Path, PathBuf}, sync::{
-        Arc, Mutex, atomic::{
+        Arc, atomic::{
         AtomicBool, Ordering,
     }}, thread
 };
@@ -22,16 +22,17 @@ use tracing::{
     debug,
 };
 use sprite_shrink::{
-    SS_SEED, ArchiveBuilder, ChunkLocation, FileManifestParent,
+    SS_SEED,
+    ArchiveBuilder, ChunkLocation, FileManifestParent, TocEntry,
     test_compression, dashmap_values_to_vec
 };
 use sprite_shrink_cd::{
     BlobLocation, ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
-    FileSizeProvider, ExceptionInfo, MultiBinStream,
+    FileSizeProvider, ExceptionInfo, MultiBinStream, ReconstructionError,
     SectorDataProvider, SectorRegionStream, SectorMap, SectorType,
-    SubheaderRegistry, UserDataStream, analyze_cue_sheets,
-    analyze_and_map_disc, compress_audio_blocks, resolve_file_sector_counts,
-    rle_encode_map, verify_disc_integrity
+    SpriteShrinkCDError, SubheaderRegistry, UserDataStream,
+    analyze_cue_sheets, analyze_and_map_disc, compress_audio_blocks,
+    resolve_file_sector_counts, rle_encode_map, verify_disc_integrity
 };
 use xxhash_rust::xxh3::Xxh3;
 
@@ -49,10 +50,12 @@ use crate::storage_io::{
 };
 use crate::utils::{process_in_memory_check, set_priority};
 
-type CueProcessingResult<H> = (
-    Vec<FileManifestParent<H>>,
-    HashMap<String, [u8; 64]>
-);
+struct OptProcResult<H> {
+    manifests: DashMap<String, DiscManifest<H>>,
+    veri_hashes: DashMap<String, [u8; 64]>,
+    disc_exceptions: DashMap<String, DiscExceptionBlob>,
+    subheader_table: Vec<[u8; 8]>
+}
 
 struct AppFileSizeProvider {
     base_dir: PathBuf,
@@ -231,13 +234,13 @@ where
         best_window_size
     )?;
 
-    let disc_manifiests = temp_data.0;
+    let disc_manifiests = temp_data.manifests;
 
-    veri_hashes = temp_data.1;
+    veri_hashes = temp_data.veri_hashes;
 
-    let exceptions = temp_data.2;
+    let exceptions = temp_data.disc_exceptions;
 
-    let subheader_table = temp_data.3;
+    let subheader_table = temp_data.subheader_table;
 
     let tot_exception_data: u64 = exceptions
         .iter()
@@ -285,48 +288,43 @@ where
         }
     });
 
-    /*let get_chunk_data_for_test = {
-        let cb = Arc::clone(&chunk_ret_cb);
-        move |hashes: &[H]| cb(hashes)
-    };
+    let mut ser_man: Vec<(String, DiscManifest<H>)> = disc_manifiests
+        .iter()
+        .map(|entry| (entry.key().clone(), entry.value().clone()))
+        .collect();
 
-    //}
+    ser_man.sort_by(|a, b| a.0.cmp(&b.0));
 
-    let compressed_size = test_compression(
-        &all_data_hashes,
-        data_temp_cache.get_tot_data_size(),
-        0,
-        131072,
-        args.compression_level as i32,
-        get_chunk_data_for_test
-    )?;
+    let archive_toc: Vec<TocEntry> = ser_man.iter().map(|(title, man)| {
+        let sector_count: u64 = man.rle_sector_map.runs.iter()
+            .map(|(run, _)| *run as u64)
+            .sum();
 
-    let size = tot_exception_data + compressed_size as u64;
+        TocEntry {
+            title: title.clone(),
+            uncompressed_size: sector_count * 2352
+        }
+    }).collect();
 
-    println!("Compressed data size = {compressed_size}");
-    println!("Compressed data + exception data = {size}");*/
-
-    let mut ser_man = dashmap_values_to_vec(&disc_manifiests);
-
-    ser_man.sort_by(|a, b| a.title.cmp(&b.title));
-
+    let archive_toc_arc = Arc::new(archive_toc);
 
     //This can be parallelized to accelerate the validation step.
-    for manifest in ser_man {
-        println!("Verifying {}", manifest.title);
-        let arc_man = Arc::new(manifest);
+    for (i, manifest) in ser_man.iter().enumerate() {
+        let archive_toc_clone = archive_toc_arc.clone();
+        println!("Verifying {}", archive_toc_clone[i].title.clone());
 
-        let hashes_entry = veri_hashes.get(&arc_man.title.clone())
+
+        let hashes_entry = veri_hashes.get(&archive_toc_clone[i].title.clone())
             .ok_or_else(|| CliError::InternalError(format!(
             "Verification hash missing for file: {}",
-            arc_man.title
+            archive_toc_clone[i].title.clone()
         )))?;
         let veri_hash = *hashes_entry.value();
 
-        let exceptions_entry = exceptions.get(&arc_man.title)
+        let exceptions_entry = exceptions.get(&archive_toc_clone[i].title.clone())
             .ok_or_else(|| CliError::InternalError(format!(
             "Exception blob missing for file: {}",
-            arc_man.title
+            archive_toc_clone[i].title.clone()
         )))?;
         let disc_exception_blob = exceptions_entry.value();
 
@@ -352,23 +350,8 @@ where
             }
         };
 
-        /*let original_bin_path = source_base_dir
-            .join(&arc_man.title.clone())
-            .with_extension("bin");
-
-        let bin_paths: Vec<PathBuf> = cue_analysis.cue_sheets[0].files
-            .iter()
-            .map(|f| source_base_dir.join(&f.name))
-            .collect();
-
-        let mut source_stream: Box<dyn ReadSeekSend> = if bin_paths.len() == 1 {
-            Box::new(File::open(&bin_paths[0])?)
-        } else {
-            Box::new(MultiBinStream::new(bin_paths)?)
-        };*/
-
-        verify_disc_integrity(
-            arc_man,
+        let result = verify_disc_integrity(
+            &manifest.1,
             &disc_exception_blob.exception_index,
             &disc_exception_blob.disc_blob,
             &subheader_table,
@@ -376,8 +359,26 @@ where
             get_chunk_data_for_verify,
             get_chunk_audio_for_verify,
             //progress_cb
-            //&mut source_stream
-        )?;
+        );
+
+        match result {
+            Ok(_) => {},
+            Err(SpriteShrinkCDError::Reconstruction(
+                ReconstructionError::HashMismatchError { orig_hash, calc_hash }
+            )) => {
+                eprintln!(
+                    "Integrity check failed for {}",
+                    archive_toc_clone[i].title
+                );
+                eprintln!("Expected: {}", orig_hash);
+                eprintln!("Calculated: {}", calc_hash);
+
+                return Err(CliError::InternalError(
+                    "Disc verification failed".to_string()
+                ));
+            },
+            Err(e) => return Err(CliError::from(e)),
+        }
     }
 
     println!("Verification passed!");
@@ -530,7 +531,7 @@ where
     println!("Dictionary size = {}", comp_data.dictionary_size);
     println!("Encoded Chunk Index size = {}", comp_data.enc_chunk_index_size);
 
-    let mut manifest_size = 0usize;
+    /*let mut manifest_size = 0usize;
 
     for man in disc_manifiests.iter() {
         println!("{}:", man.title);
@@ -567,7 +568,9 @@ where
         manifest_size += size;
     }
 
-    println!("Total size of all manifests = {}", manifest_size);
+    println!("Total size of all manifests = {}", manifest_size);*/
+
+
 
     Ok(())
 }
@@ -581,12 +584,7 @@ fn process_optical_discs<H>(
     running: &Arc<AtomicBool>,
     thread_count: usize,
     window_size: u64,
-) -> Result<(
-    DashMap<String, DiscManifest<H>>, //The list of manifests
-    DashMap<String, [u8; 64]>, //Associated veri hashes
-    DashMap<String, DiscExceptionBlob>, //Final DiscExceptionBlob
-    Vec<[u8; 8]>,
-), CliError>
+) -> Result<OptProcResult<H>, CliError>
 where
     H: Hashable
         + Ord
@@ -688,7 +686,6 @@ where
                     );
 
                     let dm = DiscManifest {
-                        title: dcd.title.clone(),
                         collection_id: 255,
                         lba_map: dcd.lba_map,
                         rle_sector_map: dcd.rle_sector_map,
@@ -708,12 +705,12 @@ where
                         disc_blob: dcd.exception_blob
                     };
 
-                    worker_excep_blob.insert(dcd.title, deb);
+                    worker_excep_blob.insert(dcd.title.clone(), deb);
 
                     //Possibly need to come up with a way of sorting everything
                     // by sector, if needed, for faster file decompression.
 
-                    worker_file_manifest.insert(dm.title.clone(), dm);
+                    worker_file_manifest.insert(dcd.title.clone(), dm);
 
                     Ok(())
                 })?;
@@ -798,7 +795,12 @@ where
 
     let subheader_table = shared_subheader_registry.generate_blob();
 
-    Ok((final_disc_man, final_hashes, final_exception_blob, subheader_table))
+    Ok(OptProcResult {
+            manifests: final_disc_man,
+            veri_hashes: final_hashes,
+            disc_exceptions: final_exception_blob,
+            subheader_table
+    })
 }
 
 

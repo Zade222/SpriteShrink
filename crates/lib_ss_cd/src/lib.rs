@@ -30,6 +30,7 @@ pub use mapper::{
 
 mod reconstruction;
 pub use reconstruction::{
+    ReconstructionError,
     rebuild_sector_bitwise, rebuild_sector_simd, verify_disc_integrity
 };
 
