@@ -19,7 +19,7 @@ pub use lib_error_handling::SpriteShrinkCDError;
 mod lib_structs;
 pub use lib_structs::{
     SSMD_UID,
-    BlobLocation, CueSheet, ContentBlock, DataChunkLayout, DiscManifest,
+    CueSheet, ContentBlock, DataChunkLayout, DiscManifest,
     ExceptionInfo, ExceptionType, RleSectorMap, SectorMap, SectorType,
     SSMDFormatData, SSMDTocEntry, SubHeaderEntry, SubheaderRegistry
 };

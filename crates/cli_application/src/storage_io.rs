@@ -779,12 +779,12 @@ pub fn read_metadata_block(
     file_path: &Path,
     ssmc_format_data: &SSMCFormatData
 ) -> Result<Vec<u8>, CliError> {
-    let read_start = ssmc_format_data.enc_man_offset;
+    let read_start = ssmc_format_data.enc_manifest.offset;
 
     let read_amount = (
-        ssmc_format_data.enc_man_length +
-        ssmc_format_data.data_dict_length +
-        ssmc_format_data.enc_chunk_idx_length
+        ssmc_format_data.enc_manifest.length +
+        ssmc_format_data.data_dictionary.length +
+        ssmc_format_data.enc_chunk_index.length
     ) as usize;
 
     read_file_data(file_path, read_start, read_amount)

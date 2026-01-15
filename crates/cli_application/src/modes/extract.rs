@@ -213,8 +213,8 @@ where
 {
     /*Stores the length of each piece of the metadata from the archive as
      provided by the header.*/
-    let man_length = format_data.enc_man_length as usize;
-    let dict_length = format_data.data_dict_length as usize;
+    let man_length = format_data.enc_manifest.length as usize;
+    let dict_length = format_data.data_dictionary.length as usize;
 
     let manifest_slice = &metadata_block[0..man_length];
     let dict_slice = &metadata_block[man_length..man_length + dict_length];
@@ -242,7 +242,7 @@ where
         ))?;
 
         let final_output_path = out_dir.join(
-            toc[(*rom as usize) - 1].title.clone());
+            toc[(*rom as usize) - 1].filename.clone());
 
         let tmp_output_path = final_output_path.with_extension("tmp");
 
@@ -305,7 +305,7 @@ where
         //The file is fully written, rename it to final name.
         rename(&tmp_output_path, final_output_path)?;
 
-        debug!("{} extracted successfully", toc[(*rom as usize) - 1].title);
+        debug!("{} extracted successfully", toc[(*rom as usize) - 1].filename);
     }
 
     Ok(())

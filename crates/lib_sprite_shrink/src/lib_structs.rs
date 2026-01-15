@@ -25,12 +25,6 @@ use crate::{
 
 pub const SSMC_UID: u16 = 0x0000;
 
-
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct ArchiveTOC {
-    pub entries: Vec<SSMCTocEntry>,
-}
-
 /// Represents the location of a data chunk within the archive.
 ///
 /// This struct is used to pinpoint the exact position and size of a
@@ -162,6 +156,17 @@ pub struct FileData{
 pub struct FileManifestParent<H> {
     pub chunk_count:    u64,
     pub chunk_metadata: Vec<SSAChunkMeta<H>>,
+}
+
+
+#[repr(C)]
+#[derive(
+    Clone, Copy, Debug, Decode, Deserialize, Encode, Eq, FromBytes, Immutable,
+    IntoBytes, PartialEq, Pod, Serialize, Zeroable
+)]
+pub struct FileRegion {
+    pub offset: u64,
+    pub length: u64,
 }
 
 /// Holds the results of the initial file processing stage.
@@ -347,13 +352,10 @@ pub struct SSAChunkMeta<H>{
 #[repr(C)]
 #[derive(Copy, Clone, FromBytes, Immutable, IntoBytes, Pod, Zeroable)]
 pub struct SSMCFormatData {
-    pub enc_man_offset: u64,
-    pub enc_man_length: u64,
-    pub data_dict_offset: u64,
-    pub data_dict_length: u64,
-    pub enc_chunk_idx_offset: u64,
-    pub enc_chunk_idx_length: u64,
-    pub data_offset: u64,
+    pub enc_manifest:       FileRegion,
+    pub data_dictionary:    FileRegion,
+    pub enc_chunk_index:    FileRegion,
+    pub data_offset:        u64,
 }
 
 
@@ -373,12 +375,18 @@ impl SSMCFormatData {
 
 
         SSMCFormatData {
-            enc_man_offset,
-            enc_man_length:         enc_man_length as u64,
-            data_dict_offset,
-            data_dict_length,
-            enc_chunk_idx_offset,
-            enc_chunk_idx_length,
+            enc_manifest: FileRegion {
+                offset: enc_man_offset,
+                length: enc_man_length as u64
+            },
+            data_dictionary: FileRegion {
+                offset: data_dict_offset,
+                length: data_dict_length
+            },
+            enc_chunk_index: FileRegion {
+                offset: enc_chunk_idx_offset,
+                length: enc_chunk_idx_length
+            },
             data_offset,
         }
     }
@@ -386,6 +394,6 @@ impl SSMCFormatData {
 
 #[derive(Decode, Encode, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SSMCTocEntry {
-    pub title: String,
+    pub filename: String,
     pub uncompressed_size: u64,
 }

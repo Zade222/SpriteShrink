@@ -1,5 +1,5 @@
 use std::{
-    fmt::{self, Display},
+    fmt,
     mem,
     ops::Range,
     sync::atomic::{AtomicU16, Ordering,}
@@ -9,15 +9,11 @@ use bitcode::{Decode, Encode};
 use bytemuck::{Pod, Zeroable};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use sprite_shrink::FileRegion;
 use zerocopy::{Immutable, IntoBytes, FromBytes};
 
-pub const SSMD_UID: u16 = 0xd541;
 
-#[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
-pub struct BlobLocation {
-    pub offset: u64,
-    pub length: u64,
-}
+pub const SSMD_UID: u16 = 0xd541;
 
 
 #[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
@@ -211,20 +207,6 @@ impl fmt::Display for MsfTime {
 }
 
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct OpticalArchiveHeader {
-    pub manifest_version: u16,
-
-    pub manifests_location: BlobLocation,
-
-    pub audio_block_index_location: BlobLocation,
-    pub audio_blob_location: BlobLocation,
-
-    pub pregap_block_index_location: BlobLocation,
-    pub pregap_blob_location: BlobLocation,
-}
-
-
 pub struct ReconstructionContext<'a, H> {
     pub manifest: &'a DiscManifest<H>,
     pub decoded_map: Vec<DecodedSectorInfo>,
@@ -313,21 +295,16 @@ impl SectorType {
     }
 }
 
+
 #[repr(C)]
 #[derive(Copy, Clone, FromBytes, Immutable, IntoBytes, Pod, Zeroable)]
 pub struct SSMDFormatData {
-    pub man_offset:             u64,
-    pub man_length:             u64,
-    pub data_dict_offset:       u64,
-    pub data_dict_length:       u64,
-    pub enc_chunk_idx_offset:   u64,
-    pub enc_chunk_idx_length:   u64,
-    pub enc_audio_idx_offset:   u64,
-    pub enc_audio_idx_length:   u64,
-    pub subheader_tbl_offset:   u64,
-    pub subheader_tbl_length:   u64,
-    pub audio_data_offset:      u64,
-    pub audio_data_length:      u64,
+    pub enc_disc_manifest:      FileRegion,
+    pub data_dictionary:        FileRegion,
+    pub enc_chunk_index:        FileRegion,
+    pub enc_audio_index:        FileRegion,
+    pub subheader_table:        FileRegion,
+    pub audio_data:             FileRegion,
     pub data_offset:            u64,
 }
 
@@ -341,7 +318,7 @@ impl SSMDFormatData {
         data_dict_length:       u64,
         enc_chunk_idx_length:   u64,
         enc_audio_idx_length:   u64,
-        subheader_tbl_length:   u64,
+        subheader_tbl_size:     u64,
         audio_data_length:      u64,
     ) -> Self {
         let man_offset = format_data_offset as u64 + Self::SIZE;
@@ -349,22 +326,34 @@ impl SSMDFormatData {
         let enc_chunk_idx_offset = data_dict_offset + data_dict_length;
         let enc_audio_idx_offset = enc_chunk_idx_offset + enc_chunk_idx_length;
         let subheader_tbl_offset = enc_audio_idx_offset + enc_audio_idx_length;
-        let audio_data_offset = subheader_tbl_offset + subheader_tbl_length;
+        let audio_data_offset = subheader_tbl_offset + subheader_tbl_size;
         let data_offset = audio_data_offset + audio_data_length;
 
         SSMDFormatData {
-            man_offset,
-            man_length:             man_length as u64,
-            data_dict_offset,
-            data_dict_length,
-            enc_chunk_idx_offset,
-            enc_chunk_idx_length,
-            enc_audio_idx_offset,
-            enc_audio_idx_length,
-            subheader_tbl_offset,
-            subheader_tbl_length,
-            audio_data_offset,
-            audio_data_length,
+            enc_disc_manifest: FileRegion {
+                offset: man_offset,
+                length: man_length as u64
+            },
+            data_dictionary: FileRegion {
+                offset: data_dict_offset,
+                length: data_dict_length
+            },
+            enc_chunk_index: FileRegion {
+                offset: enc_chunk_idx_offset,
+                length: enc_chunk_idx_length
+            },
+            enc_audio_index: FileRegion {
+                offset: enc_audio_idx_offset,
+                length: enc_audio_idx_length
+            },
+            subheader_table: FileRegion {
+                offset: subheader_tbl_offset,
+                length: subheader_tbl_size
+            },
+            audio_data: FileRegion {
+                offset: audio_data_offset,
+                length: audio_data_length
+            },
             data_offset
         }
     }
@@ -373,7 +362,7 @@ impl SSMDFormatData {
 
 #[derive(Decode, Encode, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SSMDTocEntry {
-    pub title: String,
+    pub filename: String,
     pub collection_id: u8,
     pub uncompressed_size: u64,
 }

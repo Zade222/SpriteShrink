@@ -155,7 +155,7 @@ fn ssmc_print_info_table(
         println!("{}\t| {}\t| {}",
             index + 1,
             human_bytes(file_size as f64),
-            toc_entry.title
+            toc_entry.filename
         );
     });
 
@@ -177,7 +177,7 @@ fn ssmc_print_info_json(
 
             json!({
                 "index": index + 1,
-                "filename": &toc_entry.title,
+                "filename": &toc_entry.filename,
                 "size(bytes)": file_size
             })
         })
@@ -200,16 +200,22 @@ fn ssmc_print_info_json(
 fn ssmd_print_info_table(
     ssmd_toc: Vec<SSMDTocEntry>
 ){
-    println!("Index\t| Set ID | Filesize | Filename");
-    println!("--------------------------------------");
+    println!("Index\t| Grp\t| Filesize | Filename");
+    println!("-------------------------------------");
 
     ssmd_toc.iter().enumerate().for_each(|(index, toc_entry)|{
         let file_size = toc_entry.uncompressed_size;
-        println!("{}\t| {}\t | {} | {}",
+        let collection_id = if toc_entry.collection_id == 255 {
+            "-".to_string()
+        } else {
+            toc_entry.collection_id.to_string()
+        };
+
+        println!("{}\t| {}\t| {} | {}",
             index + 1,
-            toc_entry.collection_id,
+            collection_id,
             human_bytes(file_size as f64),
-            toc_entry.title
+            toc_entry.filename
         );
     });
 }

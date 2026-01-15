@@ -228,7 +228,7 @@ where
         };
 
         toc.push(SSMCTocEntry {
-            title: filename,
+            filename,
             uncompressed_size: uncomp_size,
         });
 

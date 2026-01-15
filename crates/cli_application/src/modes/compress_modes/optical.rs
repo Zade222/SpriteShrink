@@ -1,5 +1,5 @@
 use std::{
-    cmp::min, collections::{HashMap, HashSet}, ffi::OsStr, fmt::{Debug, Display}, fs::{
+    cmp::min, collections::{HashMap}, ffi::OsStr, fmt::{Debug, Display}, fs::{
         File, read_to_string
     }, hash::Hasher, io::{
         self, Read, Seek, SeekFrom
@@ -28,7 +28,7 @@ use sprite_shrink::{
 };
 use sprite_shrink_cd::{
     SSMD_UID,
-    BlobLocation, ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
+    ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
     FileSizeProvider, ExceptionInfo, MultiBinStream, ReconstructionError,
     SectorDataProvider, SectorRegionStream, SectorMap, SectorType,
     SpriteShrinkCDError, SSMDFormatData, SSMDTocEntry, SubheaderRegistry,
@@ -298,8 +298,8 @@ where
             .sum();
 
         archive_toc.push(SSMDTocEntry {
-            title,
-            collection_id: 0,
+            filename: title + ".bin",
+            collection_id: 255,
             uncompressed_size: sector_count * 2352
         });
 
@@ -312,17 +312,19 @@ where
     for (i, manifest) in disc_manifests.iter().enumerate() {
         let archive_toc_clone = archive_toc_arc.clone();
 
-        let hashes_entry = veri_hashes.get(&archive_toc_clone[i].title.clone())
+        let hashes_entry = veri_hashes
+            .get(&archive_toc_clone[i].filename.clone())
             .ok_or_else(|| CliError::InternalError(format!(
             "Verification hash missing for file: {}",
-            archive_toc_clone[i].title.clone()
+            archive_toc_clone[i].filename.clone()
         )))?;
         let veri_hash = *hashes_entry.value();
 
-        let exceptions_entry = exceptions.get(&archive_toc_clone[i].title.clone())
+        let exceptions_entry = exceptions
+            .get(&archive_toc_clone[i].filename.clone())
             .ok_or_else(|| CliError::InternalError(format!(
             "Exception blob missing for file: {}",
-            archive_toc_clone[i].title.clone()
+            archive_toc_clone[i].filename.clone()
         )))?;
         let disc_exception_blob = exceptions_entry.value();
 
@@ -366,7 +368,7 @@ where
             )) => {
                 eprintln!(
                     "Integrity check failed for {}",
-                    archive_toc_clone[i].title
+                    archive_toc_clone[i].filename
                 );
                 eprintln!("Expected: {}", orig_hash);
                 eprintln!("Calculated: {}", calc_hash);
@@ -532,7 +534,7 @@ where
         comp_data.dictionary_size,
         comp_data.enc_chunk_index_size,
         enc_audio_index.len() as u64,
-        subheader_table.len() as u64,
+        subheader_table.len() as u64 * 8 ,
         audio_blob_size
     );
 

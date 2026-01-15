@@ -13,7 +13,7 @@ pub use lib_error_handling::{
 mod lib_structs;
 pub use lib_structs::{
     SSMC_UID,
-    ChunkLocation, FileData, FileHeader, FileManifestParent,
+    ChunkLocation, FileData, FileHeader, FileManifestParent, FileRegion,
     ProcessedFileData, Progress, SerializedData, SSAChunkMeta, SSMCFormatData,
     SSMCTocEntry
 };

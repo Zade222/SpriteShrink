@@ -377,7 +377,7 @@ where
     /*Pulls each chunk for a file, generating a hash for the file,
     and verifies the hash matches the hash of original file.*/
     for (i, fmp) in serialized_data.ser_file_manifest.iter().enumerate() {
-        let file_title = archive_toc[i].title.clone();
+        let file_title = archive_toc[i].filename.clone();
         let fmp_owned = fmp.clone();
 
         let entry = veri_hashes.get(&file_title)

@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::{
-    ffi::CStr,
     os::raw::c_void,
     slice,
 };

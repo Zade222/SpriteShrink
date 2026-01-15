@@ -14,7 +14,6 @@ use std::{
     hash::Hash,
     io::{self, Read, Write},
     marker::PhantomData,
-    mem,
     os::raw::c_void,
     sync::{Arc, Mutex},
     thread
@@ -32,12 +31,9 @@ use crate::{IsCancelled, SpriteShrinkError,
     FFIProgress, FFIProgressType, FFIUserData
     },
     lib_structs::{
-        ChunkLocation, CompressionResult, FileHeader,
-        Progress, SSMCFormatData
+        ChunkLocation, CompressionResult, Progress,
     }
 };
-
-use crate::parsing::{MAGIC_NUMBER, SUPPORTED_VERSION};
 
 use crate::processing::{
     build_train_samples, gen_zstd_opt_dict, ProcessingError
