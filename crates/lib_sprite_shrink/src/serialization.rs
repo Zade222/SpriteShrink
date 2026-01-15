@@ -15,7 +15,7 @@ use crate::lib_error_handling::{
     IsCancelled, SpriteShrinkError
 };
 use crate::lib_structs::{
-    ChunkLocation, FileManifestParent, SerializedData, TocEntry
+    ChunkLocation, FileManifestParent, SerializedData, SSMCTocEntry
 };
 
 #[derive(Error, Debug)]
@@ -227,7 +227,7 @@ where
             0
         };
 
-        toc.push(TocEntry {
+        toc.push(SSMCTocEntry {
             title: filename,
             uncompressed_size: uncomp_size,
         });

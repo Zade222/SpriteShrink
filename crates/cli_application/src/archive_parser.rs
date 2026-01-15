@@ -5,11 +5,9 @@
 //! header, manifest, and chunk index, which are the core components
 //! needed to locate and extract the contained files.
 
-use std::fs::File;
 use std::{
     collections::HashMap,
     fmt::Display,
-    mem,
     path::Path,
 };
 
@@ -17,7 +15,7 @@ use bitcode::Decode;
 use serde::Serialize;
 
 use sprite_shrink::{
-    ChunkLocation, FileHeader, FileManifestParent, Hashable, TocEntry,
+    ChunkLocation, FileHeader, FileManifestParent, Hashable, SSMCTocEntry,
     parse_file_chunk_index, parse_file_header, parse_file_metadata,
     parse_file_toc
 };
@@ -174,16 +172,21 @@ where
 }
 
 
-pub fn get_toc (
+pub fn get_toc<T> (
     file_path: &Path,
     toc_offset: u32,
     toc_length: usize
-) -> Result<Vec<TocEntry>, CliError> {
+) -> Result<Vec<T>, CliError>
+where
+    T: for<'de> Decode<'de>,
+{
     let enc_toc_data = read_file_data(
         file_path,
         toc_offset as u64,
         toc_length
     )?;
 
-    parse_file_toc(&enc_toc_data).map_err(CliError::from)
+    bitcode::decode(&enc_toc_data).map_err(|e| {
+        CliError::InternalError(format!("Failed to decode TOC: {}", e))
+    })
 }

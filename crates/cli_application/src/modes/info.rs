@@ -10,14 +10,20 @@ use std::{
 };
 
 use crate::archive_parser::{
-    get_file_header, get_file_manifest, get_toc
+    get_file_header, get_toc
 };
 
 use human_bytes::human_bytes;
 use serde_json::{self, json, Value, to_string_pretty};
 
 use sprite_shrink::{
-    FileHeader, FileManifestParent, TocEntry
+    SSMC_UID,
+    FileHeader, SSMCTocEntry
+};
+
+use sprite_shrink_cd::{
+    SSMD_UID,
+    SSMDTocEntry
 };
 
 use crate::error_handling::CliError;
@@ -33,12 +39,11 @@ use crate::error_handling::CliError;
 /// # Arguments
 ///
 /// * `file_path`: A `Path` pointing to the archive file whose
-///   metadata is to be displayed.
+///   metadata or info is to be displayed.
 /// * `list`: A user provided boolean flag that determines the plain text
 ///   output format. If `true`, the output will be a plain text table.
 /// * `metadata`: A user provided boolean flag that determines the json
 ///   output format. If `true`, the output will be JSON.
-///
 ///
 /// # Returns
 ///
@@ -51,20 +56,12 @@ use crate::error_handling::CliError;
 /// This function does not panic but prints directly to standard output.
 pub fn run_info(
     file_path: &Path,
-    list: bool,
     metadata: bool
 ) -> Result<(), CliError> {
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
 
-    let toc_offset = header.enc_toc_offset;
-
-    /*Stores the length of the table of contents from the header.*/
-    let toc_length = header.enc_toc_length as usize;
-
-    let toc = get_toc(file_path, toc_offset, toc_length)?;
-
-    dispatch_print_info(toc, metadata)?;
+    dispatch_print_info(file_path, &header, metadata, header.format_id)?;
 
     Ok(())
 }
@@ -79,24 +76,56 @@ pub fn run_info(
 ///
 /// # Arguments
 ///
+/// * `file_path`: A `Path` pointing to the archive file whose
+///   metadata or info is to be displayed.
 /// * `file_manifest`: A vector of `FileManifestParent` structs, where each
 ///   struct contains the metadata for a single file in the archive.
 /// * `metadata`: A user provided boolean flag that determines the json
 ///   output format. If `true`, the output will be JSON.
 fn dispatch_print_info(
-    toc: Vec<TocEntry>,
-    metadata: bool
-) -> Result<(), CliError>{
-    if metadata {
-        print_info_json(toc)?;
-    } else {
-        print_info_table(toc);
+    file_path: &Path,
+    header: &FileHeader,
+    metadata: bool,
+    format_id: u16
+) -> Result<(), CliError> {
+    match format_id {
+        SSMC_UID => {
+            let toc: Vec<SSMCTocEntry> = get_toc(
+                file_path,
+                header.enc_toc_offset,
+                header.enc_toc_length as usize
+            )?;
+
+            if metadata {
+                ssmc_print_info_json(toc)?;
+            } else {
+                ssmc_print_info_table(toc);
+            }
+        },
+        SSMD_UID => {
+            let toc: Vec<SSMDTocEntry> = get_toc(
+                file_path,
+                header.enc_toc_offset,
+                header.enc_toc_length as usize
+            )?;
+
+            if metadata {
+
+            } else {
+                ssmd_print_info_table(toc);
+            }
+        },
+        _ => {
+            return Err(CliError::InvalidFormatID(format_id))
+        }
     }
+
 
     Ok(())
 }
 
-/// Prints a formatted table of the file manifest's contents.
+/// Prints a formatted table of the file manifest's contents in an ssmc
+/// archive.
 ///
 /// # Arguments
 ///
@@ -113,15 +142,15 @@ fn dispatch_print_info(
 /// 2       | 8.00 MiB      | file_b.rom
 /// 3       | 8.00 MiB      | file_c.rom
 /// ```
-fn print_info_table(
-    file_manifest: Vec<TocEntry>
+fn ssmc_print_info_table(
+    ssmc_toc: Vec<SSMCTocEntry>
 ){
     println!("Index\t| Filesize\t| Filename");
     println!("----------------------------------");
 
     /*For each FileManifestParent in the file manifest print the index
     + 1 to be easily understood by the user and the filename of that index.*/
-    file_manifest.iter().enumerate().for_each(|(index, toc_entry)|{
+    ssmc_toc.iter().enumerate().for_each(|(index, toc_entry)|{
         let file_size = toc_entry.uncompressed_size;
         println!("{}\t| {}\t| {}",
             index + 1,
@@ -132,13 +161,14 @@ fn print_info_table(
 
 }
 
-/// Prints a json formatted table of the file manifest's contents.
+/// Prints a json formatted table of the file manifest's contents for ssmc
+/// archives.
 ///
 /// # Arguments
 ///
 /// * `file_manifest`: A vector of `FileManifestParent` structs to display.
-fn print_info_json(
-    file_manifest: Vec<TocEntry>
+fn ssmc_print_info_json(
+    file_manifest: Vec<SSMCTocEntry>
 ) -> Result<(), CliError>{
     let files_json: Vec<Value> = file_manifest.iter()
         .enumerate()
@@ -164,4 +194,22 @@ fn print_info_json(
     println!("{}", pretty_json);
 
     Ok(())
+}
+
+
+fn ssmd_print_info_table(
+    ssmd_toc: Vec<SSMDTocEntry>
+){
+    println!("Index\t| Set ID | Filesize | Filename");
+    println!("--------------------------------------");
+
+    ssmd_toc.iter().enumerate().for_each(|(index, toc_entry)|{
+        let file_size = toc_entry.uncompressed_size;
+        println!("{}\t| {}\t | {} | {}",
+            index + 1,
+            toc_entry.collection_id,
+            human_bytes(file_size as f64),
+            toc_entry.title
+        );
+    });
 }

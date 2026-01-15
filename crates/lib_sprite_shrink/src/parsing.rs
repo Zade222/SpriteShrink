@@ -16,7 +16,8 @@ use thiserror::Error;
 
 use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{
-    ChunkLocation, FileHeader, FileManifestParent, TocEntry, SSMCFormatData
+    ChunkLocation, FileHeader, FileManifestParent, SSMCTocEntry,
+    SSMCFormatData
 };
 
 #[derive(Error, Debug)]
@@ -168,8 +169,8 @@ where
 
 pub fn parse_file_toc(
     enc_toc_data: &[u8]
-) -> Result<Vec<TocEntry>, SpriteShrinkError> {
-    let bin_toc: Vec<TocEntry> = decode(enc_toc_data)
+) -> Result<Vec<SSMCTocEntry>, SpriteShrinkError> {
+    let bin_toc: Vec<SSMCTocEntry> = decode(enc_toc_data)
         .map_err(|e| ParsingError::TOCDecodeError(e.to_string()))?;
 
     Ok(bin_toc)

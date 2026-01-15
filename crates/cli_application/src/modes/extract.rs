@@ -24,9 +24,13 @@ use tracing::{
 };
 
 use sprite_shrink::{
-    Hashable, SSMCFormatData, TocEntry,
+    Hashable, SSMCFormatData, SSMCTocEntry,
     decompress_chunk, parse_file_metadata, parse_file_chunk_index,
     parse_format_data
+};
+
+use sprite_shrink_cd::{
+    SSMDFormatData, SSMDTocEntry
 };
 
 use crate::{
@@ -99,7 +103,7 @@ pub fn run_extraction(
     let hash_bit_length = header.hash_type;
 
     match hash_bit_length {
-        1 => extract_data::<u64>(
+        1 => extract_ssmc_data::<u64>(
             file_path,
             out_dir,
             rom_indices,
@@ -109,7 +113,7 @@ pub fn run_extraction(
             args,
             running,
         ),
-        2 => extract_data::<u128>(
+        2 => extract_ssmc_data::<u128>(
             file_path,
             out_dir,
             rom_indices,
@@ -187,12 +191,12 @@ pub fn run_extraction(
 ///   the extraction process.
 /// - Any `std::io::Error` that occurs during file creation, writing, or
 ///   renaming operations.
-fn extract_data<H>(
+fn extract_ssmc_data<H>(
     file_path: &Path,
     out_dir: &Path,
     rom_indices: &Vec<u8>,
     format_data: &SSMCFormatData,
-    toc: &[TocEntry],
+    toc: &[SSMCTocEntry],
     metadata_block: &[u8],
     args: &Args,
     running: Arc<AtomicBool>,
@@ -303,6 +307,32 @@ where
 
         debug!("{} extracted successfully", toc[(*rom as usize) - 1].title);
     }
+
+    Ok(())
+}
+
+
+fn extract_ssmd_data<H> (
+    file_path: &Path,
+    out_dir: &Path,
+    rom_indices: &Vec<u8>,
+    format_data: &SSMDFormatData,
+    toc: &[SSMDTocEntry],
+    metadata_block: &[u8],
+    args: &Args,
+    running: Arc<AtomicBool>,
+) -> Result<(), CliError>
+where
+    H: Hashable +
+        Display +
+        Eq +
+        Hash +
+        Ord +
+        Serialize +
+        for<'de> Deserialize<'de> +
+        for<'de> Decode<'de>,
+{
+
 
     Ok(())
 }

@@ -23,9 +23,12 @@ use crate::{
 };
 
 
+pub const SSMC_UID: u16 = 0x0000;
+
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct ArchiveTOC {
-    pub entries: Vec<TocEntry>,
+    pub entries: Vec<SSMCTocEntry>,
 }
 
 /// Represents the location of a data chunk within the archive.
@@ -287,7 +290,7 @@ impl<H> SeekMetadata<H> {
 #[derive(Debug)]
 pub struct SerializedData<H>{
     pub ser_file_manifest: Vec<FileManifestParent<H>>,
-    pub archive_toc: Vec<TocEntry>,
+    pub archive_toc: Vec<SSMCTocEntry>,
     pub chunk_index: HashMap<H, ChunkLocation>,
     pub sorted_hashes: Vec<H>,
 }
@@ -382,7 +385,7 @@ impl SSMCFormatData {
 }
 
 #[derive(Decode, Encode, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
-pub struct TocEntry {
+pub struct SSMCTocEntry {
     pub title: String,
     pub uncompressed_size: u64,
 }

@@ -23,9 +23,10 @@ use indicatif::{ProgressBar, ProgressStyle};
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::{bounded};
 use sprite_shrink::{
+    SS_SEED, SSMC_UID,
     ArchiveBuilder, FileHeader, FileManifestParent, Hashable, Progress,
-    SSAChunkMeta, SSMCFormatData, SS_SEED, serialize_uncompressed_data,
-    verify_single_file
+    SSAChunkMeta, SSMCFormatData,
+    serialize_uncompressed_data, verify_single_file
 };
 use rayon::prelude::*;
 use serde::Serialize;
@@ -617,7 +618,7 @@ where
         file_paths.len() as u32,
         98, //zstd
         *hash_type_id,
-        0u16,
+        SSMC_UID,
         enc_toc.len() as u32,
     );
 

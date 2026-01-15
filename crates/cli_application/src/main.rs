@@ -148,7 +148,7 @@ fn run(
             match file_paths.len() {
                 1 => {
                     debug!("Mode: Info");
-                    run_info(&file_paths[0], args.list, args.metadata)?
+                    run_info(&file_paths[0], args.metadata)?
                 },
                 0 => return Err(CliError::NoFilesFound()),
                 _ => {

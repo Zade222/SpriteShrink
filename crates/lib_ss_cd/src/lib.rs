@@ -21,7 +21,7 @@ pub use lib_structs::{
     SSMD_UID,
     BlobLocation, CueSheet, ContentBlock, DataChunkLayout, DiscManifest,
     ExceptionInfo, ExceptionType, RleSectorMap, SectorMap, SectorType,
-    SSMDFormatData, SubHeaderEntry, SubheaderRegistry
+    SSMDFormatData, SSMDTocEntry, SubHeaderEntry, SubheaderRegistry
 };
 
 mod mapper;

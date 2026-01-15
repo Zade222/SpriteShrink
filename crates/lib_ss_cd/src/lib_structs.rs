@@ -96,7 +96,6 @@ pub struct DecodedSectorInfo {
 
 #[derive(Clone, Deserialize, Debug, Decode, Encode, Eq, PartialEq, Serialize)]
 pub struct DiscManifest<H> {
-    pub collection_id: u8,
     pub lba_map: Vec<(u32, u32)>,
     pub rle_sector_map: RleSectorMap,
     pub audio_block_map: Vec<ContentBlock<H>>,
@@ -371,6 +370,13 @@ impl SSMDFormatData {
     }
 }
 
+
+#[derive(Decode, Encode, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+pub struct SSMDTocEntry {
+    pub title: String,
+    pub collection_id: u8,
+    pub uncompressed_size: u64,
+}
 
 pub struct StreamChunkInfo<H> {
     pub chunk_hash: H,

@@ -134,6 +134,9 @@ pub enum CliError {
 
     #[error("Invalid mode specified. {0}")]
     InvalidMode(String),
+
+    #[error("Invalid or unsupported format id in archive. {0}")]
+    InvalidFormatID(u16),
 }
 
 /// Converts a library-level `SpriteShrinkError` into a `CliError`.

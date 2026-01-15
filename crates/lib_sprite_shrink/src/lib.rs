@@ -12,16 +12,17 @@ pub use lib_error_handling::{
 
 mod lib_structs;
 pub use lib_structs::{
+    SSMC_UID,
     ChunkLocation, FileData, FileHeader, FileManifestParent,
     ProcessedFileData, Progress, SerializedData, SSAChunkMeta, SSMCFormatData,
-    TocEntry
+    SSMCTocEntry
 };
 
 mod parsing;
 pub use parsing::{
+    SUPPORTED_VERSION, MAGIC_NUMBER, SS_SEED,
     parse_file_chunk_index, parse_file_header, parse_file_metadata,
-    parse_file_toc, parse_format_data,
-    SUPPORTED_VERSION, MAGIC_NUMBER, SS_SEED
+    parse_file_toc, parse_format_data
 };
 
 mod processing;

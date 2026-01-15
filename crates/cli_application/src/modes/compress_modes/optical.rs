@@ -23,7 +23,7 @@ use tracing::{
 };
 use sprite_shrink::{
     SS_SEED,
-    ArchiveBuilder, ChunkLocation, FileHeader, FileManifestParent, TocEntry,
+    ArchiveBuilder, ChunkLocation, FileHeader, FileManifestParent,
     test_compression, dashmap_values_to_vec
 };
 use sprite_shrink_cd::{
@@ -31,7 +31,8 @@ use sprite_shrink_cd::{
     BlobLocation, ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
     FileSizeProvider, ExceptionInfo, MultiBinStream, ReconstructionError,
     SectorDataProvider, SectorRegionStream, SectorMap, SectorType,
-    SpriteShrinkCDError, SSMDFormatData, SubheaderRegistry, UserDataStream,
+    SpriteShrinkCDError, SSMDFormatData, SSMDTocEntry, SubheaderRegistry,
+    UserDataStream,
     analyze_cue_sheets, analyze_and_map_disc, compress_audio_blocks,
     resolve_file_sector_counts, rle_encode_map, verify_disc_integrity
 };
@@ -296,8 +297,9 @@ where
             .map(|(run, _)| *run as u64)
             .sum();
 
-        archive_toc.push(TocEntry {
+        archive_toc.push(SSMDTocEntry {
             title,
+            collection_id: 0,
             uncompressed_size: sector_count * 2352
         });
 
@@ -681,7 +683,6 @@ where
                     );
 
                     let dm = DiscManifest {
-                        collection_id: 255,
                         lba_map: dcd.lba_map,
                         rle_sector_map: dcd.rle_sector_map,
                         audio_block_map: dcd.audio_block_map,
