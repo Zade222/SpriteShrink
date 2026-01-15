@@ -261,8 +261,6 @@ where
         worker_count
     };
 
-
-
     // Resolve the number of threads to use. If 0, use available parallelism.
     let num_workers = (num_threads).saturating_sub(1).max(1);
 

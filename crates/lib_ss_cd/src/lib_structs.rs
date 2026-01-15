@@ -1,8 +1,10 @@
 use std::{
+    collections::HashMap,
     fmt,
+    hash::{Hasher, BuildHasherDefault},
     mem,
     ops::Range,
-    sync::atomic::{AtomicU16, Ordering,}
+    sync::atomic::{AtomicU16, AtomicU32, Ordering,}
 };
 
 use bitcode::{Decode, Encode};
@@ -97,7 +99,61 @@ pub struct DiscManifest<H> {
     pub audio_block_map: Vec<ContentBlock<H>>,
     pub data_stream_layout: Vec<DataChunkLayout<H>>,
     pub subheader_index: Vec<SubHeaderEntry>,
+    pub disc_exception_index: Vec<(u32, u32)>,
     pub integrity_hash: u64,
+}
+
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct ExceptionInfo {
+    pub exception_type: ExceptionType,
+    pub data_offset: u32,
+}
+
+
+pub struct ExceptionRegistry {
+    map: DashMap<Vec<u8>, u32>,
+    next_id: AtomicU32,
+}
+
+
+impl ExceptionRegistry {
+    pub fn get_or_register(&self, data: Vec<u8>) -> u32 {
+        *self.map.entry(data).or_insert_with(|| {
+            self.next_id.fetch_add(1, Ordering::SeqCst)
+        })
+    }
+
+    pub fn generate_blob_and_index(&self) -> (Vec<u8>, Vec<u64>) {
+        let mut pairs: Vec<(Vec<u8>, u32)> = self.map
+            .iter()
+            .map(|pair| (pair.key().clone(), *pair.value()))
+            .collect();
+
+        pairs.sort_by_key(|(_data, id)| *id);
+
+        let mut blob = Vec::new();
+        let mut excep_index = Vec::new();
+        let mut current_offset = 0u64;
+
+        for (data, _id) in pairs {
+            blob.extend_from_slice(&data);
+            excep_index.push(current_offset);
+            current_offset += data.len() as u64;
+        };
+
+        (blob, excep_index)
+    }
+}
+
+
+impl Default for ExceptionRegistry {
+    fn default() -> Self {
+        Self {
+            map: DashMap::new(),
+            next_id: AtomicU32::new(0),
+        }
+    }
 }
 
 
@@ -107,13 +163,6 @@ pub enum ExceptionType {
     Mode2Form1,
     Mode2Form2,
     None
-}
-
-
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
-pub struct ExceptionInfo {
-    pub exception_type: ExceptionType,
-    pub data_offset: u32,
 }
 
 
@@ -131,6 +180,32 @@ impl ExceptionType {
         }
     }
 }
+
+
+pub struct IdentityHasher {
+    hash: u64,
+}
+
+
+impl Hasher for IdentityHasher {
+    fn write(&mut self, _: &[u8]) {
+        panic!("IdentityHasher only supports primitive integer types");
+    }
+    fn write_u64(&mut self, i: u64) {
+        self.hash = i;
+    }
+    fn write_u32(&mut self, i: u32) {
+        self.hash = i as u64;
+    }
+    fn write_usize(&mut self, i: usize) {
+        self.hash = i as u64;
+    }
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+}
+
+pub type IntMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityHasher>>;
 
 
 pub struct SubheaderRegistry {
@@ -246,7 +321,7 @@ pub struct SectorMap {
 
 pub struct SectorMapResult {
     pub sector_map: SectorMap,
-    pub exception_metadata: Vec<(u64, ExceptionType, Vec<u8>)>,
+    pub exception_index: Vec<(u32, u32)>,
     pub subheader_index: Vec<SubHeaderEntry>,
     pub lba_map: Vec<(u32, u32)>,
 }
@@ -293,6 +368,17 @@ impl SectorType {
             SectorType::None => 0
         }
     }
+
+    pub fn excep_size(&self) -> usize {
+        match self {
+            SectorType::Mode1Exception => 296,
+            SectorType::Mode2Form1Exception => 296,
+            SectorType::Mode2Form2Exception => 20,
+            SectorType::PregapMode1Exception => 296,
+            SectorType::PregapMode2Exception => 296,
+            _ => 0
+        }
+    }
 }
 
 
@@ -303,7 +389,9 @@ pub struct SSMDFormatData {
     pub data_dictionary:        FileRegion,
     pub enc_chunk_index:        FileRegion,
     pub enc_audio_index:        FileRegion,
+    pub enc_excep_index:        FileRegion,
     pub subheader_table:        FileRegion,
+    pub exception_data:         FileRegion,
     pub audio_data:             FileRegion,
     pub data_offset:            u64,
 }
@@ -318,15 +406,19 @@ impl SSMDFormatData {
         data_dict_length:       u64,
         enc_chunk_idx_length:   u64,
         enc_audio_idx_length:   u64,
+        enc_excep_index_length: u64,
         subheader_tbl_size:     u64,
+        exception_data_length:  u64,
         audio_data_length:      u64,
     ) -> Self {
         let man_offset = format_data_offset as u64 + Self::SIZE;
         let data_dict_offset = man_offset + man_length as u64;
         let enc_chunk_idx_offset = data_dict_offset + data_dict_length;
         let enc_audio_idx_offset = enc_chunk_idx_offset + enc_chunk_idx_length;
-        let subheader_tbl_offset = enc_audio_idx_offset + enc_audio_idx_length;
-        let audio_data_offset = subheader_tbl_offset + subheader_tbl_size;
+        let enc_except_idx_offset = enc_audio_idx_offset + enc_excep_index_length;
+        let subheader_tbl_offset = enc_except_idx_offset + enc_audio_idx_length;
+        let exception_data_offset = subheader_tbl_offset + subheader_tbl_size;
+        let audio_data_offset = exception_data_offset + subheader_tbl_size;
         let data_offset = audio_data_offset + audio_data_length;
 
         SSMDFormatData {
@@ -346,9 +438,17 @@ impl SSMDFormatData {
                 offset: enc_audio_idx_offset,
                 length: enc_audio_idx_length
             },
+            enc_excep_index: FileRegion {
+                offset: enc_except_idx_offset,
+                length: enc_excep_index_length
+            },
             subheader_table: FileRegion {
                 offset: subheader_tbl_offset,
                 length: subheader_tbl_size
+            },
+            exception_data: FileRegion {
+                offset: exception_data_offset,
+                length: exception_data_length
             },
             audio_data: FileRegion {
                 offset: audio_data_offset,

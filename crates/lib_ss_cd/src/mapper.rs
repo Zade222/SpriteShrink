@@ -12,9 +12,9 @@ use sprite_shrink::{
 use crate::lib_error_handling::SpriteShrinkCDError;
 
 use crate::lib_structs::{
-    ContentBlock, CueFile, CueSheet, ExceptionType, MsfTime, RleSectorMap,
-    SectorAnalysis, SectorMap, SectorMapResult, SectorType, SubHeaderEntry,
-    SubheaderRegistry, Track, TrackType
+    ContentBlock, CueFile, CueSheet, ExceptionRegistry, ExceptionType, MsfTime,
+    RleSectorMap, SectorAnalysis, SectorMap, SectorMapResult, SectorType,
+    SubHeaderEntry, SubheaderRegistry, Track, TrackType
 };
 
 use crate::{
@@ -121,6 +121,7 @@ pub fn analyze_and_map_disc(
     file_sec_count: &[u32],
     provider: &mut impl SectorDataProvider,
     subheader_registry: &SubheaderRegistry,
+    exception_registry: &ExceptionRegistry
 ) -> Result<SectorMapResult, SpriteShrinkCDError> {
     let normalized_sheet= if cue_sheet.files.len() > 1 {
         Cow::Owned(normalize_cue_sheet(
@@ -135,7 +136,6 @@ pub fn analyze_and_map_disc(
     let total_sectors = file_sec_count.iter().sum::<u32>();
 
     let mut sectors = vec![SectorType::None; total_sectors as usize];
-    let mut exception_metadata: Vec<(u64, ExceptionType, Vec<u8>)> = Vec::new();
 
     let tracks = &normalized_sheet.files
         .first()
@@ -183,6 +183,7 @@ pub fn analyze_and_map_disc(
     let mut current_run_start = 0;
     let mut lba_map: Vec<(u32, u32)> = Vec::new();
     let mut current_offset: Option<u32> = None;
+    let mut excep_index: Vec<(u32, u32)> = Vec::new();
 
     for i in 0..total_sectors {
         let sector_data = provider.read_sector(i)?;
@@ -237,38 +238,6 @@ pub fn analyze_and_map_disc(
 
             sectors[i as usize] = analysis_result.sector_type;
 
-            /*if let Some(val) = subheader_val {
-                if let Some(curr) = current_subheader {
-                    if curr == val {
-                        if i == (current_run_start + current_sub_count){
-                            current_sub_count += 1;
-                        } else {
-                            subheader_map.push((
-                                current_run_start,
-                                current_sub_count,
-                                curr
-                            ));
-                            current_subheader = Some(val);
-                            current_sub_count = 1;
-                            current_run_start = i;
-                        }
-                    } else {
-                        subheader_map.push((
-                            current_run_start,
-                            current_sub_count,
-                            curr
-                        ));
-                        current_subheader = Some(val);
-                        current_sub_count = 1;
-                        current_run_start = i;
-                    }
-                } else {
-                    current_subheader = Some(val);
-                    current_sub_count = 1;
-                    current_run_start = i;
-                }
-            }*/
-
             if let Some(val) = subheader_val {
                 let val_id = subheader_registry.get_or_register(val);
 
@@ -312,7 +281,8 @@ pub fn analyze_and_map_disc(
                 };
 
                 if excep_type != ExceptionType::None {
-                    exception_metadata.push((i as u64, excep_type, data));
+                    let id = exception_registry.get_or_register(data);
+                    excep_index.push((i, id));
                 };
             }
         }
@@ -334,27 +304,11 @@ pub fn analyze_and_map_disc(
 
     Ok(SectorMapResult{
         sector_map: SectorMap { sectors },
-        exception_metadata,
+        exception_index: excep_index,
         subheader_index,
         lba_map
     })
 }
-
-//Marked for removal.
-/*fn detect_cue_type(cue_sheet: &CueSheet) -> CueSheetType {
-    let mut last_sector = 0;
-    for file in &cue_sheet.files {
-        for track in &file.tracks {
-            if let Ok(content_start) = get_track_content_start(track) {
-                if content_start < last_sector {
-                    return CueSheetType::Relative;
-                }
-                last_sector = content_start;
-            }
-        }
-    }
-    CueSheetType::Absolute
-}*/
 
 
 fn get_track_content_start(track: &Track) -> Result<u32, MapperError> {

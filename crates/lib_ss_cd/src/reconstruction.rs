@@ -8,13 +8,14 @@ use crate::{
     ecc::{calc_ecc_simd_inplace, calc_ecc_bitwise, calculate_edc},
     lib_error_handling::SpriteShrinkCDError,
     lib_structs::{
-        DecodedSectorInfo, DiscManifest, ExceptionInfo, MsfTime,
+        DecodedSectorInfo, DiscManifest, ExceptionInfo, IntMap, MsfTime,
         ReconstructionContext, ReconstructionInfo, RleSectorMap, SectorType,
         StreamChunkInfo, SubHeaderEntry
     },
     util::{spawn_data_fetcher},
 };
 
+use dashmap::mapref::entry;
 use flume::{
     bounded,
 };
@@ -145,6 +146,20 @@ fn build_decoded_map(rle_map: &RleSectorMap) -> Vec<DecodedSectorInfo> {
 }
 
 
+pub fn expand_exception_index(
+    excep_idx: &[(u32, u32)],
+    total_sectors: usize
+) -> Vec<Option<u32>> {
+    let mut lookup = vec![None; total_sectors];
+
+    excep_idx.iter().for_each(|(sector_num, excep_id)|{
+        lookup[*sector_num as usize] = Some(*excep_id);
+    });
+
+    lookup
+}
+
+
 pub fn expand_sector_map(rle_map: &RleSectorMap) -> Vec<SectorType> {
     let mut sectors = Vec::new();
     for (count, s_type) in &rle_map.runs {
@@ -222,7 +237,7 @@ impl<'a, H: Copy + Eq> ReconstructionContext<'a, H> {
 
 pub fn verify_disc_integrity<A, D, E, H>(
     manifest: &DiscManifest<H>,
-    exception_index: &HashMap<u64, ExceptionInfo>,
+    exception_index: &[u64],
     exception_blob: &[u8],
     subheader_data: &[[u8; 8]],
     veri_hash: &[u8; 64],
@@ -272,9 +287,15 @@ where
 
     //let recon_ctx = ReconstructionContext::new(&manifest);
     let expanded_sector_types = expand_sector_map(&manifest.rle_sector_map);
+    let total_sectors = expanded_sector_types.len();
+
     let subheader_map = expand_subheader_map(
         &manifest.subheader_index,
-        expanded_sector_types.len()
+        total_sectors
+    );
+    let expand_disc_excep_idx = expand_exception_index(
+        &manifest.disc_exception_index,
+        total_sectors
     );
     let lba_map = &manifest.lba_map;
     let mut current_msf_offset = lba_map[0].1;
@@ -331,12 +352,15 @@ where
                 );
                 current_data_buf_size -= needed as usize;
 
-                let exception = exception_index.get(
-                    &(sector_idx as u64)
-                ).map(|info| {
-                    let start = info.data_offset as usize;
-                    let end = start + info.exception_type.metadata_size() as usize;
-                    &exception_blob[start..end]
+                let exception = expand_disc_excep_idx.get(
+                    sector_idx as usize
+                ).and_then(|opt| *opt)
+                .map(|excep_id| {
+                    let offset: usize = exception_index[
+                        excep_id as usize
+                    ] as usize;
+                    let size = sector_type.excep_size();
+                    &exception_blob[offset..offset + size]
                 });
 
                 let metadata = subheader_map.get(i)

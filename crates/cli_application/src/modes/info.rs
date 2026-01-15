@@ -110,7 +110,7 @@ fn dispatch_print_info(
             )?;
 
             if metadata {
-
+                println!("Not yet implemented.")
             } else {
                 ssmd_print_info_table(toc);
             }

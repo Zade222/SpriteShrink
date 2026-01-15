@@ -83,8 +83,7 @@ pub struct DiscCompleteData<H: Hashable> {
     pub rle_sector_map: RleSectorMap,
     pub audio_block_map: Vec<ContentBlock<H>>,
     pub data_stream_layout: Vec<DataChunkLayout<H>>,
-    pub exception_index: HashMap<u64, ExceptionInfo>,
-    pub exception_blob: Vec<u8>,
+    pub disc_exception_index: Vec<(u32, u32)>,
     pub subheader_index: Vec<SubHeaderEntry>,
     pub verification_hash: [u8; 64],
     pub integrity_hash: u64,
@@ -246,7 +245,7 @@ impl<'a> TempFileGuard<'a> {
         Self { path }
     }
 
-    
+
     pub fn size(&self) -> u64 {
         metadata(self.path).map_or(0, |meta| meta.len())
     }

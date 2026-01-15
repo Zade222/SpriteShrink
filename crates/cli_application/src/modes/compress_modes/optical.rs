@@ -29,10 +29,10 @@ use sprite_shrink::{
 use sprite_shrink_cd::{
     SSMD_UID,
     ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
-    FileSizeProvider, ExceptionInfo, MultiBinStream, ReconstructionError,
-    SectorDataProvider, SectorRegionStream, SectorMap, SectorType,
-    SpriteShrinkCDError, SSMDFormatData, SSMDTocEntry, SubheaderRegistry,
-    UserDataStream,
+    FileSizeProvider, ExceptionRegistry, ExceptionInfo, MultiBinStream,
+    ReconstructionError, SectorDataProvider, SectorRegionStream, SectorMap,
+    SectorType, SpriteShrinkCDError, SSMDFormatData, SSMDTocEntry,
+    SubheaderRegistry, UserDataStream,
     analyze_cue_sheets, analyze_and_map_disc, compress_audio_blocks,
     resolve_file_sector_counts, rle_encode_map, verify_disc_integrity
 };
@@ -56,7 +56,8 @@ use crate::utils::{process_in_memory_check, set_priority};
 struct OptProcResult<H> {
     manifests: DashMap<String, DiscManifest<H>>,
     veri_hashes: DashMap<String, [u8; 64]>,
-    disc_exceptions: DashMap<String, DiscExceptionBlob>,
+    exception_index: Vec<u64>,
+    exception_blob: Vec<u8>,
     subheader_table: Vec<[u8; 8]>
 }
 
@@ -227,7 +228,7 @@ where
         }
     } //else { //Note: for now skip autotune logic to get the core logic sound.
 
-    let temp_data = process_optical_discs::<H>(
+    let proc_result = process_optical_discs::<H>(
         &cue_analysis.cue_sheets,
         &source_base_dir,
         &data_temp_cache,
@@ -237,22 +238,11 @@ where
         best_window_size
     )?;
 
-    let disc_manifiests = temp_data.manifests;
-
-    veri_hashes = temp_data.veri_hashes;
-
-    let exceptions = temp_data.disc_exceptions;
-
-    let subheader_table = temp_data.subheader_table;
-
-    let tot_exception_data: u64 = exceptions
-        .iter()
-        .map(|deb| deb.disc_blob.len() as u64)
-        .sum();
-
-    data_sum = data_temp_cache.get_tot_data_size() +
-        audio_temp_cache.get_tot_data_size() +
-        tot_exception_data;
+    let disc_manifiests = proc_result.manifests;
+    veri_hashes = proc_result.veri_hashes;
+    let subheader_table = proc_result.subheader_table;
+    let exception_index = proc_result.exception_index;
+    let exception_blob = proc_result.exception_blob;
 
     let audio_data_size = audio_temp_cache.get_tot_data_size();
 
@@ -298,7 +288,7 @@ where
             .sum();
 
         archive_toc.push(SSMDTocEntry {
-            filename: title + ".bin",
+            filename: title,
             collection_id: 255,
             uncompressed_size: sector_count * 2352
         });
@@ -319,14 +309,6 @@ where
             archive_toc_clone[i].filename.clone()
         )))?;
         let veri_hash = *hashes_entry.value();
-
-        let exceptions_entry = exceptions
-            .get(&archive_toc_clone[i].filename.clone())
-            .ok_or_else(|| CliError::InternalError(format!(
-            "Exception blob missing for file: {}",
-            archive_toc_clone[i].filename.clone()
-        )))?;
-        let disc_exception_blob = exceptions_entry.value();
 
         let get_chunk_data_for_verify = {
             let cb = Arc::clone(&chunk_ret_cb);
@@ -352,8 +334,8 @@ where
 
         let result = verify_disc_integrity(
             manifest,
-            &disc_exception_blob.exception_index,
-            &disc_exception_blob.disc_blob,
+            &exception_index,
+            &exception_blob,
             &subheader_table,
             &veri_hash,
             get_chunk_data_for_verify,
@@ -519,6 +501,7 @@ where
         vec![0u8; 0]
     };
 
+    let enc_excep_index = encode(&exception_index);
 
     let file_header = FileHeader::build_file_header(
         archive_toc.len() as u32,
@@ -534,7 +517,9 @@ where
         comp_data.dictionary_size,
         comp_data.enc_chunk_index_size,
         enc_audio_index.len() as u64,
+        enc_excep_index.len() as u64,
         subheader_table.len() as u64 * 8 ,
+        exception_blob.len() as u64,
         audio_blob_size
     );
 
@@ -555,7 +540,9 @@ where
     if !audio_block_index.is_empty() {
         final_data.extend_from_slice(&enc_audio_index);
     }
+    final_data.extend_from_slice(&enc_excep_index);
     final_data.extend_from_slice(subheader_table.as_bytes());
+    final_data.extend_from_slice(&exception_blob);
 
     let blob_size = _tmp_guard.size();
     println!("Estimated final data size with blob: {}", final_data.len() + blob_size as usize);
@@ -629,6 +616,8 @@ where
 
     let shared_subheader_registry = Arc::new(SubheaderRegistry::default());
 
+    let shared_exception_registry = Arc::new(ExceptionRegistry::default());
+
     let shared_exception_blobs: Arc<
         DashMap<String,
         DiscExceptionBlob
@@ -659,8 +648,8 @@ where
 
     let worker_file_manifest = shared_disc_manifest.clone();
     let worker_veri_hashes = shared_veri_hashes.clone();
-    let worker_excep_blob = shared_exception_blobs.clone();
     let worker_subheader_reg = shared_subheader_registry.clone();
+    let worker_exception_reg = shared_exception_registry.clone();
 
     let cue_sheets_owned = cue_sheets.to_owned();
     let base_dir_owned = base_dir.to_owned();
@@ -676,7 +665,8 @@ where
                         &base_dir_owned,
                         window_size,
                         sender_clone,
-                        &worker_subheader_reg
+                        &worker_subheader_reg,
+                        &worker_exception_reg
                     )?;
 
                     worker_veri_hashes.insert(
@@ -690,16 +680,9 @@ where
                         audio_block_map: dcd.audio_block_map,
                         data_stream_layout: dcd.data_stream_layout,
                         subheader_index: dcd.subheader_index,
+                        disc_exception_index: dcd.disc_exception_index,
                         integrity_hash: dcd.integrity_hash,
                     };
-
-                    let deb = DiscExceptionBlob {
-                        title: dcd.title.clone(),
-                        exception_index: dcd.exception_index,
-                        disc_blob: dcd.exception_blob
-                    };
-
-                    worker_excep_blob.insert(dcd.title.clone(), deb);
 
                     //Possibly need to come up with a way of sorting everything
                     // by sector, if needed, for faster file decompression.
@@ -789,10 +772,14 @@ where
 
     let subheader_table = shared_subheader_registry.generate_blob();
 
+    let (exception_blob, exception_index) = shared_exception_registry
+        .generate_blob_and_index();
+
     Ok(OptProcResult {
             manifests: final_disc_man,
             veri_hashes: final_hashes,
-            disc_exceptions: final_exception_blob,
+            exception_index,
+            exception_blob,
             subheader_table
     })
 }
@@ -803,7 +790,8 @@ fn cue_sheet_worker<H>(
     base_dir: &Path,
     window_size: u64,
     send_channel: flume::Sender<OpticalChunkMessage<H>>,
-    subheader_registry: &SubheaderRegistry
+    subheader_registry: &SubheaderRegistry,
+    exception_registry: &ExceptionRegistry
 ) -> Result<DiscCompleteData<H>, CliError>
 where
     H: Hashable + Send + Display
@@ -847,12 +835,15 @@ where
         cue_sheet,
         &sector_count,
         &mut sector_provider,
-        subheader_registry
+        subheader_registry,
+        exception_registry
     )?;
 
     let sector_map = &sector_result.sector_map;
 
     let subheader_index = sector_result.subheader_index;
+
+    let disc_exception_index = sector_result.exception_index;
 
     //Personal note: I'm thinking that the building of the sector map,
     // processing of its result, the building of the exception index/blob and
@@ -860,27 +851,6 @@ where
     // process_optical_discs function. This will allow for more efficient
     // processing when autotune logic takes place. For now it will live here
     // but I think this is low hanging fruit for an optimization.
-    let mut exception_index: HashMap<u64, ExceptionInfo> = HashMap::new();
-    let mut exception_blob: Vec<u8> = Vec::new();
-    let mut blob_offset = 0u32;
-
-    for exception in sector_result.exception_metadata {
-        let sector_num = exception.0;
-        let exception_type = exception.1;
-        let sector_metadata = exception.2;
-
-        exception_blob.extend_from_slice(&sector_metadata);
-
-        exception_index.insert(
-            sector_num,
-            ExceptionInfo {
-                exception_type,
-                data_offset: blob_offset
-            }
-        );
-        blob_offset += exception_type.metadata_size()
-    }
-
     let rle_sector_map = rle_encode_map(sector_map);
 
     let mut curr_sector_offset: u32 = 0;
@@ -1006,8 +976,7 @@ where
         rle_sector_map,
         audio_block_map,
         data_stream_layout,
-        exception_index,
-        exception_blob,
+        disc_exception_index,
         subheader_index,
         verification_hash: sha_hasher.finalize().into(),
         integrity_hash: xxh3_hasher.finish()
