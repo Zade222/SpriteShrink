@@ -17,6 +17,7 @@ use std::{
     },
 };
 use bitcode::Decode;
+use flume::bounded;
 use rayon::join;
 use serde::{Deserialize, Serialize};
 use tracing::{
@@ -24,13 +25,15 @@ use tracing::{
 };
 
 use sprite_shrink::{
-    Hashable, SSMCFormatData, SSMCTocEntry,
+    Hashable, FileHeader, SSMCFormatData, SSMCTocEntry,
     decompress_chunk, parse_file_metadata, parse_file_chunk_index,
     parse_format_data
 };
 
 use sprite_shrink_cd::{
-    SSMDFormatData, SSMDTocEntry
+    SSMDFormatData, SSMDTocEntry,
+    expand_exception_index, expand_sector_map, expand_subheader_map,
+    decode_ssmd_format_data, decode_ssmd_meta_data
 };
 
 use crate::{
@@ -314,11 +317,11 @@ where
 
 fn extract_ssmd_data<H> (
     file_path: &Path,
+    header: &FileHeader,
     out_dir: &Path,
-    rom_indices: &Vec<u8>,
+    disc_indices: &[u8],
     format_data: &SSMDFormatData,
     toc: &[SSMDTocEntry],
-    metadata_block: &[u8],
     args: &Args,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
@@ -332,7 +335,72 @@ where
         for<'de> Deserialize<'de> +
         for<'de> Decode<'de>,
 {
+    const PREFETCH_LOW_THRESHOLD: usize = 50;
+    const PREFETCH_HIGH_THRESHOLD: usize = 250;
 
+    let bin_format_data = read_file_data(
+        file_path,
+        header.format_data_offset as u64,
+        SSMDFormatData::SIZE as usize
+    )?;
+
+    let format_data = decode_ssmd_format_data(&bin_format_data)?;
+
+    let encoded_metadata = read_file_data(
+        file_path,
+        format_data.enc_disc_manifest.offset,
+        format_data.exception_data.offset as usize
+    )?;
+
+    let result = decode_ssmd_meta_data::<H>(&format_data, &encoded_metadata)?;
+
+    let disc_manifests = result.disc_manifests;
+    let dictionary = result.data_dictionary;
+    let chunk_index = result.chunk_index;
+    let audio_block_index = result.audio_block_index.unwrap_or_default();
+    let exception_index = result.exception_index.unwrap_or_default();
+    let subheader_table = result.subheader_table;
+
+    for disc in disc_indices {
+        let dm = disc_manifests
+            .get((*disc - 1) as usize)
+            .ok_or_else(|| CliError::InvalidRomIndex(
+                format!("Disc index {disc} is out of bounds.")
+            ))?;
+
+        let final_output_path = out_dir.join(
+            toc[(*disc as usize) - 1].filename.clone()
+        );
+
+        let tmp_output_path = final_output_path.with_extension("tmp");
+
+        let _guard = TempFileGuard::new(&tmp_output_path);
+
+        let file = File::create(&tmp_output_path)?;
+        let mut writer = BufWriter::new(file);
+
+        let chunk_hashes: Vec<H> = dm.data_stream_layout.iter().map(|data| {
+            data.hash
+        }).collect();
+
+        let audio_hashes: Vec<H> = dm.audio_block_map.iter().map(|block| {
+            block.content_hash
+        }).collect();
+
+        let expanded_sector_types = expand_sector_map(&dm.rle_sector_map);
+        let total_sectors = expanded_sector_types.len();
+
+        let subheader_map = expand_subheader_map(
+            &dm.subheader_index,
+            total_sectors
+        );
+        let expand_disc_excep_idx = expand_exception_index(
+            &dm.disc_exception_index,
+            total_sectors
+        );
+
+
+    }
 
     Ok(())
 }

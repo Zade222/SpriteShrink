@@ -11,7 +11,7 @@ use bitcode::{Decode, Encode};
 use bytemuck::{Pod, Zeroable};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use sprite_shrink::FileRegion;
+use sprite_shrink::{ChunkLocation, FileRegion};
 use zerocopy::{Immutable, IntoBytes, FromBytes};
 
 
@@ -89,6 +89,16 @@ pub struct DataChunkLayout<H> {
 pub struct DecodedSectorInfo {
     pub sector_type: SectorType,
     pub stream_offset: u64,
+}
+
+
+pub struct DecodedSSMDMetadata<H> {
+    pub disc_manifests:     Vec<DiscManifest<H>>,
+    pub data_dictionary:    Vec<u8>,
+    pub chunk_index:        HashMap<H, ChunkLocation>,
+    pub audio_block_index:  Option<HashMap<H, ChunkLocation>>,
+    pub exception_index:    Option<Vec<u64>>,
+    pub subheader_table:    Vec<[u8; 8]>,
 }
 
 
@@ -467,6 +477,7 @@ pub struct SSMDTocEntry {
     pub uncompressed_size: u64,
 }
 
+
 pub struct StreamChunkInfo<H> {
     pub chunk_hash: H,
     pub read_from_offset: u32,
@@ -480,6 +491,7 @@ pub struct SubHeaderEntry {
     pub count: u32,
     pub data_id: u16
 }
+
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Track {

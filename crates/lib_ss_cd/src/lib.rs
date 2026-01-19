@@ -5,6 +5,10 @@ pub use analyze::{
 
 mod cue_parser;
 
+mod decode;
+pub use decode::{
+    decode_ssmd_format_data, decode_ssmd_meta_data
+};
 
 mod ecc;
 
@@ -32,6 +36,7 @@ pub use mapper::{
 mod reconstruction;
 pub use reconstruction::{
     ReconstructionError,
+    expand_exception_index, expand_sector_map, expand_subheader_map,
     rebuild_sector_bitwise, rebuild_sector_simd, verify_disc_integrity
 };
 
