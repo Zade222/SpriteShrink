@@ -20,7 +20,7 @@ use std::{
 
 use dashmap::DashMap;
 use directories::ProjectDirs;
-use sprite_shrink::{FileHeader, SSMCFormatData};
+use sprite_shrink::SSMCFormatData;
 use tracing::{
     debug,
     error,
@@ -245,7 +245,7 @@ pub fn read_file_data(
     let mut file = File::open(filepath)?;
 
     //Create mutable vector the size of the data length to be read.
-    let mut file_buffer: Vec<u8> =  vec![0; data_length as usize];
+    let mut file_buffer: Vec<u8> =  vec![0; data_length];
 
     //Offset the start of where the read will begin.
     file.seek(SeekFrom::Start(data_index))?;

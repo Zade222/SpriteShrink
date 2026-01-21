@@ -19,7 +19,6 @@ use std::{
 
 use bitcode::{Encode, encode};
 use dashmap::DashMap;
-use directories::ProjectDirs;
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::bounded;
 use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
@@ -32,12 +31,11 @@ use tracing::{
 use sprite_shrink::{
     SS_SEED,
     ArchiveBuilder, ChunkLocation, FileHeader,
-    test_compression, dashmap_values_to_vec
 };
 use sprite_shrink_cd::{
     SSMD_UID,
     ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
-    FileSizeProvider, ExceptionRegistry, ExceptionInfo, MultiBinStream,
+    FileSizeProvider, ExceptionRegistry, MultiBinStream,
     ReconstructionError, SectorDataProvider, SectorRegionStream, SectorMap,
     SectorType, SpriteShrinkCDError, SSMDFormatData, SSMDTocEntry,
     SubheaderRegistry, UserDataStream,
@@ -50,10 +48,10 @@ use zerocopy::IntoBytes;
 use crate::{
     arg_handling::Args,
     cli_types::{DiscCompleteData, TempFileGuard},
-    storage_io::{append_data_to_file, write_final_archive},
+    storage_io::write_final_archive,
 };
 use crate::cli_types::{
-    APPIDENTIFIER, CacheTarget, OpticalChunkMessage
+    CacheTarget, OpticalChunkMessage
 };
 use crate::error_handling::CliError;
 use crate::storage_io::{
@@ -192,18 +190,9 @@ where
         process_in_memory_check(cue_analysis.total_data_size)
     };
 
-    let proj_dirs = ProjectDirs::from(
-        APPIDENTIFIER.qualifier,
-        APPIDENTIFIER.organization,
-        APPIDENTIFIER.application)
-    .unwrap();
-
     let cache_info = get_cache_paths();
 
     let pid = cache_info.id;
-
-    //Const for the max amount of chunks to cache before writing to disk.
-    const BUFFER_SIZE: usize = 1000;
 
     let base_path = cache_info.cache_path.with_extension("");
     let stem = base_path.file_name().unwrap().to_str().unwrap();
@@ -239,39 +228,16 @@ where
     array.*/
     let veri_hashes: DashMap<String, [u8; 64]>;
 
-    //Used for storing overall file size.
-    let mut data_sum = 0u64;
-
     /*Numerical compression level pulled from the args.*/
     let level: i32 = args.compression_level as i32;
 
     let process_threads = args.threads.map_or(0, |count| count);
 
-    /*Create read_pool to specify the amount of threads to be used by the
-    parallel process that follows it.*/
-    let process_pool = {
-        let builder = rayon::ThreadPoolBuilder::new()
-            .num_threads(process_threads);
+    let window_size = args.window.map_or(
+        8 * 1024, |byte| byte.as_u64());
 
-        builder.build()
-            .map_err(|e| CliError::InternalError(
-                format!("Failed to create thread pool: {e}")))?
-    };
-
-    //Sets the window size from cmd argument or default of 2kib
-    let mut best_window_size = args.window.map_or(
-        2 * 1024, |byte| byte.as_u64());
-
-    //Sets the dictionary size from cmd argument or default of 16kib
-    let mut best_dictionary_size = args.dictionary.map_or(
-        16 * 1024, |byte| byte.as_u64());
-
-    //autotune logic
-    /*if args.auto_tune {
-        if args.window.is_none() {
-
-        }
-    } //else { //Note: for now skip autotune logic to get the core logic sound.*/
+    let dictionary_size = args.dictionary.map_or(
+        128 * 1024, |byte| byte.as_u64());
 
     let proc_result = process_optical_discs::<H>(
         &cue_analysis.cue_sheets,
@@ -280,7 +246,7 @@ where
         &audio_temp_cache,
         &running,
         process_threads,
-        best_window_size
+        window_size
     )?;
 
     let disc_manifiests = proc_result.manifests;
@@ -290,8 +256,6 @@ where
     let exception_blob = proc_result.exception_blob;
 
     let audio_data_size = audio_temp_cache.get_tot_data_size();
-
-    let total_input_size = cue_analysis.total_data_size;
 
     let chunk_ret_cb = Arc::new({
         let cache_clone = Arc::clone(&data_temp_cache);
@@ -476,13 +440,6 @@ where
     let chunk_hashes = data_temp_cache.get_keys()?;
     let chunk_sum = data_temp_cache.get_tot_data_size();
 
-    /*Write buffer holds chunk byte data prior to being written.
-    Vector made with capacity to hold 1000 chunks * the maximum window size
-    fastcdc has used. (avg x 4)*/
-    let mut write_buffer: Vec<u8> = Vec::with_capacity(
-        BUFFER_SIZE * (best_window_size as usize * 4)
-    );
-
     let get_chunk_data_for_lib = {
         let cb = Arc::clone(&chunk_ret_cb);
         let lib_running_clone = Arc::clone(&running);
@@ -503,8 +460,6 @@ where
     let tmp_chunk_write_cb = {
         let writer_clone = Arc::clone(&writer);
         move |chunk: &[u8], flush_flag: bool| -> Result<(), CliError>{
-            write_buffer.extend_from_slice(chunk);
-
             writer_clone.lock().unwrap().write_all(chunk)?;
             Ok(())
         }
@@ -518,7 +473,7 @@ where
     );
 
     comp_data_builder.compression_level(level)
-        .dictionary_size(best_dictionary_size)
+        .dictionary_size(dictionary_size)
         .optimize_dictionary(args.optimize_dictionary)
         .worker_threads(args.threads.unwrap_or(0));
 
@@ -930,7 +885,6 @@ where
                         cache_target: CacheTarget::Data,
                         chunk_hash,
                         chunk_data: chunk.data,
-                        chunk_size: chunk.length
                     };
 
                     if send_channel.send(message).is_err() {
@@ -972,7 +926,6 @@ where
                         cache_target: CacheTarget::Audio,
                         chunk_hash: block_hash,
                         chunk_data: curr_block_slice.to_vec(),
-                        chunk_size: bytes_to_read,
                     };
 
                     if send_channel.send(message).is_err() {

@@ -7,7 +7,7 @@
 
 use std::{
     collections::HashMap,
-    fs::{Metadata, metadata, remove_file},
+    fs::{metadata, remove_file},
     hash::Hash,
     path::{Path, PathBuf},
     sync::Arc,
@@ -24,7 +24,7 @@ use sprite_shrink::{
     FileManifestParent, Hashable, SSAChunkMeta
 };
 use sprite_shrink_cd::{
-    ContentBlock, DataChunkLayout, ExceptionInfo, RleSectorMap, SubHeaderEntry
+    ContentBlock, DataChunkLayout, RleSectorMap, SubHeaderEntry
 };
 
 
@@ -138,7 +138,6 @@ pub struct OpticalChunkMessage<H: Hashable> {
     pub cache_target: CacheTarget,
     pub chunk_hash: H,
     pub chunk_data: Vec<u8>,
-    pub chunk_size: usize
 }
 
 /// Defines cross-platform identifiers for the application.

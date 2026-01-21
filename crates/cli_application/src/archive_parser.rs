@@ -15,9 +15,8 @@ use bitcode::Decode;
 use serde::Serialize;
 
 use sprite_shrink::{
-    ChunkLocation, FileHeader, FileManifestParent, Hashable, SSMCTocEntry,
+    ChunkLocation, FileHeader, FileManifestParent, Hashable,
     parse_file_chunk_index, parse_file_header, parse_file_metadata,
-    parse_file_toc
 };
 
 use crate::error_handling::CliError;
