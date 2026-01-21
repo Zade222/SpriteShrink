@@ -92,13 +92,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u64(
             return FFIResult::NullArgument;
     }
 
-    let (file_name, file_data, chunks) = unsafe {
-        /*Prepare file_name, which is the first parameter of the original
-        create_file_manifest_and_chunks function, from C input.*/
-        let file_name = std::ffi::CStr::from_ptr(args_int.file_name_ptr)
-            .to_string_lossy()
-            .into_owned();
-
+    let (file_data, chunks) = unsafe {
         /*Prepare file_data, which is the second parameter of the original
         create_file_manifest_and_chunks function, from C input.*/
         let file_data = slice::from_raw_parts(
@@ -126,7 +120,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u64(
                 .collect::<Vec<_>>()
         };
 
-        (file_name, file_data, chunks)
+        (file_data, chunks)
     };
 
     /*Call original function to process data.*/
@@ -239,13 +233,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u128(
             return FFIResult::NullArgument;
     }
 
-    let (file_name, file_data, chunks) = unsafe {
-        /*Prepare file_name, which is the first parameter of the original
-        create_file_manifest_and_chunks function, from C input.*/
-        let file_name = std::ffi::CStr::from_ptr(args_int.file_name_ptr)
-            .to_string_lossy()
-            .into_owned();
-
+    let (file_data, chunks) = unsafe {
         /*Prepare file_data, which is the second parameter of the original
         create_file_manifest_and_chunks function, from C input.*/
         let file_data = slice::from_raw_parts(
@@ -274,7 +262,7 @@ pub unsafe extern "C" fn create_file_manifest_and_chunks_u128(
                 .collect::<Vec<_>>()
         };
 
-        (file_name, file_data, chunks)
+        (file_data, chunks)
     };
 
     let (fmp, hashed_chunks) = create_file_manifest_and_chunks::<u128>(
@@ -646,7 +634,7 @@ pub unsafe extern "C" fn verify_single_file_u64(
         let chunk_metadata = chunk_metadata_slice
             .iter()
             .map(|meta| SSAChunkMeta {
-                hash: meta.hash.into(),
+                hash: meta.hash,
                 offset: meta.offset,
                 length: meta.length,
             })
