@@ -4,6 +4,8 @@ use std::{
 
 use sysinfo::System;
 use thread_priority::{ThreadPriority, set_current_thread_priority};
+#[cfg(target_os = "windows")]
+use thread_priority::WinAPIThreadPriority;
 use tracing::{
     debug,
 };
