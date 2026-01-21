@@ -7,53 +7,49 @@
 //! verify, and compress the unique data into a final archive file.
 
 use std::{
-    borrow::Borrow,
-    cmp::min,
-    fmt::Display,
-    fs::{create_dir_all, File},
+    fmt::{Debug, Display},
+    fs::{File, create_dir_all},
     path::PathBuf,
-    process::id,
     sync::{Arc, Mutex, atomic::{
         AtomicBool, Ordering
     }},
-    thread,
-    time::{Duration, Instant}
+    thread, time::{Duration}
 };
 
+use bitcode::{Encode, encode};
 use dashmap::DashMap;
 use directories::ProjectDirs;
 use indicatif::{ProgressBar, ProgressStyle};
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::{bounded};
-use redb::{backends::InMemoryBackend, Database, TableDefinition, Value};
 use sprite_shrink::{
-    ArchiveBuilder, FileManifestParent, Hashable, Progress, SS_SEED,
-    SSAChunkMeta, serialize_uncompressed_data, test_compression,
-    verify_single_file
+    SS_SEED, SSMC_UID,
+    ArchiveBuilder, FileHeader, FileManifestParent, Hashable, Progress,
+    SSAChunkMeta, SSMCFormatData,
+    serialize_uncompressed_data, verify_single_file
 };
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest,Sha512};
-use sysinfo::System;
-use thread_priority::*;
 use tracing::{
     debug,
     info,
-    warn
 };
+use zerocopy::IntoBytes;
 
 use crate::{
     arg_handling::Args,
+    auto_tune::{auto_tune_dict, auto_tune_win},
     cli_types::{
-        ChunkMessage, DBInfo, FileData, FileCompleteData,
+        ChunkMessage, FileData, FileCompleteData,
         TempFileGuard, APPIDENTIFIER
     },
-    db_transactions::{batch_insert, get_chunks, get_keys, get_tot_data_size},
     error_handling::CliError,
     storage_io::{
-        append_data_to_file, calc_tot_input_size,
-        write_final_archive
-    }
+        append_data_to_file, calc_tot_input_size, get_cache_paths,
+        write_final_archive, TempCache
+    },
+    utils::{process_in_memory_check, set_priority},
 };
 
 /// Executes the file compression and archiving process.
@@ -63,7 +59,7 @@ use crate::{
 /// identify duplicate data chunks, and then serializes, verifies, and
 /// compresses the unique data into a final archive file.
 ///
-/// A key feature of this process is its use of a temporary `redb` database to
+/// A key feature of this process is its use of a temporary on disk cache to
 /// store unique chunks. This approach minimizes memory usage, making it
 /// suitable for processing large files that might not fit into RAM.
 ///
@@ -85,7 +81,7 @@ use crate::{
 /// # Type Parameters
 ///
 /// * `H`: The generic hash type, which must implement the traits required for
-///   hashing, serialization, and use as a `redb` database key.
+///   hashing and serialization
 ///
 /// # Returns
 ///
@@ -100,9 +96,9 @@ use crate::{
 /// This function can return an error in several cases, including:
 /// - `CliError::NoFilesError` if the `file_paths` vector is empty.
 /// - `CliError::InternalError` if a thread pool cannot be created.
-/// - Any error propagated from file I/O, database transactions,
+/// - Any error propagated from file I/O transactions,
 ///   data processing, verification, or final archive writing stages.
-pub fn run_compression<H>(
+pub fn default_compression<H>(
     file_paths: Vec<PathBuf>,
     args: &Args,
     hash_type_id: &u8,
@@ -110,58 +106,16 @@ pub fn run_compression<H>(
 ) -> Result<(), CliError>
 where
     H: Hashable
-        + Ord
+        + Debug
         + Display
+        + Encode
+        + Ord
         + Serialize
         + for<'de> serde::Deserialize<'de>
-        + redb::Key
-        + for<'a> redb::Value<SelfType<'a> = H>,
 {
-    /*Verify if the list of files paths is empty, throw error if true. */
-    if file_paths.is_empty() {
-        return Err(CliError::NoFilesFound());
-    }
+    debug!("Running default compression mode.");
 
-    let out_dir = args.output
-        .as_ref()
-        .unwrap()
-        .parent()
-        .unwrap();
-
-    if !out_dir.exists() && !args.force{
-        return Err(CliError::InvalidOutputPath())
-    } else {
-        create_dir_all(out_dir)?;
-    }
-
-    /*Set OS process priority to be undertypical user facing application
-    priority.*/
-    #[cfg(target_os = "linux")]
-    {
-        let priority = ThreadPriority::Crossplatform(
-            30.try_into().unwrap()
-        );
-
-        set_current_thread_priority(priority)?;
-    }
-
-    #[cfg(target_os = "macos")]
-    {
-        let priority = ThreadPriority::Crossplatform(
-            30.try_into().unwrap()
-        );
-
-        set_current_thread_priority(priority)?;
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let priority = ThreadPriority::Os(
-            WinAPIThreadPriority::BelowNormal.into()
-        );
-
-        set_current_thread_priority(priority)?;
-    }
+    set_priority()?;
 
     let input_data_size = calc_tot_input_size(&file_paths)?;
 
@@ -170,11 +124,6 @@ where
     } else {
         process_in_memory_check(input_data_size)
     };
-
-
-
-    /*The following lines will likely eventually be moved to a function in
-    db_transactions.rs*/
 
     let proj_dirs = ProjectDirs::from(
         APPIDENTIFIER.qualifier,
@@ -185,44 +134,25 @@ where
     let cache_dir = proj_dirs.cache_dir();
     create_dir_all(cache_dir)?;
 
-    //Set db_paths
-    let (db_path, at_db_path, pid) = get_db_paths();
+    let cache_info = get_cache_paths();
 
-    //When the guard falls out of scope the file will be deleted.
-    let _temp_db_guard = TempFileGuard::new(&db_path);
+    let pid = cache_info.id;
 
-    let db_data_store: TableDefinition<
-        'static,
-        H,
-        Vec<u8>
-    > = TableDefinition::new("data_store");
-
-    let db = if process_in_memory {
-        Database::builder().create_with_backend(InMemoryBackend::new())?
-    } else {
-        Database::create(&db_path)?
-    };
-
-    let db_info = Arc::new(DBInfo {
-        db,
-        db_def: db_data_store
-    });
-
-    //End function
+    let temp_cache = Arc::new(
+        TempCache::<H>::new(cache_info.cache_path, process_in_memory)?
+    );
 
     /*Stores the chunk metadata for each file.
     The key is the file name and the value is a FileManifestParent struct.*/
-    let mut _file_manifest: DashMap<
+    let file_manifest: DashMap<
         String,
         FileManifestParent<H>
-    > = DashMap::new();
-
-    let data_store: Arc<DashMap<H, Vec<u8>>> = Arc::new(DashMap::new());
+    >;
 
     /*Stores the SHA-512 hash for each file.
     The String is the file name and the array is the 512 bit hash as a 64 byte
     array.*/
-    let mut _veri_hashes: DashMap<String, [u8; 64]> = DashMap::new();
+    let veri_hashes: DashMap<String, [u8; 64]>;
 
     //Used for storing overall file size.
     let chunk_sum: u64;
@@ -230,95 +160,48 @@ where
     /*Numerical compression level pulled from the args.*/
     let level: i32 = args.compression_level as i32;
 
-    /*Stores the size of threads used by the parallel task of running
+    /*Stores the amount of threads used by the parallel task of running
     process_file_in_memory function.*/
-    let mut _process_threads: usize = 0;
+    let process_threads = args.threads.map_or(0, |count| count);
 
-    //Callback for getting all keys (hashes) in database
-    let data_store_for_key_ret = Arc::clone(&data_store);
+    //Callback for getting all keys (hashes) in cache
     let key_ret_cb = {
-        let db_info_clone = Arc::clone(&db_info);
-        let batch_running_clone = Arc::clone(&running);
+        let cache_clone = Arc::clone(&temp_cache);
+        let running_clone = Arc::clone(&running);
         move || -> Result<Vec<H>, CliError> {
-        if process_in_memory {
-            if !batch_running_clone.load(Ordering::SeqCst) {
+            if !running_clone.load(Ordering::SeqCst) {
                 return Err(CliError::Cancelled);
             }
 
-            Ok(data_store_for_key_ret
-                .iter()
-                .map(|entry| *entry.key())
-                .collect())
-        } else {
-            if !batch_running_clone.load(Ordering::SeqCst) {
-                return Err(CliError::Cancelled);
-            }
-
-            //Get keys from db
-            Ok(get_keys(&db_info_clone)?)
+            cache_clone.get_keys()
         }
-    }};
+    };
 
     //Callback for getting a list of chunks from the provided list of hashes
     let chunk_ret_cb = Arc::new({
-        let db_info_clone = Arc::clone(&db_info);
-        let data_store_for_chunk_ret = Arc::clone(&data_store);
+        let cache_clone = Arc::clone(&temp_cache);
         let running_clone = Arc::clone(&running);
         move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
-            if process_in_memory {
-                if !running_clone.load(Ordering::SeqCst) {
-                    return Err(CliError::Cancelled);
-                }
-
-                let chunks_iterator = hashes.iter().map(|hash| {
-                    data_store_for_chunk_ret
-                        .get(hash)
-                        .map(|val_ref| val_ref.clone())
-                });
-
-                let optional_chunks: Option<Vec<Vec<u8>>> = chunks_iterator
-                    .collect();
-
-                optional_chunks.ok_or_else(|| {
-                    CliError::KeyNotFound(
-                        "A chunk hash was not found in the in-memory data \
-                            store."
-                            .to_string())
-                })
-            } else {
-                if !running_clone.load(Ordering::SeqCst) {
-                    return Err(CliError::Cancelled);
-                }
-                //Get chunk data from db
-                Ok(get_chunks(hashes, &db_info_clone)?)
+            if !running_clone.load(Ordering::SeqCst) {
+                return Err(CliError::Cancelled);
             }
+
+            cache_clone.get_chunks(hashes)
         }
     });
 
-    let db_info_ins_clone = Arc::clone(&data_store);
-    let db_info_ret_clone = Arc::clone(&db_info);
     let insert_batch_cb = {
-        let batch_running_clone = Arc::clone(&running);
+        let cache_clone = Arc::clone(&temp_cache);
+        let running_clone = Arc::clone(&running);
         move |
-            chunk_batch: &Vec<(H, Vec<u8>)>
+            chunk_batch: &[(H, Vec<u8>)]
         | -> Result<(), CliError> {
-            if process_in_memory {
-                if !batch_running_clone.load(Ordering::SeqCst) {
-                    return Err(CliError::Cancelled);
-                }
-
-                for (hash, data) in chunk_batch{
-                    db_info_ins_clone.entry(*hash).or_insert(data.to_vec());
-                };
-                Ok(())
-            } else {
-                if !batch_running_clone.load(Ordering::SeqCst) {
-                    return Err(CliError::Cancelled);
-                }
-
-                batch_insert(&db_info_ret_clone, chunk_batch)?;
-                Ok(())
+            if !running_clone.load(Ordering::SeqCst) {
+                return Err(CliError::Cancelled);
             }
+
+            cache_clone.insert_batch(chunk_batch)?;
+            Ok(())
         }
     };
 
@@ -326,7 +209,7 @@ where
     parallel process that follows it.*/
     let _process_pool = {
         let builder = rayon::ThreadPoolBuilder::new()
-            .num_threads(_process_threads);
+            .num_threads(process_threads);
 
         builder.build()
             .map_err(|e| CliError::InternalError(
@@ -343,244 +226,48 @@ where
 
     //Autotune if flag was provided.
     if args.auto_tune {
-        let timeout_dur = args.autotune_timeout.
-            map(Duration::from_secs);
-        //Starting window size
-        let mut current_window_size = 512;
-
-        //Value used for testing each auto-tune step
-        let mut last_compressed_size = usize::MAX;
-
         //If window size was not specified, find optimal window size.
         if args.window.is_none() {
-            let window_bar = if args.progress {
-                let bar = ProgressBar::new_spinner();
-                bar.enable_steady_tick(Duration::from_millis(500));
-                bar.set_style(
-                    ProgressStyle::with_template("{msg} {spinner}")
-                        .unwrap()
-                        .tick_strings(&[
-                            "   ",
-                            ".  ",
-                            ".. ",
-                            "...",
-                            " ..",
-                            "  .",
-                            "   ",
-                        ]),
+            let processor = |
+                    window_size: u64
+            | -> Result<(FileData<H>, Arc<TempCache<H>>), CliError> {
+                let at_temp_cache = Arc::new(
+                    TempCache::<H>::new(
+                        cache_info.at_cache_path.clone(),
+                        process_in_memory
+                    ).unwrap()
                 );
-                bar.set_message("Tuning window size");
-                Some(bar)
-            } else {
-                None
-            };
-            loop {
-                debug!("Testing window size: {current_window_size}");
-
-                /*Set starting time for determining the compressed size
-                using the current window size*/
-                let start_time = Instant::now();
-
-                /*Set temporary db path using task output file name.*/
-
-                //When the guard falls out of scope the scope will be deleted.
-                let _auto_tune_db_guard = TempFileGuard::new(&at_db_path);
-
-                //Make database definition
-                let db_at_data_store: TableDefinition<
-                    'static,
-                    H,
-                    Vec<u8>
-                > = TableDefinition::new("data_store");
-
-                let at_db = if process_in_memory {
-                    Database::builder().create_with_backend(
-                        InMemoryBackend::new()
-                    )?
-                } else {
-                    Database::create(&at_db_path)?
-                };
-
-                //Create database and encapsulate it in an Arc
-                let at_db_info = Arc::new(DBInfo {
-                    db: at_db,
-                    db_def: db_at_data_store
-                });
-
-                let tmp_data_store: Arc<DashMap<H, Vec<u8>>> = Arc::new(
-                    DashMap::new()
-                );
-
-                let tmp_data_store_clone = Arc::clone(&tmp_data_store);
-                let at_db_info_clone = Arc::clone(&at_db_info);
 
                 let at_insert_batch_cb = {
-                    let at_running_clone = Arc::clone(&running);
+                    let cache_clone = Arc::clone(&at_temp_cache);
+                    let running_clone = Arc::clone(&running);
                     move |
-                        chunk_batch: &Vec<(H, Vec<u8>)>
+                        chunk_batch: &[(H, Vec<u8>)]
                     | -> Result<(), CliError> {
-                        if process_in_memory {
-                            if !at_running_clone.load(Ordering::SeqCst) {
-                                return Err(CliError::Cancelled);
-                            }
-
-                            for (hash, data) in chunk_batch{
-                                tmp_data_store_clone
-                                    .entry(*hash)
-                                    .or_insert(data.to_vec());
-                            };
-                            Ok(())
-                        } else {
-                            if !at_running_clone.load(Ordering::SeqCst) {
-                                return Err(CliError::Cancelled);
-                            }
-                            batch_insert(
-                                &at_db_info_clone,
-                                chunk_batch
-                            )?;
-
-                            Ok(())
+                        if !running_clone.load(Ordering::SeqCst) {
+                            return Err(CliError::Cancelled);
                         }
+
+                        cache_clone.insert_batch(chunk_batch)?;
+                        Ok(())
                     }
                 };
 
-                //Process files with the current window size
-                let _temp_data = process_files(
+                let file_data = process_files(
                     &file_paths,
-                    current_window_size,
+                    window_size,
                     &input_data_size,
                     false,
                     at_insert_batch_cb,
                     &running
                 )?;
 
-                let _fm = _temp_data.file_manifest;
-                let _vh = _temp_data.veri_hashes;
-
-                /*Callback for getting all keys(hashes) from temporary
-                database*/
-                let at_key_ret_cb = {
-                    let at_db_info_clone = Arc::clone(&at_db_info);
-                    let data_store_for_chunk_ret = Arc::clone(&tmp_data_store);
-                    let batch_running_clone = Arc::clone(&running);
-                    move || -> Result<Vec<H>, CliError> {
-                    //Get keys from db
-                    if process_in_memory {
-                        if !batch_running_clone.load(Ordering::SeqCst) {
-                            return Err(CliError::Cancelled);
-                        }
-                        Ok(data_store_for_chunk_ret.iter().map(|entry|
-                            *entry.key()
-                        ).collect())
-                    } else {
-                        if !batch_running_clone.load(Ordering::SeqCst) {
-                            return Err(CliError::Cancelled);
-                        }
-                        Ok(get_keys(&at_db_info_clone)?)
-                    }
-                }};
-
-                /*Callback for getting one or more chunks from the temporary
-                database*/
-                let at_chunk_ret_cb = {
-                    let at_db_info_clone = Arc::clone(&at_db_info);
-                    let data_store_for_chunk_ret = Arc::clone(&tmp_data_store);
-                    let running_clone = Arc::clone(&running);
-                    move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
-                        if process_in_memory {
-                            if !running_clone.load(Ordering::SeqCst) {
-                                return Err(CliError::Cancelled);
-                            }
-
-                            let chunks_iterator = hashes.iter().map(|hash| {
-                                data_store_for_chunk_ret
-                                    .get(hash)
-                                    .map(|val_ref| val_ref.clone())
-                            });
-
-                            let optional_chunks: Option<Vec<Vec<u8>>> = chunks_iterator
-                                .collect();
-
-                            optional_chunks.ok_or_else(|| {
-                                CliError::KeyNotFound(
-                                    "A chunk hash was not found in the in-memory data \
-                                        store."
-                                        .to_string())
-                            })
-                        } else {
-                            if !running_clone.load(Ordering::SeqCst) {
-                                return Err(CliError::Cancelled);
-                            }
-
-                            //Get chunk data from db
-                            Ok(get_chunks(hashes, &at_db_info_clone)?)
-                        }
-                    }
-                };
-
-                //Serialize temporary data
-                /*let (_ser_file_manifest,
-                _chunk_index,
-                sorted_hashes)*/
-                let temp_serialized_data =
-                serialize_uncompressed_data(
-                    &_fm,
-                    &at_key_ret_cb,
-                    &at_chunk_ret_cb
-                )?;
-
-                //Calc the sum of all chunks in auto-tune databse
-                let total_data_size = if process_in_memory {
-                    tmp_data_store
-                        .iter()
-                        .map(|entry| entry.value().len() as u64)
-                        .sum()
-                } else {
-                    get_tot_data_size(&at_db_info)?
-                };
-
-                /*Compress the data and measure the size
-                (dictionary size + compressed data size)*/
-                let compressed_size = test_compression(
-                    &temp_serialized_data.sorted_hashes,
-                    total_data_size,
-                    _process_threads,
-                    8192,
-                    level,
-                    at_chunk_ret_cb,
-                )?;
-
-                /*Measure the time taken for determining the compressed size
-                for the current window size*/
-                let elapsed = start_time.elapsed();
-
-                if compressed_size > last_compressed_size {
-                    //Process passed the optimal point, stop.
-                    debug!("Optimal window size found to be \
-                        {best_window_size} bytes.");
-                    break;
-                }
+                Ok((file_data, at_temp_cache))
+            };
 
 
-                if let Some(timeout) = timeout_dur
-                    && elapsed > timeout
-                {
-                    warn!("Autotune for window size {current_window_size}\
-                        took too long (>{timeout:?}).Using best \
-                        result so far: {best_window_size}."
-                    );
-                }
+            best_window_size = auto_tune_win(args, &running, processor)?;
 
-                //This iteration was successful and an improvement
-                last_compressed_size = compressed_size;
-                best_window_size = current_window_size;
-
-                //Double value for next loop
-                current_window_size *= 2;
-            }
-            if let Some(bar) = &window_bar {
-                bar.finish_with_message("Optimal window size found.");
-            }
         }
 
         /*Using either the autotune best window size or the user set value,
@@ -594,105 +281,32 @@ where
             &running
         )?;
 
-        _file_manifest = _temp_data.file_manifest;
-        _veri_hashes = _temp_data.veri_hashes;
+        file_manifest = _temp_data.file_manifest;
+        veri_hashes = _temp_data.veri_hashes;
 
         /*Serialize the data for later using it for verifying the files. */
-        /*let (_ser_fm,
-            _ci,
-            sorted_hashes)*/
         let temp_serialized_data = serialize_uncompressed_data(
-                &_file_manifest,
+                &file_manifest,
                 &key_ret_cb,
                 chunk_ret_cb.as_ref()
             )?;
 
-        //Calc the sum of all chunks in database
-        chunk_sum = if process_in_memory {
-            data_store
-                .iter()
-                .map(|entry| entry.value().len() as u64)
-                .sum()
-        } else {
-            get_tot_data_size(&db_info)?
-        };
-
-        //Set value back to max to prepare it for the next auto-tune step/
-        last_compressed_size = usize::MAX;
-
-        //Starting dictionary size, 8kb
-        let mut current_dict_size: usize = 8192;
+        //Calc the sum of all chunks in cache
+        chunk_sum = temp_cache.get_tot_data_size();
 
         //If dicionary size was not specified, find optimal dictionary size.
         if args.dictionary.is_none() {
-            let dictionary_bar = if args.progress {
-                let bar = ProgressBar::new_spinner();
-                bar.enable_steady_tick(Duration::from_millis(500));
-                bar.set_style(
-                    ProgressStyle::with_template("{msg} {spinner}")
-                        .unwrap()
-                        .tick_strings(&[
-                            "   ",
-                            ".  ",
-                            ".. ",
-                            "...",
-                            " ..",
-                            "  .",
-                            "   ",
-                        ]),
-                );
-                bar.set_message("Tuning dictionary size");
-                Some(bar)
-            } else {
-                None
+            let get_chunk_data_for_test = {
+                let cb = Arc::clone(&chunk_ret_cb);
+                move |hashes: &[H]| cb(hashes)
             };
-            loop {
-                debug!("Testing dictionary size: {current_dict_size}");
 
-                let get_chunk_data_for_test = {
-                    //Clone the Arc, which is a cheap reference count bump
-                    let cb = Arc::clone(&chunk_ret_cb);
-                    //This new closure takes ownership of the cloned Arc
-                    move |hashes: &[H]| cb(hashes)
-                };
-
-
-                /*Given the current dictionary size, determine the size of the
-                data*/
-                let compressed_size = test_compression(
-                    &temp_serialized_data.sorted_hashes,
-                    chunk_sum,
-                    _process_threads,
-                    current_dict_size,
-                    level,
-                    get_chunk_data_for_test
-                )?;
-
-
-                if compressed_size > last_compressed_size {
-                    //Process passed the optimal point, stop.
-                    debug!("Optimal dictionary size found to be \
-                        {best_dictionary_size} bytes."
-                    );
-                    break;
-                }
-
-                //This iteration was successful and an improvement
-                last_compressed_size = compressed_size;
-                best_dictionary_size = current_dict_size as u64;
-
-                //Double value for next loop
-                current_dict_size *= 2;
-
-                /*Accept reasonable upper limit for dictionary size.
-                This will stop it at an accepted value of 1024 * 1024*/
-                if current_dict_size > 1024 * 1024 {
-                    break;
-                }
-            }
-            if let Some(bar) = &dictionary_bar {
-                bar.finish_with_message("Optimal dictionary size found.");
-            }
+            best_dictionary_size = auto_tune_dict(
+                args,
+                chunk_sum,
+                &temp_serialized_data,
+                get_chunk_data_for_test
+            )?;
         }
     } else {
         /*If not autotuning window or dictionary size, just process files.*/
@@ -705,18 +319,11 @@ where
             &running,
         )?;
 
-        _file_manifest = temp_data.file_manifest;
-        _veri_hashes = temp_data.veri_hashes;
+        file_manifest = temp_data.file_manifest;
+        veri_hashes = temp_data.veri_hashes;
 
         //Calc the sum of all chunks in databse
-        chunk_sum = if process_in_memory {
-            data_store
-                .iter()
-                .map(|entry| entry.value().len() as u64)
-                .sum()
-        } else {
-            get_tot_data_size(&db_info)?
-        };
+        chunk_sum = temp_cache.get_tot_data_size();
     }
 
     debug!("All files processed. Verifying data...");
@@ -736,18 +343,17 @@ where
 
     /*Prepares and serializes all data for the final archive. See above for
     each variable in the output tuple.*/
-    /*let (ser_file_manifest,
-        chunk_index,
-        sorted_hashes)*/
     let serialized_data = serialize_uncompressed_data(
-            &_file_manifest,
+            &file_manifest,
             &key_ret_cb,
             chunk_ret_cb.as_ref()
         )?;
 
     /*Drop file_manifest since it is no longer needed and was only used for
     verifying files.*/
-    drop(_file_manifest);
+    drop(file_manifest);
+
+    let archive_toc = serialized_data.archive_toc;
 
     let verification_pb = if args.progress {
         let bar = ProgressBar::new(input_data_size);
@@ -765,19 +371,19 @@ where
 
     let verification_pb_arc = Arc::new(verification_pb);
 
-    //Clone ser_file_manifest for use in verification loop
-    let sfm_clone = serialized_data.ser_file_manifest.clone();
-
     //Vector used to track status of each thread.
     let mut thread_handles = vec![];
 
     /*Pulls each chunk for a file, generating a hash for the file,
     and verifies the hash matches the hash of original file.*/
-    for fmp in sfm_clone{
-        let entry = _veri_hashes.get(&fmp.filename)
+    for (i, fmp) in serialized_data.ser_file_manifest.iter().enumerate() {
+        let file_title = archive_toc[i].filename.clone();
+        let fmp_owned = fmp.clone();
+
+        let entry = veri_hashes.get(&file_title)
             .ok_or_else(|| CliError::InternalError(format!(
             "Verification hash missing for file: {}",
-            fmp.filename
+            file_title
         )))?;
 
         let veri_hash = *entry.value();
@@ -802,7 +408,9 @@ where
         };
 
         let handle = thread::spawn(move ||{
-            verify_single_file(&fmp,
+            verify_single_file(
+                file_title,
+                &fmp_owned,
                 &veri_hash,
                 get_chunk_data_for_verify,
                 progress_closure
@@ -826,7 +434,7 @@ where
         bar.finish_with_message("File verification passed!");
     }
     //At this point, verification is complete. We can free all related data.
-    drop(_veri_hashes);
+    drop(veri_hashes);
 
     debug!("File verification passed!");
 
@@ -915,7 +523,7 @@ where
     Vector made with capacity to hold 1000 chunks * the maximum window size
     fastcdc has used. (avg x 4)*/
     let mut write_buffer: Vec<u8> = Vec::with_capacity(
-        (1000 * (best_dictionary_size * 4)) as usize
+        BUFFER_SIZE * (best_window_size as usize * 4)
     );
 
     //Holds the amount of chunks that have been stored in the buffer.
@@ -972,10 +580,7 @@ where
     it according to the ssmc spec and returns the byte data ready to be
     written.*/
     let mut builder = ArchiveBuilder::new(
-        serialized_data.ser_file_manifest,
         &serialized_data.sorted_hashes,
-        file_paths.len() as u32,
-        *hash_type_id,
         chunk_sum,
         get_chunk_data_for_lib,
         tmp_chunk_write_cb
@@ -987,9 +592,8 @@ where
         .optimize_dictionary(args.optimize_dictionary)
         .worker_threads(args.threads.unwrap_or(0));
 
-
     //Start the build process using the progress callback.
-    let ssmc_data = builder.with_progress(progress_callback)
+    let comp_data = builder.with_progress(progress_callback)
         .build()?;
 
     if let Some(bar) = progress_bar.lock().unwrap().take()
@@ -1006,11 +610,43 @@ where
         .unwrap()
         .with_extension("ssmc");
 
+    let enc_toc = encode(&archive_toc);
+
+    let enc_file_manifest = encode(&serialized_data.ser_file_manifest);
+
+    let file_header = FileHeader::build_file_header(
+        file_paths.len() as u32,
+        98, //zstd
+        *hash_type_id,
+        SSMC_UID,
+        enc_toc.len() as u32,
+    );
+
+    let format_data = SSMCFormatData::build_format_data(
+        enc_toc.len() + FileHeader::HEADER_SIZE as usize,
+        enc_file_manifest.len(),
+        comp_data.dictionary_size,
+        comp_data.enc_chunk_index_size
+    );
+
+    let mut final_data = Vec::with_capacity(
+        FileHeader::HEADER_SIZE as usize + enc_toc.len() +
+            SSMCFormatData::SIZE as usize + enc_file_manifest.len() +
+            comp_data.dictionary.len() + comp_data.enc_chunk_index.len()
+    );
+
+    final_data.extend_from_slice(file_header.as_bytes());
+    final_data.extend_from_slice(&enc_toc);
+    final_data.extend_from_slice(format_data.as_bytes());
+    final_data.extend_from_slice(&enc_file_manifest);
+    final_data.extend_from_slice(&comp_data.dictionary);
+    final_data.extend_from_slice(&comp_data.enc_chunk_index);
+
     //Write ssmc header to disk and append it with compressed data.
     write_final_archive(
         &final_output_path,
         &tmp_file_path,
-        &ssmc_data
+        &final_data
     )?;
 
     info!(
@@ -1047,13 +683,11 @@ where
 ///   be processed.
 /// * `window_size`: The target average chunk size to be used by the chunking
 ///   algorithm.
-/// * `db_info`: A `DBInfo` struct containing the database connection and table
-///   definition for storing unique chunks.
 ///
 /// # Type Parameters
 ///
 /// * `H`: The generic hash type, which must implement the traits required for
-///   hashing, serialization, and use as a database key.
+///   hashing and serialization.
 ///
 /// # Returns
 ///
@@ -1079,11 +713,10 @@ where
         + Display
         + Serialize
         + for<'de> serde::Deserialize<'de>
-        + redb::Key
         + Send
         + 'static,
-    for<'a> H: Borrow<<H as Value>::SelfType<'a>>,
-    W: FnMut(&Vec<(H, Vec<u8>)>) -> Result<(), CliError> + Send + 'static,
+    W: FnMut(&[(H, Vec<u8>)]) -> Result<(), CliError> + Send + 'static,
+
 {
     let progress_bar = if print_progress {
         let bar = ProgressBar::new(*total_input_size);
@@ -1099,8 +732,10 @@ where
         None
     };
 
+    const BATCH_SIZE: usize = 1000;
+
     //Initialize flume channels for inter thread communication
-    let (sender, receiver) = bounded(1000);
+    let (sender, receiver) = bounded(BATCH_SIZE);
 
     let (batch_sender, batch_receiver) = bounded::<Vec<(H, Vec<u8>)>>(100);
 
@@ -1162,7 +797,6 @@ where
                     );
 
                     let mut fmp = FileManifestParent{
-                        filename: fcd.file_name,
                         chunk_count: fcd.chunk_count,
                         chunk_metadata: fcd.chunk_meta
                     };
@@ -1172,7 +806,7 @@ where
                     );
 
                     worker_file_manifest.insert(
-                        fmp.filename.clone(),
+                        fcd.file_name.clone(),
                         fmp
                     );
 
@@ -1183,7 +817,6 @@ where
         Ok(())
     });
 
-    const BATCH_SIZE: usize = 1000;
     let mut chunk_batch: Vec<(H, Vec<u8>)> = Vec::with_capacity(BATCH_SIZE);
 
     //While workers are processing files, loop until done.
@@ -1197,7 +830,7 @@ where
         chunk_batch.push((message.chunk_hash, message.chunk_data));
 
         if chunk_batch.len() >= BATCH_SIZE {
-            //When the batch is full, write it to the database or data_store
+            //When the batch is full, write it to the cache
             batch_sender.send(std::mem::take(&mut chunk_batch))
                 .map_err(|e| CliError::FlumeSendError(e.to_string()))?;
             chunk_batch.reserve(BATCH_SIZE);
@@ -1345,86 +978,4 @@ where
         chunk_count,
         chunk_meta
     })
-}
-
-/// Determines whether the compression process should use an in-memory
-/// database or a temporary file-based database on disk.
-///
-/// This function assesses the trade-off between performance and memory usage.
-/// Using an in-memory database is significantly faster but requires enough
-/// available RAM to hold all unique chunk data. Using a file-based database
-/// is slower due to disk I/O but supports processing datasets much larger
-/// than the available memory.
-///
-/// The decision is made based on a heuristic: it checks if 80% of the
-/// system's currently available memory is greater than the total size of the
-/// input data plus a conservative buffer. This buffer accounts for the
-/// overhead of other data structures used during the compression pipeline,
-/// such as the file manifest and various temporary collections.
-///
-/// # Arguments
-///
-/// * `input_data_size`: The total combined size in bytes of all files to be
-///   processed.
-///
-/// # Returns
-///
-/// * `true` if there is likely sufficient memory to safely use an in-memory
-///   database.
-/// * `false` if it is safer to use a temporary database on disk to avoid
-///   potential out-of-memory errors.
-fn process_in_memory_check (
-    input_data_size: u64,
-) -> bool {
-    let mut system_info = System::new_all();
-    system_info.refresh_all();
-
-    let free_mem = system_info.available_memory();
-
-    if (0.8 * free_mem as f64) > (input_data_size +
-        min(input_data_size, u32::MAX as u64) +
-        ((u32::MAX / 4) as u64)) as f64 {
-            debug!("Processing in memory.");
-            true
-        } else {
-            debug!("Processing via disk cache.");
-            false
-        }
-}
-
-/// Generates unique paths for temporary databases.
-///
-/// This function creates platform-specific paths for two temporary database
-/// files: one for the main compression process and another for auto-tuning.
-/// The paths are constructed using the application's cache directory and the
-/// current process ID (PID) to ensure uniqueness and avoid conflicts between
-/// multiple concurrent instances of the application.
-///
-/// # Returns
-///
-/// A tuple `(PathBuf, PathBuf, u32)` containing:
-/// - The path for the main temporary database (e.g., `.../cache/12345.redb`).
-/// - The path for the auto-tuning temporary database (e.g.,
-///   `.../cache/auto_tune_12345.redb`).
-/// - The process ID (PID) used to generate the unique filenames.
-fn get_db_paths() -> (PathBuf, PathBuf, u32) {
-    let pid = id();
-
-    let cache_dir = ProjectDirs::from(
-        APPIDENTIFIER.qualifier,
-        APPIDENTIFIER.organization,
-        APPIDENTIFIER.application)
-    .unwrap()
-    .cache_dir()
-    .to_path_buf();
-
-    let db_path = cache_dir.clone()
-        .join(format!("{pid}"))
-        .with_extension("redb");
-
-    let at_db_path = cache_dir.clone()
-        .join(format!("auto_tune_{pid}"))
-        .with_extension("redb");
-
-    (db_path, at_db_path, pid)
 }

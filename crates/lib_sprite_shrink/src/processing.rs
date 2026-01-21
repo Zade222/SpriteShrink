@@ -14,6 +14,7 @@ use std::{
     thread
 };
 
+use bitcode::Encode;
 use fastcdc::v2020::{Chunk, FastCDC, Normalization};
 use thiserror::Error;
 use sha2::{Digest,Sha512};
@@ -61,7 +62,7 @@ pub enum ProcessingError {
 
 pub trait Hashable:
     //Specifies what capabilities H must have.
-    Copy + Clone + Eq + std::hash::Hash + serde::Serialize + Send + Sync +
+    Copy + Clone + Debug + Eq + std::hash::Hash + serde::Serialize + Send + Sync +
         'static
 {
     /// Create a new hash from a byte slice using the library's seed.
@@ -191,7 +192,6 @@ fn chunk_data(
 /// - A `FileManifestParent` for the processed file.
 /// - A `Vec` where each element is a tuple of a chunk's hash and its data.
 pub fn create_file_manifest_and_chunks<H: Hashable>(
-    file_name: &str,
     file_data: &[u8],
     chunks: &[Chunk],
 ) -> (FileManifestParent<H>, Vec<(H, Vec<u8>)>) {
@@ -216,7 +216,6 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 
     //Build file_manifest
     let file_manifest = FileManifestParent {
-        filename: file_name.to_string(),
         chunk_count: chunks.len() as u64,
         chunk_metadata,
     };
@@ -266,6 +265,7 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 /// * `H`: The generic hash type, which must be `Eq`, `Hash`, `Display`,
 ///   `Clone`, `Send`, `Sync`, and have a `'static` lifetime.
 pub fn verify_single_file<D, E, H, P>(
+    title: String,
     fmp: &FileManifestParent<H>,
     veri_hash: &[u8; 64],
     get_chunk_data: D,
@@ -361,7 +361,7 @@ where
     if calculated_hash.as_slice() == veri_hash {
         Ok(())
     } else {
-        Err(ProcessingError::HashMismatchError(fmp.filename.clone()).into())
+        Err(ProcessingError::HashMismatchError(title).into())
     }
 }
 
@@ -645,7 +645,7 @@ pub fn test_compression<E, F, H>(
 where
     E: std::error::Error + IsCancelled + Send + Sync + 'static,
     F: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
-    H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
+    H: Copy + Debug + Eq + Encode + Hash + Send + Sync + 'static,
 {
     //Prepare the samples for dictionary generation.
     let (samples_for_dict, sample_sizes) = build_train_samples(

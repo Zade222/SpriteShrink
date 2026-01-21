@@ -16,6 +16,7 @@ use std::{
         Arc, atomic::{AtomicBool, Ordering},
     },
 };
+use bitcode::Decode;
 use rayon::join;
 use serde::{Deserialize, Serialize};
 use tracing::{
@@ -23,11 +24,21 @@ use tracing::{
 };
 
 use sprite_shrink::{
-    Hashable, decompress_chunk, parse_file_metadata, parse_file_chunk_index
+    SSMC_UID,
+    Hashable, FileHeader, SSMCFormatData, SSMCTocEntry,
+    decompress_chunk, parse_file_metadata, parse_file_chunk_index,
+    parse_format_data
+};
+
+use sprite_shrink_cd::{
+    SSMD_UID,
+    SSMDFormatData, SSMDTocEntry, SSMDIndices,
+    decode_ssmd_format_data, decode_ssmd_meta_data, generate_cue_string,
+    write_disc
 };
 
 use crate::{
-    archive_parser::get_file_header,
+    archive_parser::{get_file_header, get_toc},
     arg_handling::Args,
     cli_types::TempFileGuard,
     error_handling::CliError,
@@ -79,37 +90,109 @@ pub fn run_extraction(
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
 
-    //Read all required metadata.
-    let metadata_block = read_metadata_block(file_path, &header)?;
-
-    /*Get the identifier for the hash type stored in the archive.*/
-    let hash_bit_length = header.hash_type;
-
-    match hash_bit_length {
-        1 => extract_data::<u64>(
+    match header.hash_type {
+        1 => dispatch_extraction::<u64>(
             file_path,
             out_dir,
-            rom_indices,
             &header,
-            &metadata_block,
+            rom_indices,
             args,
-            running,
+            running
         ),
-        2 => extract_data::<u128>(
+        2 =>dispatch_extraction::<u128>(
             file_path,
             out_dir,
-            rom_indices,
             &header,
-            &metadata_block,
+            rom_indices,
             args,
-            running,
+            running
         ),
-        _ => //Handle other cases or return an error for unsupported hash types
-            Err(CliError::InternalError(
-                "Unsupported hash type in archive header.".to_string()
-            )),
-
+        _ => Err(CliError::InternalError(
+            "Unsupported hash type in archive header.".to_string()
+        )),
     }
+}
+
+fn dispatch_extraction<H>(
+    file_path: &Path,
+    out_dir: &Path,
+    header: &FileHeader,
+    rom_indices: &Vec<u8>,
+    args: &Args,
+    running: Arc<AtomicBool>,
+) -> Result<(), CliError>
+where
+    H: Hashable +
+        Display +
+        Eq +
+        Hash +
+        Ord +
+        Serialize +
+        for<'de> Deserialize<'de> +
+        for<'de> Decode<'de>,
+{
+    match header.format_id {
+        SSMC_UID => {
+            let toc: Vec<SSMCTocEntry> = get_toc(
+                file_path,
+                header.enc_toc_offset,
+                header.enc_toc_length as usize
+            )?;
+
+            let bin_format_data = read_file_data(
+                file_path,
+                header.format_data_offset as u64,
+                SSMCFormatData::SIZE as usize
+            )?;
+
+            let format_data = parse_format_data(&bin_format_data)?;
+
+            //Read all required metadata.
+            let metadata_block = read_metadata_block(file_path, &format_data)?;
+
+            extract_ssmc_data::<H>(
+                file_path,
+                out_dir,
+                rom_indices,
+                &format_data,
+                &toc,
+                &metadata_block,
+                args,
+                running
+            )?
+        },
+        SSMD_UID => {
+            let toc: Vec<SSMDTocEntry> = get_toc(
+                file_path,
+                header.enc_toc_offset,
+                header.enc_toc_length as usize
+            )?;
+
+            let bin_format_data = read_file_data(
+                file_path,
+                header.format_data_offset as u64,
+                SSMDFormatData::SIZE as usize
+            )?;
+
+            let format_data = decode_ssmd_format_data(&bin_format_data)?;
+
+            extract_ssmd_data::<H>(
+                file_path,
+                out_dir,
+                rom_indices,
+                &format_data,
+                &toc,
+                args,
+                running
+            )?;
+
+        }
+        _ => {
+            return Err(CliError::InvalidFormatID(header.hash_type as u16))
+        }
+    }
+
+    Ok(())
 }
 
 /// Generic implementation of the file extraction process.
@@ -172,23 +255,30 @@ pub fn run_extraction(
 ///   the extraction process.
 /// - Any `std::io::Error` that occurs during file creation, writing, or
 ///   renaming operations.
-fn extract_data<H>(
+fn extract_ssmc_data<H>(
     file_path: &Path,
     out_dir: &Path,
     rom_indices: &Vec<u8>,
-    header: &sprite_shrink::FileHeader,
+    format_data: &SSMCFormatData,
+    toc: &[SSMCTocEntry],
     metadata_block: &[u8],
     args: &Args,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
 where
-    H: Hashable + Ord + Display + Serialize + for<'de> Deserialize<'de> + Eq +
-        Hash,
+    H: Hashable +
+        Display +
+        Eq +
+        Hash +
+        Ord +
+        Serialize +
+        for<'de> Deserialize<'de> +
+        for<'de> Decode<'de>,
 {
     /*Stores the length of each piece of the metadata from the archive as
      provided by the header.*/
-    let man_length = header.man_length as usize;
-    let dict_length = header.dict_length as usize;
+    let man_length = format_data.enc_manifest.length as usize;
+    let dict_length = format_data.data_dictionary.length as usize;
 
     let manifest_slice = &metadata_block[0..man_length];
     let dict_slice = &metadata_block[man_length..man_length + dict_length];
@@ -216,7 +306,7 @@ where
         ))?;
 
         let final_output_path = out_dir.join(
-            &fmp.filename);
+            toc[(*rom as usize) - 1].filename.clone());
 
         let tmp_output_path = final_output_path.with_extension("tmp");
 
@@ -242,12 +332,12 @@ where
             store, from the ChunkLocation struct.*/
             let absolute_offset =
                 chunk_location.offset +
-                header.data_offset;
+                format_data.data_offset;
 
             let comp_chunk_data = read_file_data(
                 file_path,
-                &absolute_offset,
-                &(chunk_location.compressed_length as usize)
+                absolute_offset,
+                chunk_location.compressed_length as usize
             )?;
 
             let decomp_chunk_data = decompress_chunk(
@@ -279,7 +369,115 @@ where
         //The file is fully written, rename it to final name.
         rename(&tmp_output_path, final_output_path)?;
 
-        debug!("{} extracted successfully", &fmp.filename);
+        debug!("{} extracted successfully", toc[(*rom as usize) - 1].filename);
+    }
+
+    Ok(())
+}
+
+
+fn extract_ssmd_data<H> (
+    file_path: &Path,
+    out_dir: &Path,
+    disc_indices: &[u8],
+    format_data: &SSMDFormatData,
+    toc: &[SSMDTocEntry],
+    args: &Args,
+    running: Arc<AtomicBool>,
+) -> Result<(), CliError>
+where
+    H: Hashable +
+        Display +
+        Eq +
+        Hash +
+        Ord +
+        Serialize +
+        for<'de> Deserialize<'de> +
+        for<'de> Decode<'de>,
+{
+    let metadata_len = (
+        format_data.exception_data.offset - format_data.enc_disc_manifest.offset
+    ) as usize;
+
+    let encoded_metadata = read_file_data(
+        file_path,
+        format_data.enc_disc_manifest.offset,
+        metadata_len
+    )?;
+
+    let exception_blob: Vec<u8> = read_file_data(
+        file_path,
+        format_data.exception_data.offset,
+        format_data.exception_data.length as usize
+    )?;
+
+    let result = decode_ssmd_meta_data::<H>(format_data, &encoded_metadata)?;
+
+    let disc_manifests = result.disc_manifests;
+    let dictionary = result.data_dictionary;
+    let subheader_table = result.subheader_table;
+
+    let indices = SSMDIndices {
+        chunk_index: result.chunk_index,
+        audio_block_index: result.audio_block_index.unwrap_or_default(),
+        exception_index: result.exception_index.unwrap_or_default()
+    };
+
+    if !out_dir.exists() && !args.force{
+        return Err(CliError::InvalidOutputPath())
+    } else {
+        create_dir_all(out_dir)?;
+    }
+
+    println!("Opening archive...");
+    let archive_file = File::open(file_path)?;
+
+    println!("Beginning extraction loop...");
+    for disc in disc_indices {
+        let dm = disc_manifests
+            .get((*disc - 1) as usize)
+            .ok_or_else(|| CliError::InvalidRomIndex(
+                format!("Disc index {disc} is out of bounds.")
+            ))?;
+
+        let final_output_path = out_dir.join(
+            toc[(*disc as usize) - 1].filename.clone()
+        );
+
+        let tmp_output_path = final_output_path.with_extension("tmp");
+
+        let _guard = TempFileGuard::new(&tmp_output_path);
+
+        let file = File::create(&tmp_output_path)?;
+
+        const WRITE_BUFFER_SIZE: usize = 2048 * 2352;
+        let mut writer = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
+
+        write_disc(
+            dm,
+            &indices,
+            &dictionary,
+            &archive_file,
+            &exception_blob,
+            &subheader_table,
+            &mut writer
+        )?;
+
+        let bin_filename = toc[(*disc as usize) - 1].filename.clone();
+
+        let cue_content = generate_cue_string(dm, &bin_filename)
+            .map_err(|e| CliError::InternalError(
+                format!("Failed to generate CUE sheet: {}", e)
+            ))?;
+
+        let cue_path = final_output_path.with_extension("cue");
+
+        rename(&tmp_output_path, final_output_path)?;
+
+        let mut cue_file = File::create(&cue_path)?;
+        cue_file.write_all(cue_content.as_bytes())?;
+
+        debug!("{} extracted successfully", toc[(*disc as usize) - 1].filename);
     }
 
     Ok(())

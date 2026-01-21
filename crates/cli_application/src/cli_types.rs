@@ -6,12 +6,14 @@
 //! resources, ensuring a clean and organized architecture.
 
 use std::{
-    fs::remove_file,
-    path::Path,
+    collections::HashMap,
+    fs::{metadata, remove_file},
+    hash::Hash,
+    path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use dashmap::DashMap;
-use redb::{Database, Key, TableDefinition, Value};
 use serde::{Serialize, Deserialize};
 use tracing::{
     debug,
@@ -21,6 +23,35 @@ use tracing::{
 use sprite_shrink::{
     FileManifestParent, Hashable, SSAChunkMeta
 };
+use sprite_shrink_cd::{
+    ContentBlock, DataChunkLayout, RleSectorMap, SubHeaderEntry
+};
+
+
+pub enum CacheBackend<H: Hash + Eq> {
+    InMemory{
+        map: Arc<DashMap<H, Vec<u8>>>,
+        data_size: u64,
+    },
+    OnDisk {
+        file_path: PathBuf,
+        location_map: HashMap<H, LocationData>,
+        current_offset: u64,
+    },
+}
+
+
+pub struct CacheInfo {
+    pub cache_path: PathBuf,
+    pub at_cache_path: PathBuf,
+    pub id: u32,
+}
+
+#[derive(Debug)]
+pub enum CacheTarget {
+    Data,
+    Audio,
+}
 
 /// A message containing a single data chunk and its hash.
 ///
@@ -33,24 +64,23 @@ use sprite_shrink::{
 /// * `chunk_data`: The raw binary data of the chunk.
 #[derive(Debug)]
 pub struct ChunkMessage<H: Hashable> {
-        pub chunk_hash: H,
-        pub chunk_data: Vec<u8>,
-        pub chunk_size: usize
+    pub chunk_hash: H,
+    pub chunk_data: Vec<u8>,
+    pub chunk_size: usize
 }
 
-/// A handle for accessing the application's temporary database.
-///
-/// This struct encapsulates the shared database connection (`Arc<Database>`)
-/// and the table definition, providing a convenient way to pass database
-/// access information between different parts of the application.
-///
-/// # Fields
-///
-/// * `db`: The database instance.
-/// * `db_def`: The definition for the table where chunk data is stored.
-pub struct DBInfo<'a, K: Key + 'static, V: Value + 'static>{
-    pub db: Database,
-    pub db_def: TableDefinition<'a, K, V>
+
+#[derive(Debug)]
+pub struct DiscCompleteData<H: Hashable> {
+    pub title: String,
+    pub lba_map: Vec<(u32, u32)>,
+    pub rle_sector_map: RleSectorMap,
+    pub audio_block_map: Vec<ContentBlock<H>>,
+    pub data_stream_layout: Vec<DataChunkLayout<H>>,
+    pub disc_exception_index: Vec<(u32, u32)>,
+    pub subheader_index: Vec<SubHeaderEntry>,
+    pub verification_hash: [u8; 64],
+    pub integrity_hash: u64,
 }
 
 /// A container for all metadata generated after processing a single file.
@@ -95,6 +125,19 @@ pub struct FileCompleteData<H: Hashable> {
 pub struct FileData<H: Hashable>{
     pub file_manifest: DashMap<String, FileManifestParent<H>>,
     pub veri_hashes: DashMap<String, [u8; 64]>,
+}
+
+
+pub struct LocationData{
+    pub offset: u64,
+    pub length: u32
+}
+
+#[derive(Debug)]
+pub struct OpticalChunkMessage<H: Hashable> {
+    pub cache_target: CacheTarget,
+    pub chunk_hash: H,
+    pub chunk_data: Vec<u8>,
 }
 
 /// Defines cross-platform identifiers for the application.
@@ -194,6 +237,11 @@ impl<'a> TempFileGuard<'a> {
     pub fn new(path: &'a Path) -> Self {
         Self { path }
     }
+
+
+    pub fn size(&self) -> u64 {
+        metadata(self.path).map_or(0, |meta| meta.len())
+    }
 }
 
 /// The drop implementation for `TempFileGuard`.
@@ -226,7 +274,6 @@ impl<'a> Drop for TempFileGuard<'a> {
                     self.path
                 );
             }
-
         }
     }
 }

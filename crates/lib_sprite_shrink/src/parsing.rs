@@ -8,25 +8,37 @@
 
 use std::collections::HashMap;
 
+use bitcode::{
+    Decode, decode
+};
 use serde::{Deserialize};
 use thiserror::Error;
 
 use crate::lib_error_handling::SpriteShrinkError;
-use crate::lib_structs::{FileHeader, FileManifestParent, ChunkLocation};
+use crate::lib_structs::{
+    ChunkLocation, FileHeader, FileManifestParent, SSMCTocEntry,
+    SSMCFormatData
+};
 
 #[derive(Error, Debug)]
 pub enum ParsingError {
-    #[error("File header is malformed. {0}")]
-    InvalidHeader(String),
+    #[error("Failed to decode chunk index: {0}")]
+    IndexDecodeError(String),
 
     #[error("Read file is of a newer version than what this library supports.")]
     InvalidFileVersion(),
 
+    #[error("File header is malformed. {0}")]
+    InvalidHeader(String),
+
+    #[error("Format data is malformed. {0}")]
+    InvalidFormatData(String),
+
     #[error("Failed to decode file manifest: {0}")]
     ManifestDecodeError(String),
 
-    #[error("Failed to decode chunk index: {0}")]
-    IndexDecodeError(String),
+    #[error("Failed to decode table of contents: {0}")]
+    TOCDecodeError(String)
 }
 
 /// The magic number used to identify a sprite-shrink archive file.
@@ -42,7 +54,7 @@ pub static MAGIC_NUMBER: [u8; 8] = *b"SSARCHV1";
 /// This constant is used during header parsing to ensure the library
 /// does not attempt to read files created by a newer, incompatible
 /// version of the software.
-pub static SUPPORTED_VERSION: u32 = 0x00010000;
+pub static SUPPORTED_VERSION: u32 = 0x00020000;
 
 /// The seed value used for deterministic chunking and hashing.
 ///
@@ -72,7 +84,7 @@ pub static SS_SEED: u64 = 0x4202803010192019;
 ///   incorrect, or the file version is unsupported.
 pub fn parse_file_header(
     header_data: &[u8]
-) -> Result<FileHeader, SpriteShrinkError>{
+) -> Result<FileHeader, SpriteShrinkError> {
     //Attempt to cast the byte slice to a FileHeader.
     let file_header =
         bytemuck::try_from_bytes::<FileHeader>(header_data)
@@ -97,7 +109,7 @@ pub fn parse_file_header(
 ///
 /// This function is responsible for parsing the binary representation
 /// of the file manifest, which contains metadata for every file in the
-/// archive. It uses `bincode` to decode the byte slice into a
+/// archive. It uses `bitcode` to decode the byte slice into a
 /// structured `Vec<FileManifestParent>`.
 ///
 /// # Arguments
@@ -114,13 +126,10 @@ pub fn parse_file_metadata<H>(
     manifest_data: &[u8]
 ) -> Result<Vec<FileManifestParent<H>>, SpriteShrinkError>
 where
-    for<'de> H: serde::Deserialize<'de>
+    for<'de> H: serde::Deserialize<'de> + Decode<'de>
 {
-    let config = bincode::config::standard();
-
-    let (file_manifest, _len) =
-        bincode::serde::decode_from_slice(manifest_data, config)
-            .map_err(|e| {ParsingError::ManifestDecodeError(e.to_string())})?;
+    let file_manifest = decode(manifest_data)
+        .map_err(|e| ParsingError::ManifestDecodeError(e.to_string()))?;
 
     Ok(file_manifest)
 }
@@ -129,7 +138,7 @@ where
 ///
 /// This function parses the binary data representing the chunk index,
 /// which maps each unique chunk hash to its `ChunkLocation`. It uses
-/// `bincode` to decode the data into a `HashMap` for efficient lookups
+/// `bitcode` to decode the data into a `HashMap` for efficient lookups
 /// during file extraction.
 ///
 /// # Arguments
@@ -145,18 +154,34 @@ pub fn parse_file_chunk_index<H>(
     chunk_index_data: &[u8]
 ) -> Result<HashMap<H, ChunkLocation>, SpriteShrinkError>
 where
-    for<'de> H: Eq + std::hash::Hash + Deserialize<'de>,
+    for<'de> H: Eq + std::hash::Hash + Deserialize<'de> + Decode<'de>,
 {
-    //Set default bincode config.
-    let config = bincode::config::standard();
-
-    let (bin_chunk_index, _len): (Vec<(H, ChunkLocation)>, usize) =
-        bincode::serde::decode_from_slice(chunk_index_data, config)
-            .map_err(|e| {ParsingError::IndexDecodeError(e.to_string())})?;
+    let bin_chunk_index: Vec<(H, ChunkLocation)> = decode(chunk_index_data)
+        .map_err(|e| ParsingError::IndexDecodeError(e.to_string()))?;
 
     let chunk_index: HashMap<H, ChunkLocation> = bin_chunk_index
         .into_iter()
         .collect();
 
     Ok(chunk_index)
+}
+
+
+pub fn parse_file_toc(
+    enc_toc_data: &[u8]
+) -> Result<Vec<SSMCTocEntry>, SpriteShrinkError> {
+    let bin_toc: Vec<SSMCTocEntry> = decode(enc_toc_data)
+        .map_err(|e| ParsingError::TOCDecodeError(e.to_string()))?;
+
+    Ok(bin_toc)
+}
+
+
+pub fn parse_format_data(
+    format_data: &[u8]
+) -> Result<SSMCFormatData, SpriteShrinkError> {
+    let parsed_format_data = bytemuck::try_from_bytes::<SSMCFormatData>(format_data)
+        .map_err(|e| ParsingError::InvalidFormatData(e.to_string()))?;
+
+    Ok(*parsed_format_data)
 }

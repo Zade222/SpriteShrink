@@ -222,7 +222,6 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 
                 for fmp_to_free in ffi_manifests_vec {
                     unsafe {
-                        let _ = CString::from_raw(fmp_to_free.filename);
                         let _ = Vec::from_raw_parts(
                             fmp_to_free.chunk_metadata as *mut FFISSAChunkMeta<u64>,
                             fmp_to_free.chunk_metadata_len,
@@ -236,7 +235,6 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
         };
 
         ffi_manifests_vec.push(FFIFileManifestParent {
-            filename: c_filename,
             chunk_metadata: chunk_meta_ptr as *const FFISSAChunkMeta<u64>,
             chunk_metadata_len: fmp.chunk_count as usize,
             chunk_metadata_cap: chunk_meta_cap,

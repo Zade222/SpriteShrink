@@ -8,7 +8,7 @@
 //! other components of the CLI application.
 
 use std::{
-    fs,
+    fs::{self, create_dir_all},
     sync::{
         Arc, atomic::{AtomicBool, Ordering}
     },
@@ -23,29 +23,31 @@ use tracing::{
 };
 
 mod modes;
-use modes::{run_compression, run_extraction, run_info};
+use modes::{
+    run_extraction, run_info,
+    compress_modes::{
+        run_default_compression
+    }
+};
 
 mod archive_parser;
 use archive_parser::{get_max_rom_index};
-
 mod arg_handling;
 use arg_handling::{merge_config_and_args, validate_args, Args};
-
+mod auto_tune;
 mod cli_types;
-
-mod db_transactions;
-
 mod error_handling;
 use error_handling::{
     CliError, initiate_logging, offset_to_line_col};
 mod storage_io;
-use crate::{cli_types::{
-    SpriteShrinkConfig
-    },
+use crate::{
+    cli_types::SpriteShrinkConfig,
+    modes::compress_modes::run_optical_compression,
     storage_io::{
     cleanup_old_logs, files_from_dirs, load_config, organize_paths
-    },
+    }
 };
+mod utils;
 
 #[cfg(feature = "dhat-heap")]
 use dhat::Profiler;
@@ -110,6 +112,7 @@ fn run(
             let file_path = file_paths.first().ok_or_else(
                 CliError::NoFilesFound
             )?;
+
             let indices: Vec<u8> = range_parser::parse::<u8>(
                 extract_str
             )?;
@@ -145,7 +148,7 @@ fn run(
             match file_paths.len() {
                 1 => {
                     debug!("Mode: Info");
-                    run_info(&file_paths[0], args.list, args.metadata)?
+                    run_info(&file_paths[0], args.metadata)?
                 },
                 0 => return Err(CliError::NoFilesFound()),
                 _ => {
@@ -164,24 +167,44 @@ fn run(
         }
         (None, false) => {
             debug!("Mode: Compress");
+
+            /*Verify if the list of files paths is empty, throw error if true. */
+            if file_paths.is_empty() {
+                return Err(CliError::NoFilesFound());
+            }
+
+            let out_dir = args.output
+                .as_ref()
+                .unwrap()
+                .parent()
+                .unwrap();
+
+            if !out_dir.exists() && !args.force{
+                return Err(CliError::InvalidOutputPath())
+            } else {
+                create_dir_all(out_dir)?;
+            }
+
             let hash_bit_length = args.hash_bit_length.unwrap_or(64);
 
-            match hash_bit_length{
-                64 => run_compression::<u64>(
-                    file_paths,
-                    args,
-                    &1,
-                    running,
-                )?,
-                128 => run_compression::<u128>(
-                    file_paths,
-                    args,
-                    &2,
-                    running,
-                )?,
-                _ => return Err(CliError::InvalidHashBitLength(
-                    "Must be 64 or 128.".to_string(),
-                )),
+            match args.mode.as_str() {
+                "optical" => {
+                    run_optical_compression(
+                        file_paths,
+                        args,
+                        &hash_bit_length,
+                        running,
+                    )?;
+                }
+                "default" =>{
+                    run_default_compression(
+                        file_paths,
+                        args,
+                        &hash_bit_length,
+                        running,
+                    )?;
+                }
+                _ =>  return Err(CliError::InvalidMode(args.mode.clone()))
             }
         }
 

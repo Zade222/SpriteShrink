@@ -8,10 +8,10 @@
 use std::{
     collections::HashMap,
     fmt::Display,
-    mem,
     path::Path,
 };
 
+use bitcode::Decode;
 use serde::Serialize;
 
 use sprite_shrink::{
@@ -40,12 +40,12 @@ use crate::storage_io::read_file_data;
 /// - `Err(CliError)` if reading the file fails or if the header
 ///   data cannot be correctly parsed.
 pub fn get_file_header(file_path: &Path) -> Result<FileHeader, CliError> {
-    let header_size = mem::size_of::<FileHeader>();
+    let header_size = FileHeader::HEADER_SIZE as usize;
 
     let byte_header_data: Vec<u8> = read_file_data(
         file_path,
-        &0,
-        &header_size
+        0,
+        header_size
     )?;
 
     let header: FileHeader = parse_file_header(&byte_header_data)?;
@@ -73,14 +73,16 @@ pub fn get_file_header(file_path: &Path) -> Result<FileHeader, CliError> {
 /// - `Err(CliError)` if reading or parsing the manifest fails.
 pub fn get_file_manifest<H>(
     file_path: &Path,
-    man_offset: &u64,
-    man_length: &usize) -> Result<Vec<FileManifestParent<H>>, CliError>
+    man_offset: u64,
+    man_length: usize
+) -> Result<Vec<FileManifestParent<H>>, CliError>
 where
     H: Hashable
         + Ord
         + Display
         + Serialize
-        + for<'de> serde::Deserialize<'de>,
+        + for<'de> serde::Deserialize<'de>
+        + for<'de> Decode<'de>,
 {
     //Read file manifest from file.
     let bin_vec_manifest = read_file_data(
@@ -144,25 +146,46 @@ pub fn get_max_rom_index(file_path: &Path)
 /// - `Err(CliError)` if reading the file or parsing the data fails.
 pub fn get_chunk_index<H>(
     file_path: &Path,
-    chunk_index_offset: &u64,
-    chunk_index_length: &usize
+    chunk_index_offset: u64,
+    chunk_index_length: u64
 ) -> Result<HashMap<H, ChunkLocation>, CliError>
 where
     H: Hashable
         + Ord
         + Display
         + Serialize
-        + for<'de> serde::Deserialize<'de>,
+        + for<'de> serde::Deserialize<'de>
+        + for<'de> Decode<'de>,
     {
     //Read the chunk_index from the file.
     let bin_vec_chunk_index = read_file_data(
         file_path,
         chunk_index_offset,
-        chunk_index_length
+        chunk_index_length as usize
     )?;
 
     //Parse the binary data into a chunk index HashMap and return the value.
     parse_file_chunk_index(
         &bin_vec_chunk_index
     ).map_err(CliError::from)
+}
+
+
+pub fn get_toc<T> (
+    file_path: &Path,
+    toc_offset: u32,
+    toc_length: usize
+) -> Result<Vec<T>, CliError>
+where
+    T: for<'de> Decode<'de>,
+{
+    let enc_toc_data = read_file_data(
+        file_path,
+        toc_offset as u64,
+        toc_length
+    )?;
+
+    bitcode::decode(&enc_toc_data).map_err(|e| {
+        CliError::InternalError(format!("Failed to decode TOC: {}", e))
+    })
 }

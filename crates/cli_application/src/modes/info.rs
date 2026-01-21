@@ -10,14 +10,20 @@ use std::{
 };
 
 use crate::archive_parser::{
-    get_file_header, get_file_manifest
+    get_file_header, get_toc
 };
 
 use human_bytes::human_bytes;
 use serde_json::{self, json, Value, to_string_pretty};
 
 use sprite_shrink::{
-    FileManifestParent
+    SSMC_UID,
+    FileHeader, SSMCTocEntry
+};
+
+use sprite_shrink_cd::{
+    SSMD_UID,
+    SSMDTocEntry
 };
 
 use crate::error_handling::CliError;
@@ -33,12 +39,11 @@ use crate::error_handling::CliError;
 /// # Arguments
 ///
 /// * `file_path`: A `Path` pointing to the archive file whose
-///   metadata is to be displayed.
+///   metadata or info is to be displayed.
 /// * `list`: A user provided boolean flag that determines the plain text
 ///   output format. If `true`, the output will be a plain text table.
 /// * `metadata`: A user provided boolean flag that determines the json
 ///   output format. If `true`, the output will be JSON.
-///
 ///
 /// # Returns
 ///
@@ -51,41 +56,12 @@ use crate::error_handling::CliError;
 /// This function does not panic but prints directly to standard output.
 pub fn run_info(
     file_path: &Path,
-    list: bool,
     metadata: bool
 ) -> Result<(), CliError> {
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
 
-    /*Stores the length of the file_manifest from the header.*/
-    let man_length = header.man_length as usize;
-
-    /*Get the identifier for the hash type stored in the archive.*/
-    let hash_bit_length = header.hash_type;
-
-    macro_rules! process_and_print {
-        ($hash_type:ty) => {{
-            let file_manifest =
-                get_file_manifest::<$hash_type>(
-                    file_path,
-                    &header.man_offset,
-                    &man_length
-                )?;
-            dispatch_print_info(file_manifest, list, metadata)?
-        }};
-    }
-
-    /*Read and store the file manifest from the target file in memory in
-    the file_manifest variable*/
-    match hash_bit_length {
-        1 => process_and_print!(u64),
-        2 => process_and_print!(u128),
-        _ => {
-            //Handle other cases or return an error for unsupported hash types
-            return Err(CliError::InternalError(
-                "Unsupported hash type in archive header.".to_string()));
-        }
-    };
+    dispatch_print_info(file_path, &header, metadata, header.format_id)?;
 
     Ok(())
 }
@@ -100,42 +76,60 @@ pub fn run_info(
 ///
 /// # Arguments
 ///
+/// * `file_path`: A `Path` pointing to the archive file whose
+///   metadata or info is to be displayed.
 /// * `file_manifest`: A vector of `FileManifestParent` structs, where each
 ///   struct contains the metadata for a single file in the archive.
-/// * `list`: A user provided boolean flag that determines the plain text
-///   output format. If `true`, the output will be a plain text table.
 /// * `metadata`: A user provided boolean flag that determines the json
 ///   output format. If `true`, the output will be JSON.
-///
-/// # Type Parameters
-///
-/// * `H`: A generic type parameter representing the hash type used in the
-///   file manifest. It must implement the `Clone` trait to allow the data
-///   to be passed to the underlying print functions.
-fn dispatch_print_info<H: Clone>(
-    file_manifest: Vec<FileManifestParent<H>>,
-    _list: bool,
-    metadata: bool
-) -> Result<(), CliError>{
-    if metadata {
-        print_info_json::<H>(file_manifest)?;
-    } else {
-        print_info_table::<H>(file_manifest);
+fn dispatch_print_info(
+    file_path: &Path,
+    header: &FileHeader,
+    metadata: bool,
+    format_id: u16
+) -> Result<(), CliError> {
+    match format_id {
+        SSMC_UID => {
+            let toc: Vec<SSMCTocEntry> = get_toc(
+                file_path,
+                header.enc_toc_offset,
+                header.enc_toc_length as usize
+            )?;
+
+            if metadata {
+                ssmc_print_info_json(toc)?;
+            } else {
+                ssmc_print_info_table(toc);
+            }
+        },
+        SSMD_UID => {
+            let toc: Vec<SSMDTocEntry> = get_toc(
+                file_path,
+                header.enc_toc_offset,
+                header.enc_toc_length as usize
+            )?;
+
+            if metadata {
+                println!("Not yet implemented.")
+            } else {
+                ssmd_print_info_table(toc);
+            }
+        },
+        _ => {
+            return Err(CliError::InvalidFormatID(format_id))
+        }
     }
+
 
     Ok(())
 }
 
-/// Prints a formatted table of the file manifest's contents.
+/// Prints a formatted table of the file manifest's contents in an ssmc
+/// archive.
 ///
 /// # Arguments
 ///
 /// * `file_manifest`: A vector of `FileManifestParent` structs to display.
-///
-/// # Type Parameters
-///
-/// * `H`: The hash type used in the file manifest, which must implement
-///   the necessary traits for serialization and display.
 ///
 /// # Examples
 ///
@@ -148,50 +142,42 @@ fn dispatch_print_info<H: Clone>(
 /// 2       | 8.00 MiB      | file_b.rom
 /// 3       | 8.00 MiB      | file_c.rom
 /// ```
-fn print_info_table<H: Clone>(
-    file_manifest: Vec<FileManifestParent<H>>
+fn ssmc_print_info_table(
+    ssmc_toc: Vec<SSMCTocEntry>
 ){
     println!("Index\t| Filesize\t| Filename");
     println!("----------------------------------");
 
     /*For each FileManifestParent in the file manifest print the index
     + 1 to be easily understood by the user and the filename of that index.*/
-    file_manifest.iter().enumerate().for_each(|(index, fmp)|{
-        let file_size = fmp.chunk_metadata.last().map_or(0, |last_chunk| {
-            last_chunk.offset + last_chunk.length as u64
-        });
+    ssmc_toc.iter().enumerate().for_each(|(index, toc_entry)|{
+        let file_size = toc_entry.uncompressed_size;
         println!("{}\t| {}\t| {}",
             index + 1,
             human_bytes(file_size as f64),
-            fmp.filename
+            toc_entry.filename
         );
     });
 
 }
 
-/// Prints a json formatted table of the file manifest's contents.
+/// Prints a json formatted table of the file manifest's contents for ssmc
+/// archives.
 ///
 /// # Arguments
 ///
 /// * `file_manifest`: A vector of `FileManifestParent` structs to display.
-///
-/// # Type Parameters
-///
-/// * `H`: The hash type used in the file manifest, which must implement
-///   the necessary traits for serialization and display.
-fn print_info_json<H: Clone>(
-    file_manifest: Vec<FileManifestParent<H>>
+fn ssmc_print_info_json(
+    file_manifest: Vec<SSMCTocEntry>
 ) -> Result<(), CliError>{
     let files_json: Vec<Value> = file_manifest.iter()
         .enumerate()
-        .map(|(index, fmp)| {
-            let file_size = fmp.chunk_metadata.last().map_or(0, |last_chunk| {
-                last_chunk.offset + last_chunk.length as u64
-            });
+        .map(|(index, toc_entry)| {
+            let file_size = toc_entry.uncompressed_size;
 
             json!({
                 "index": index + 1,
-                "filename": &fmp.filename,
+                "filename": &toc_entry.filename,
                 "size(bytes)": file_size
             })
         })
@@ -208,4 +194,28 @@ fn print_info_json<H: Clone>(
     println!("{}", pretty_json);
 
     Ok(())
+}
+
+
+fn ssmd_print_info_table(
+    ssmd_toc: Vec<SSMDTocEntry>
+){
+    println!("Index\t| Grp\t| Filesize | Filename");
+    println!("-------------------------------------");
+
+    ssmd_toc.iter().enumerate().for_each(|(index, toc_entry)|{
+        let file_size = toc_entry.uncompressed_size;
+        let collection_id = if toc_entry.collection_id == 255 {
+            "-".to_string()
+        } else {
+            (toc_entry.collection_id + 1).to_string()
+        };
+
+        println!("{}\t| {}\t| {} | {}",
+            index + 1,
+            collection_id,
+            human_bytes(file_size as f64),
+            toc_entry.filename
+        );
+    });
 }

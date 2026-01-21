@@ -12,14 +12,17 @@ pub use lib_error_handling::{
 
 mod lib_structs;
 pub use lib_structs::{
-    ChunkLocation, FileData, FileHeader, FileManifestParent,
-    ProcessedFileData, Progress, SSAChunkMeta
+    SSMC_UID,
+    ChunkLocation, FileData, FileHeader, FileManifestParent, FileRegion,
+    ProcessedFileData, Progress, SerializedData, SSAChunkMeta, SSMCFormatData,
+    SSMCTocEntry
 };
 
 mod parsing;
 pub use parsing::{
+    SUPPORTED_VERSION, MAGIC_NUMBER, SS_SEED,
     parse_file_chunk_index, parse_file_header, parse_file_metadata,
-    SUPPORTED_VERSION, MAGIC_NUMBER, SS_SEED
+    parse_file_toc, parse_format_data
 };
 
 mod processing;
@@ -29,4 +32,4 @@ pub use processing::{
     verify_single_file, test_compression};
 
 mod serialization;
-pub use serialization::{serialize_uncompressed_data};
+pub use serialization::{dashmap_values_to_vec, serialize_uncompressed_data};

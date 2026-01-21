@@ -30,7 +30,7 @@ Welcome to the official user manual for SpriteShrink! This guide provides everyt
 
 ---
 
-## A Gentle Introduction to the Command Line
+## New to the Command Line?
 
 If you're new to command-line interface (CLI) applications, this section is for you!
 
@@ -46,9 +46,9 @@ A CLI is a text-based way to interact with your computer. Instead of clicking on
 
 ### Opening Your Terminal
 
-*   **Windows**: Press `Win + X`, and click windows terminal to open a terminal window.
+*   **Windows**: Press `Win + X`, and click Windows Terminal to open a terminal window.
 *   **macOS**: Open the "Terminal" app from your Applications/Utilities folder.
-*   **Linux**: Look for "Terminal" in your applications menu, or use a shortcut like `Ctrl + Alt + T`. The terminal will likely be Gnome Terminal, Konsole or whatever your distribution has provided by default. Given the open nature of linux you may have even installed one you prefer over the default one but use whatever you like.
+*   **Linux**: Look for "Terminal" in your applications menu, or use a shortcut like `Ctrl + Alt + T`. The terminal will likely be Gnome Terminal, Konsole or whatever your distribution has provided by default. Given the open nature of Linux you may have even installed one you prefer over the default one but use whatever you like.
 
 ### Basic Concepts
 
@@ -57,7 +57,7 @@ A CLI is a text-based way to interact with your computer. Instead of clicking on
 *   **Path**: A "road map" to a file or directory.
     *   **Absolute Path**: A full address from the root of your filesystem (e.g., `'C:\Users\user\Games'` or `'/home/user/games'`).
     *   **Relative Path**: A path from your current location (e.g., `../games` means "go up one level, then into the games directory").
-    *   Most applications and terminal interpret spaces as different aspects/flags of a command, be sure to use apostrophes to enclose paths such as `'/home/user/fun games'`. If you were to use a path without the apostrophes for a path with a space it will cause an error.
+    *   Most applications and terminal interpret spaces as different aspects/flags of a command, be sure to use single quotes to enclose paths such as `'/home/user/fun games'`. If you were to use a path without the single quotes for a path with a space it will cause an error.
 
 Your first step with any CLI tool should be to ask for help. This is usually done with `-h` or `--help`. Navigate to the directory where you extracted SpriteShrink and try it:
 
@@ -69,11 +69,11 @@ Your first step with any CLI tool should be to ask for help. This is usually don
 ./sprite-shrink --help
 ```
 
-This command will print a full list of all available arguments and what they do. While SpriteShink has help text that is called in this manner, you can call the help text of most other cli applications in this way too!
+This command will print a full list of all available arguments and what they do. While SpriteShrink has help text that is called in this manner, you can call the help text of most other cli applications in this way too!
 
 Also note the `.\` or `./` before the sprite-shrink command. This tells your system to run or execute an application in the current working directory where your terminal is looking. Some operating systems and linux distros provide an easy way to open a terminal in a file browser by right clicking an empty space of a folder and clicking something along the lines of `Open Terminal Here` or `Open Power Shell Here`. Otherwise you will need to set the working directory to where the executable is stored using `cd`.
 
-Using `cd` is straight forward. To get a list of files and folders in the current working directory use the `ls` command on linux or macos or `dir` on windows. Then type the name of the folder or subdirectory you want to move to such as `cd Games` or `cd 'RPG Games'`(Note the use of the apostrophes as explained from earlier).
+Using `cd` is straight forward. To get a list of files and folders in the current working directory use the `ls` command on linux or macos or `dir` on windows. Then type the name of the folder or subdirectory you want to move to such as `cd Games` or `cd 'RPG Games'`(Note the use of the single quotes as explained from earlier).
 
 ---
 
@@ -93,7 +93,7 @@ You have two primary ways to get SpriteShrink:
 
 ### What Problem Does SpriteShrink Solve?
 
-Imagine you have a collection of retro game ROMs. For a single game, you might have the USA version, a European version, a Japanese version, and maybe a "Rev A" or "Rev B" bug-fix release. All these files are very similar, containing large amounts of identical data such as game assets, code and music.
+Standard archiving tools compress files individually. SpriteShrink analyzes game files differently. For a single game, you might have the USA version, a European version, a Japanese version, and maybe a "Rev A" or "Rev B" bug-fix release. All these files are very similar, containing large amounts of identical data such as game assets, code and music.
 
 Standard compression tools like ZIP or 7-Zip compress each file individually using what is known as solid compression. They can't see that the same data exists in multiple files, so they store it over and over again depending on the parameters given to the compression application.
 
@@ -133,11 +133,36 @@ Let's say you have your game variants in a folder named `MyGameCollection`.
 ./sprite_shrink -i ./MyGameCollection -o ./MyGame.ssmc -p
 ```
 
-*   This command reads all files inside `MyGameCollection`.
+*   This command reads all files inside `MyGame`.
 *   It creates a new archive named `MyGame.ssmc` in the current directory.
 *   The `-p` flag shows a progress bar so you can see what's happening.
 
-### 2. Inspecting an `.ssmc` Archive
+### 2. Compressing Optical Disc Images (Optical Mode)
+
+   SpriteShrink features a specialized "Optical Mode" designed specifically for CD-based disc images (like PlayStation 1, Sega Saturn, or Sega CD games). Unlike standard file compression, this mode understands the structure of the disc (sectors, audio tracks, error correction), allowing for safe, bit-perfect restoration and superior compression of game data and CD audio.
+
+   **Supported Formats:**
+   *   **.cue/.bin**: The standard for raw disc images.
+   *   **.m3u/.m3u8**: Playlists used to group multi-disc games into a single "collection" within the archive.
+
+   **Command Structure:**
+   `./sprite_shrink --mode optical -i <path_to_images> -o <output_filename>`
+
+   *   `--mode optical`: Activates the specialized disc processing engine.
+   *   `-i`: Directory containing your `.cue` and `.m3u` files.
+   *   `-o`: The output filename. Note that Optical Mode creates **`.ssmd`** (SpriteShrink Media Disc) archives instead of `.ssmc`.
+
+   **Example:**
+   Compressing a folder of PlayStation games:
+  ./sprite_shrink --mode optical -i ./PS1_Game -o ./MyPS1Game.ssmd
+
+
+   **Key Features of Optical Mode:**
+   *   **Audio Compression**: Redundant CD-DA (audio) tracks are analyzed and compressed/deduplicated separately from data tracks.
+   *   **Multi-Disc Collections**: If you include an `.m3u` file containing filenames of `.cue` sheets (e.g., "Final Fantasy VII (Disc 1).cue", etc.), SpriteShrink will link them together into a group.
+   *   **Integrity Verification**: Optical mode calculates specialized hashes (SHA-512 and XXH3) to ensure the reconstructed disc is bit-perfect to the original.
+
+### 3. Inspecting an `.ssmc` or `.ssmd` Archive
 
 Before you extract files, you need to know what's inside the archive. The file list mode lets you view the contents.
 
@@ -188,6 +213,7 @@ Let's extract the USA and Japan versions (indices 1 and 3) from our `MyGame.ssmc
 
 *   This will re-create `MyGame (USA).rom` and `MyGame (Japan).rom` inside the `ExtractedGames` folder.
 *   The `-f` (`--force`) flag is used here to create the output directory if it doesn't already exist.
+*   For `.ssmd` archives, if the disc image was split across multiple bin files or if it was just one bin file, extraction will reconstruct it as a single bin file and   the cue file will reflect that.
 
 ---
 
@@ -205,6 +231,7 @@ This is a quick reference for the most common arguments. For a full list, run `.
 | `-f`       | `--force`             | Overwrite output file or create output directory if it doesn't exist.    |
 | `-q`       | `--quiet`             | Suppress all non-error output.                                           |
 | `-h`       | `--help`              | Print the full help message and exit.                                    |
+|            | `--mode`              | Specify a specialized mode other than the default such as `optical`      |
 
 ---
 
@@ -283,7 +310,7 @@ auto_tune = false
 # Default = 15 seconds
 autotune_timeout = 15
 
-# Enable (true) or disable (false) whether to optimze the ztd compression 
+# Enable (true) or disable (false) whether to optimize the ztd compression 
 # dictionary when it is generated. Be sure to disable when processing large 
 # amounts of data (e.g. If a single ROM exceeds approximately 64 megabytes, 
 # set to false) as this step can take a significant amount of time for negligible
@@ -322,7 +349,7 @@ log_retention_days = 7
 # - warning includes warning messages and the above messages (errors)
 # - info includes info messages and the above messages (errors and warnings)
 # - debug includes debug messages and the above messages 
-#   (errrors, warnings and info)
+#   (errors, warnings and info)
 # - off disables the creation of a log file and won't write any messages to one
 #   if one exists
 # Default = "error"

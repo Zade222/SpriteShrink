@@ -3,11 +3,12 @@ resolver = "3"
 members = [
     "crates/cli_application",
     "crates/lib_sprite_shrink",
+    "crates/lib_ss_cd",
 ]
 
 [profile.release]
 opt-level = 3
-lto = true         
+lto = true
 codegen-units = 1
-panic = "abort"    
+panic = "abort"
 strip = true

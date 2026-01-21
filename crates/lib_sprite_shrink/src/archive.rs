@@ -14,25 +14,26 @@ use std::{
     hash::Hash,
     io::{self, Read, Write},
     marker::PhantomData,
-    mem,
     os::raw::c_void,
     sync::{Arc, Mutex},
     thread
 };
 
+use bitcode::{
+    Encode, encode
+};
 use thiserror::Error;
 use serde::Serialize;
-use zerocopy::IntoBytes;
 
 
-use crate::{ffi::ffi_types::{
+use crate::{IsCancelled, SpriteShrinkError,
+    ffi::ffi_types::{
     FFIProgress, FFIProgressType, FFIUserData
-}, IsCancelled, SpriteShrinkError};
-use crate::lib_structs::{
-    ChunkLocation, FileHeader, FileManifestParent, Progress
+    },
+    lib_structs::{
+        ChunkLocation, CompressionResult, Progress,
+    }
 };
-
-use crate::parsing::{MAGIC_NUMBER, SUPPORTED_VERSION};
 
 use crate::processing::{
     build_train_samples, gen_zstd_opt_dict, ProcessingError
@@ -85,16 +86,12 @@ type CProgressCallback = extern "C" fn(FFIProgress, *mut c_void);
 
 pub struct ArchiveBuilder<'a, E, H, R, W> {
     //Required parameters
-    ser_file_manifest: Vec<FileManifestParent<H>>,
     sorted_hashes: &'a [H],
-    file_count: u32,
-    hash_type: u8,
     total_size: u64,
     get_chunk_data: R,
     write_comp_data: W,
 
     //Optional parameters, will be set with default values.
-    compression_algorithm: u16,
     compression_level: i32,
     dictionary_size: u64,
     worker_threads: usize,
@@ -104,58 +101,6 @@ pub struct ArchiveBuilder<'a, E, H, R, W> {
 
     //Add this field
     _error_type: PhantomData<E>,
-}
-
-/// Constructs the file header for a new archive.
-///
-/// This function assembles a `FileHeader` struct, which is the starting
-/// block of an archive. It contains critical metadata, including magic
-/// numbers, versioning info, and the precise offsets and lengths for all
-/// major data sections. This header is essential for allowing extraction
-/// logic to properly navigate and decompress the archive.
-///
-/// # Arguments
-///
-/// * `file_count`: The total number of files to be included.
-/// * `algorithm_code`: Numerical value representing the compression used on
-///   the compressed data.
-/// * `hash_type`: Numerical value representing the hash type used when
-///   the data was hashed.
-/// * `man_length`: The total length in bytes of the file manifest.
-/// * `dict_length`: The total length in bytes of the dictionary.
-/// * `chunk_index_length`: The total length of the chunk index.
-///
-/// # Returns
-///
-/// Returns a `FileHeader` struct populated with the provided metadata.
-fn build_file_header(
-    file_count: u32,
-    algorithm_code: u16,
-    hash_type: u8,
-    man_length: u64,
-    dict_length: u64,
-    chunk_index_length: u64,
-) -> FileHeader {
-    //Get the size of the current FileHeader struct.
-    let header_size = mem::size_of::<FileHeader>() as u64;
-
-    //Build, file and return a FileHeader struct with data.
-    FileHeader {
-        magic_num:      MAGIC_NUMBER,
-        file_version:   SUPPORTED_VERSION,
-        file_count,
-        algorithm:      algorithm_code,
-        hash_type,
-        pad:            [0, 0, 0, 0, 0],
-        man_offset:     header_size,
-        man_length,
-        dict_offset:    header_size + man_length,
-        dict_length,
-        chunk_index_offset: header_size + man_length + dict_length,
-        chunk_index_length,
-        data_offset: header_size + man_length + dict_length +
-            chunk_index_length
-    }
 }
 
 /// Compresses a data slice using a shared dictionary.
@@ -277,7 +222,7 @@ pub fn compress_chunks<ERead, EWrite, H, R, W>(
 where
     ERead: std::error::Error + IsCancelled + Send + Sync + 'static,
     EWrite: std::error::Error + IsCancelled + Send + Sync + 'static,
-    H: Copy + Debug + Eq + Hash + Send + Sync + 'static,
+    H: Copy + Debug + Encode + Eq + Hash + Send + Sync + 'static,
     R: Fn(&[H]) -> Result<Vec<(H, Vec<u8>)>, ERead> + Send + Sync + 'static,
     W: Fn(&[u8]) -> Result<(), EWrite> + Send + Sync + 'static,
 {
@@ -315,8 +260,6 @@ where
     } else {
         worker_count
     };
-
-
 
     // Resolve the number of threads to use. If 0, use available parallelism.
     let num_workers = (num_threads).saturating_sub(1).max(1);
@@ -526,30 +469,25 @@ where
 impl<'a, E, H, R, W> ArchiveBuilder<'a, E, H, R, W>
 where
     E: std::error::Error + IsCancelled + Send + Sync + 'static,
-    H: Copy + Debug + Eq + Hash + Serialize + Send + Sync + 'static + Display
+    H: Copy + Debug + Encode + Eq + Hash + Serialize + Send + Sync + 'static + Display
         + Ord,
     R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
     W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
 {
     pub fn new(
-        ser_file_manifest: Vec<FileManifestParent<H>>,
+        //ser_file_manifest: Vec<FileManifestParent<H>>,
         sorted_hashes: &'a [H],
-        file_count: u32,
-        hash_type: u8,
         total_size: u64,
         get_chunk_data: R,
         write_comp_data: W,
     ) -> Self {
         Self {
-            ser_file_manifest,
+            //ser_file_manifest,
             sorted_hashes,
-            file_count,
-            hash_type,
             total_size,
             get_chunk_data,
             write_comp_data,
             //Set default values for optional parameters
-            compression_algorithm: 98, //Default to zstd numerical code.
             compression_level: 19,
             dictionary_size: 16 * 1024,
             worker_threads: 0, //Let Rayon decide
@@ -561,14 +499,15 @@ where
     }
 
     //The following 5 functions set optional parameters.
-
+    /*
     /// Sets the numerical compression code.
     ///
     /// The default value is `98` for zstd.
+
     pub fn compression_algorithm(&mut self, algorithm: u16) -> &mut Self {
         self.compression_algorithm = algorithm;
         self
-    }
+    }*/
 
     /// Sets the compression level.
     ///
@@ -640,17 +579,13 @@ where
     ///   header.
     /// - `Err(SpriteShrinkError)` if any step fails, such as dictionary
     ///   training, compression, or serialization.
-    pub fn build(self) -> Result<Vec<u8>, SpriteShrinkError> {
+    pub fn build(self) -> Result<CompressionResult, SpriteShrinkError> {
         //Destructure self into its fields
         let ArchiveBuilder {
-            ser_file_manifest,
             sorted_hashes,
-            file_count,
-            hash_type,
             total_size,
             get_chunk_data,
             write_comp_data,
-            compression_algorithm,
             compression_level,
             dictionary_size,
             worker_threads,
@@ -796,41 +731,37 @@ where
         chunk_index
         dictionary*/
 
-        let config = bincode::config::standard();
-
-        let bin_file_manifest = bincode::serde::encode_to_vec(
-        &ser_file_manifest, config
-        ).map_err(|e| ArchiveError::ManifestEncodeError(e.to_string()))?;
-
-        drop(ser_file_manifest);
-
-        let bin_chunk_index = bincode::serde::encode_to_vec(
-        &chunk_index, config
-        ).map_err(|e| ArchiveError::IndexEncodeError(e.to_string()))?;
-
-        drop(chunk_index);
+        let enc_chunk_index = encode(&chunk_index);
 
         //Build the file header
-        let file_header = build_file_header(
+        /*let file_header = build_file_header(
             file_count,
             compression_algorithm,
             hash_type,
             bin_file_manifest.len() as u64,
             _dictionary.len() as u64,
             bin_chunk_index.len() as u64,
+        );*/
+
+        let mut comp_data = Vec::with_capacity(
+            //file_header.data_offset as usize + //bin_file_manifest.len() as usize
+                 _dictionary.len() + enc_chunk_index.len() as usize
         );
 
-        let mut final_data = Vec::with_capacity(
-            file_header.data_offset as usize + bin_file_manifest.len()
-                as usize + _dictionary.len() + bin_chunk_index.len() as usize
-        );
+        //final_data.extend_from_slice(file_header.as_bytes());
+        //final_data.extend_from_slice(&bin_file_manifest);
+        comp_data.extend_from_slice(&_dictionary);
+        comp_data.extend_from_slice(&enc_chunk_index);
 
-        final_data.extend_from_slice(file_header.as_bytes());
-        final_data.extend_from_slice(&bin_file_manifest);
-        final_data.extend_from_slice(&_dictionary);
-        final_data.extend_from_slice(&bin_chunk_index);
+        let dictionary_size = _dictionary.len() as u64;
+        let enc_chunk_index_size = enc_chunk_index.len() as u64;
 
-        Ok(final_data)
+        Ok(CompressionResult {
+            dictionary: _dictionary,
+            dictionary_size,
+            enc_chunk_index,
+            enc_chunk_index_size
+        })
     }
 }
 

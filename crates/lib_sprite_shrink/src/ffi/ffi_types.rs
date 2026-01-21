@@ -14,7 +14,6 @@
 
 use std::collections::HashMap;
 use std::{
-    ffi::CStr,
     os::raw::c_void,
     slice,
 };
@@ -314,7 +313,7 @@ pub struct CreateFileManifestAndChunksArgs{
     pub chunks_len: usize,
 }
 
-/// Represents a buffer containing the final, compressed archive data.
+/// Represents a buffer containing the final, dictionary and compressed data.
 ///
 /// This struct is returned by a successful build operation (e.g., from
 /// `archive_builder_build_u64`). When a C caller receives a pointer to this
@@ -335,10 +334,13 @@ pub struct CreateFileManifestAndChunksArgs{
 /// free it with a different allocator will lead to heap corruption and
 /// undefined behavior.
 #[repr(C)]
-pub struct FFIArchiveData {
-    pub data: *mut u8,
-    pub data_len: usize,
-    pub data_cap: usize,
+pub struct FFICompData {
+    pub dictionary_data_ptr: *mut u8,
+    pub dictionary_data_len: usize,
+    pub dictionary_data_cap: usize,
+    pub enc_chunk_index_data_ptr: *mut u8,
+    pub enc_chunk_index_data_len: usize,
+    pub enc_chunk_index_data_cap: usize,
 }
 
 /// FFI-safe equivalent of a `fastcdc::Chunk`, representing a content-defined
@@ -680,7 +682,6 @@ impl<H> From<(
 /// `free_file_manifest_and_chunks_*`) to prevent memory leaks.
 #[repr(C)]
 pub struct FFIFileManifestParent<H> {
-    pub filename: *mut c_char,
     pub chunk_metadata: *const FFISSAChunkMeta<H>,
     pub chunk_metadata_len: usize,
     pub chunk_metadata_cap: usize,
@@ -751,19 +752,16 @@ pub type FFIKeyArrayU128 = FFIKeyArray<U128Bytes>;
 // manually allocated and prepared for C ownership.
 impl<H> From<(
     FileManifestParent<H>,
-    *mut std::os::raw::c_char,
     *const FFISSAChunkMeta<H>,
     usize,
 )> for FFIFileManifestParent<H> {
     fn from(parts: (
         FileManifestParent<H>,
-        *mut std::os::raw::c_char,
         *const FFISSAChunkMeta<H>,
         usize,
     )) -> Self {
-        let (fmp, filename, chunk_metadata, chunk_metadata_cap) = parts;
+        let (fmp, chunk_metadata, chunk_metadata_cap) = parts;
         Self {
-            filename,
             chunk_metadata,
             chunk_metadata_len: fmp.chunk_count as usize,
             chunk_metadata_cap,
@@ -791,13 +789,6 @@ where
 {
     fn from(fmp: &FFIFileManifestParent<H>) -> Self {
         unsafe{
-            /*Convert the C string pointer to a Rust `String`.
-            `to_string_lossy` ensures that even if the C string contains
-            invalid UTF-8 sequences, the conversion will not panic.*/
-            let filename = CStr::from_ptr(fmp.filename)
-                .to_string_lossy()
-                .into_owned();
-
             /*Reconstruct the slice of chunk metadata from the raw pointer
             and length.*/
             let chunk_metadata_slice = slice::from_raw_parts(
@@ -814,7 +805,6 @@ where
 
             //Construct the final Rust-native `FileManifestParent` struct.
             FileManifestParent {
-                filename,
                 chunk_metadata,
                 chunk_count: fmp.chunk_metadata_len as u64
             }
@@ -848,11 +838,6 @@ where
 /// that is readable for their specified lengths for the duration of this call.
 impl From<&FFIFileManifestParent<U128Bytes>> for FileManifestParent<u128> {
     fn from(fmp: &FFIFileManifestParent<U128Bytes>) -> Self {
-        let filename = unsafe {
-            std::ffi::CStr::from_ptr(fmp.filename)
-                .to_string_lossy()
-                .into_owned()
-        };
         let chunk_metadata_slice = unsafe {
             slice::from_raw_parts(
                 fmp.chunk_metadata,
@@ -868,7 +853,6 @@ impl From<&FFIFileManifestParent<U128Bytes>> for FileManifestParent<u128> {
             .collect();
 
         FileManifestParent {
-            filename,
             chunk_metadata,
             chunk_count: fmp.chunk_metadata_len as u64,
         }
@@ -1674,6 +1658,7 @@ pub struct FFIVecBytes {
 /// unwind across the FFI boundary and must not dereference any pointers other
 /// than those provided to them.
 pub struct VerifySingleFileArgsU64{
+    pub filename: *const c_char,
     pub file_manifest_parent: *const FFIFileManifestParentU64,
     pub veri_hash_array_ptr: *const u8,
     pub user_data: *mut c_void,
@@ -1731,6 +1716,7 @@ pub struct VerifySingleFileArgsU64{
 /// than those provided to them.
 #[repr(C)]
 pub struct VerifySingleFileArgsU128{
+    pub filename: *const c_char,
     pub file_manifest_parent: *const FFIFileManifestParentU128,
     pub veri_hash_array_ptr: *const u8,
     pub user_data: *mut c_void,

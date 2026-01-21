@@ -1,6 +1,6 @@
 # SpriteShrink: Efficient ROM Deduplication and Archiving
 
-SpriteShrink is a powerful command-line tool that helps enthusiasts manage their collections of retro game ROMs. By employing data deduplication across various file versions (e.g., regional variants, revisions), it achieves higher compression ratios than conventional methods, reducing storage for each multi variant game.
+SpriteShrink is a CLI utility for managing collections of retro game ROMs. By employing data deduplication across various file versions (e.g., regional variants, revisions), it achieves higher compression ratios than conventional methods, reducing storage for each multi variant game.
 
 It also includes `lib_sprite_shrink`, a Rust library for integration into applications like emulators or frontends, enabling direct ROM extraction from archives.
 
@@ -8,15 +8,15 @@ It also includes `lib_sprite_shrink`, a Rust library for integration into applic
 
 ## Features
 
-* **Intelligent Deduplication**: Analyzes multiple files to identify and eliminate shared byte data, storing only unique copies. This is achieved using the **FastCDC** content-defined chunking algorithm.
-* **High Compression Ratios**: Achieves superior space savings by leveraging shared dictionary compression with **Zstandard** in addition tot he deduplication.
-* **Flexible Archiving**: Consolidates deduplicated data into a single, highly compressed `.ssmc` archive file.
+* **Content-Defined Deduplication**: Uses the FastCDC algorithm to analyze multiple files in order to identify and eliminate shared byte data, storing only unique copies. This is achieved using the **FastCDC** content-defined chunking algorithm.
+* **High Compression Ratios**: Achieves superior space savings by leveraging shared dictionary compression with **Zstandard** in addition to the deduplication.
+* **Flexible Archiving**: Consolidates deduplicated data into a single, highly compressed archive file.
 * **Parameter Auto-Tuning**: Automatically tunes chunking and compression parameters to find an optimal balance between compression speed and file size.
-* **Data Integrity**: Internally uses **SHA-512** hashing to verify that every extracted file is a byte-for-byte perfect copy of the original. Upon decompression it will also verify each chunk of data to ensure no corruption occurred since the creation of the archive.
-* **Metadata Inspection**: View a list of all files contained within an `.ssmc` archive, along with their original filenames, sizes and indices.
-* **Precise Extraction**: Extract one or more specific files from an `.ssmc` archive by index.
+* **Data Integrity**: Internally uses **SHA-512** hashing to verify that every extracted file is a byte-for-byte perfect copy of the original. Upon decompression it will also verify each file to ensure no corruption occurred since the creation of the archive.
+* **Metadata Inspection**: View a list of all files contained within an archive, along with their original filenames, sizes and indices.
+* **Precise Extraction**: Extract one or more specific files from an archive by index.
 * **Developer-Friendly Library**: A dedicated Rust library (`lib_sprite_shrink`) exposes core functionalities for easy integration into third-party applications.
-* **Cross-Platform Compatibility**: Fully operational on 64-bit Linux, macOS, and Windows on x86-64 and AArch64 architectures.
+* **Cross-Platform Compatibility**: Fully functional on 64-bit Linux, macOS, and Windows on x86-64 and AArch64 architectures.
 * **Resource Control**: Options to limit CPU thread usage and enable a low-memory mode for resource-constrained environments.
 
 ---
@@ -27,19 +27,19 @@ SpriteShrink is specifically designed for collections of files that are relative
 
 While it is technically capable of processing any file type, it is **not recommended** for:
 * **Files with Little Redundancy**: Collections of files that do not share common data (e.g., a directory of unrelated documents or videos).
-* **Files with Little Redundancy**: Games that internally use their own compression, have a significant amount of encrypted data or contain a large amount of compressed video data.
+* **Encrypted or Pre-compressed Files**: Games that internally use their own compression, have a significant amount of encrypted data or contain a large amount of compressed video data.
 
 The tool's content-defined chunking and deduplication algorithms provide the most benefit when byte-level similarities exist across multiple files, which is common in ROM sets with different regional versions and revisions.
 
-**However**, given the aforementioned limitations there are circumstances where it can work well. Systems that have games that span multiple discs being one of them. I have tested it specifically on my copy of Final Fantasy 7 which is three discs. Despite being one contiguous game across the three discs, there is a fair amount of assets used across all the discs that are duplicated should the player return to earlier parts of the game. Despite each disk technically being overall different this still leads to an approximate compressed:original size ratio of 1:2 when I compressed my disc images using SpriteShrink. So in the end the SpriteShrink size is smaller than what CHD with cdzs or a tar file using zstd at compression level 19 could manage.
+**However**, despite these limitations, SpriteShrink shines in specific scenarios, such as multi-disc games. I have tested it specifically on my copy of Final Fantasy 7 which is three discs. Despite being one contiguous game across the three discs, there is a fair amount of assets used across all the discs that are duplicated should the player return to earlier parts of the game. Even though the discs differ, SpriteShrink achieved a 1:2 compression ratio on my copy—outperforming CHD and standard zstd archiving. So in the end the SpriteShrink size is smaller than what CHD with cdzs or a tar file using zstd at compression level 19 could manage.
 
 ---
 
-## The .ssmc File Format
+## The .ssmc and .ssmd File Format
 
-SpriteShrink uses a custom archive format called **SpriteShrink Multi-Cart (`.ssmc`)**. This format is specifically designed for the efficient storage of file collections with a high degree of redundant data, such as ROM sets with multiple regional versions or revisions.
+SpriteShrink uses custom archive formats called **SpriteShrink Multi-Cart (`.ssmc`)** or **SpriteShrink Multi-Disk (`.ssmd`)**. These formats are specifically designed for the efficient storage of file collections with a high degree of redundant data, such as ROM sets with multiple regional versions or revisions.
 
-By using content-defined chunking and deduplication, the `.ssmc` format stores each unique piece of data only once, leading to significant storage savings compared to traditional compression tools.
+By using content-defined chunking and deduplication, the `.ssmc` and `.ssmd` format stores each unique piece of data only once, leading to significant storage savings compared to traditional compression tools.
 
 A complete technical document detailing the binary layout, data structures, and design principles of the format is available for developers and enthusiasts.
 
@@ -53,10 +53,10 @@ The compression process follows a multi-stage pipeline to ensure maximum efficie
 
 1.  **Chunking**: Input files are broken down into variable-sized chunks using the **FastCDC** content-defined chunking algorithm. This method ensures that identical segments of data produce identical chunks, regardless of their position in a file.
 2.  **Deduplication**: Each chunk is hashed using **xxh3**, and only one copy of each unique chunk is stored in a `data_store`. This significantly reduces redundancy across multiple files.
-3.  **Verification**: A **SHA-512** hash is generated for each input file to ensure data integrity during reconstruction.
+3.  **Verification**: A **SHA-512** hash is generated for each input file to ensure data integrity when the archive is made.
 4.  **Dictionary Training**: A compression dictionary is generated from samples of the unique data chunks. This dictionary helps the Zstandard compression algorithm achieve better ratios on the specific data being archived.
 5.  **Compression**: The unique data chunks are compressed in parallel using the generated dictionary.
-6.  **Archiving**: The compressed chunks, file manifest, and header are serialized and written to a final `.ssmc` archive file.
+6.  **Archiving**: The compressed chunks, file manifest, and header are serialized and written to a final archive file.
 
 ---
 
@@ -186,12 +186,13 @@ Here's a quick reference for the main arguments:
 |            | `--optimize-dictionary`| When finalizing the archive, optimize the dictionary for better compression. Can be **Very slow** depending on dictionary size. | `false`       |
 | `-t`       | `--threads`           | Sets max worker threads. Defaults to all available logical cores.                        | All cores     |
 |            | `ignore-config`       | Forces application to not read it's config and won't create one if it doesn't already exist. | `false`       |
-|            | `--low-memory`        | Forces low-memory mode by using an on disk cache for temporarily storing data. Can adversely effect application performance. | `false`       |
+|            | `--low-memory`        | Forces low-memory mode by using an on disk cache for temporarily storing data. Can adversely affect application performance. | `false`       |
 | `-f`       | `--force`             | Overwrites the output file if it exists creates the output directory if it doesn't exist. | `false`       |
 | `-p`       | `--progress`          | Activates printing progress to console.                                                  | `false`       |
 | `-q`       | `--quiet`             | Activates quiet mode, suppressing non-essential output.                                  | `false`       |
 | `-h`       | `--help`              | Prints comprehensive help information and exits.                                         | N/A           |
 |            | `--disable-logging`   | Disables logging messages to log file.                                                   | `false`       |
+|            | `--mode`              | Engages specialized mode. Currently only supports `optical`. Default is used when not provided. | N/A    |
 
 ---
 

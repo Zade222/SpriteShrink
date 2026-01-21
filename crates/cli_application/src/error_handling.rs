@@ -14,6 +14,7 @@ use std::{
 use sprite_shrink::{
     IsCancelled, SpriteShrinkError
 };
+use sprite_shrink_cd::SpriteShrinkCDError;
 use directories::ProjectDirs;
 use range_parser::RangeError;
 use thiserror::Error;
@@ -88,6 +89,9 @@ pub enum CliError {
     #[error("Library error: {0}")]
     SpriteShrinkError(SpriteShrinkError),
 
+    #[error("Library error: {0}")]
+    SpriteShrinkCDError(#[from] SpriteShrinkCDError),
+
     #[error("Range parse error {0}")]
     RangeParse(#[from] RangeError),
 
@@ -102,21 +106,6 @@ pub enum CliError {
 
     #[error("Argument parsing error: {0}")]
     ArgumentParsing(#[from] clap::Error),
-
-    #[error("Database error {0}")]
-    RedbDatabaseError(#[from] redb::DatabaseError),
-
-    #[error("Database table error {0}")]
-    RedbTableError(#[from] redb::TableError),
-
-    #[error("Database storage error {0}")]
-    RedbStorageError(#[from] redb::StorageError),
-
-    #[error("Database transaction error {0}")]
-    RedbTransactionError(#[from] redb::TransactionError),
-
-    #[error("Database commit error {0}")]
-    RedbCommitError(#[from] redb::CommitError),
 
     #[error("Key not found {0}")]
     KeyNotFound(String),
@@ -142,6 +131,12 @@ pub enum CliError {
 
     #[error("Flume channel send error: {0}")]
     FlumeSendError(String),
+
+    #[error("Invalid mode specified. {0}")]
+    InvalidMode(String),
+
+    #[error("Invalid or unsupported format id in archive. {0}")]
+    InvalidFormatID(u16),
 }
 
 /// Converts a library-level `SpriteShrinkError` into a `CliError`.
