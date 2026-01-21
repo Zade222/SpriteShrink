@@ -18,6 +18,10 @@ jobs:
             library_archive_name: "lib_sprite_shrink-linux-x86_64.tar.gz"
             static_lib_name: "libsprite_shrink.a"
             dynamic_lib_name: "libsprite_shrink.so"
+            cd_library_archive_name: "lib_sprite_shrink_cd-linux-x86_64.tar.gz"
+            cd_static_lib_name: "libsprite_shrink_cd.a"
+            cd_dynamic_lib_name: "libsprite_shrink_cd.so"
+
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             binary_name: "sprite-shrink.exe"
@@ -26,6 +30,10 @@ jobs:
             static_lib_name: "sprite_shrink.lib"
             dynamic_lib_name: "sprite_shrink.dll"
             import_lib_name: "sprite_shrink.dll.lib"
+            cd_library_archive_name: "lib_sprite_shrink_cd-windows-x86_64.zip"
+            cd_static_lib_name: "sprite_shrink_cd.lib"
+            cd_dynamic_lib_name: "sprite_shrink_cd.dll"
+            cd_import_lib_name: "sprite_shrink_cd.dll.lib"
 
     runs-on: ${{ matrix.os }}
 
@@ -58,25 +66,36 @@ jobs:
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             LIB_PATH="./target/${{ matrix.target }}/release/sprite_shrink.lib"
             DYNAMIC_LIB_PATH="./target/${{ matrix.target }}/release/sprite_shrink.dll"
+            CD_LIB_PATH="./target/${{ matrix.target }}/release/sprite_shrink_cd.lib"
+            CD_DYNAMIC_LIB_PATH="./target/${{ matrix.target }}/release/sprite_shrink_cd.dll"
           else
             LIB_PATH="./target/${{ matrix.target }}/release/libsprite_shrink.a"
             DYNAMIC_LIB_PATH="./target/${{ matrix.target }}/release/libsprite_shrink.so"
+            CD_LIB_PATH="./target/${{ matrix.target }}/release/libsprite_shrink_cd.a"
+            CD_DYNAMIC_LIB_PATH="./target/${{ matrix.target }}/release/libsprite_shrink_cd.so"
           fi
-          
+
           HEADER_PATH="./target/${{ matrix.target }}/release/sprite_shrink.h"
-          
+
           mkdir -p ./release/lib
           mv "$LIB_PATH" "./release/lib/"
           mv "$DYNAMIC_LIB_PATH" "./release/lib/"
           mv "$HEADER_PATH" "./release/lib/"
-          
+          mv "$CD_LIB_PATH" "./release/lib/"
+          mv "$CD_DYNAMIC_LIB_PATH" "./release/lib/"
+
           cd ./release/lib
           if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
             IMPORT_LIB_PATH="../../target/${{ matrix.target }}/release/${{ matrix.import_lib_name }}"
             mv "$IMPORT_LIB_PATH" "./"
             7z a "../${{ matrix.library_archive_name }}" "${{ matrix.static_lib_name }}" "${{ matrix.dynamic_lib_name }}" "${{ matrix.import_lib_name }}" "sprite_shrink.h"
+
+            CD_IMPORT_LIB_PATH="../../target/${{ matrix.target }}/release/${{ matrix.cd_import_lib_name }}"
+            mv "$CD_IMPORT_LIB_PATH" "./"
+            7z a "../${{ matrix.cd_library_archive_name }}" "${{ matrix.cd_static_lib_name }}" "${{ matrix.cd_dynamic_lib_name }}" "${{ matrix.cd_import_lib_name }}"
           else
             tar -czvf "../${{ matrix.library_archive_name }}" "${{ matrix.static_lib_name }}" "${{ matrix.dynamic_lib_name }}" "sprite_shrink.h"
+            tar -czvf "../${{ matrix.cd_library_archive_name }}" "${{ matrix.cd_static_lib_name }}" "${{ matrix.cd_dynamic_lib_name }}"
           fi
           cd ../..
 
