@@ -5,7 +5,7 @@ use std::{
 use bitcode::{
     Decode, decode
 };
-use bytemuck::try_from_bytes;
+use bytemuck::{cast_slice, try_from_bytes};
 use sprite_shrink::{ChunkLocation};
 use thiserror::Error;
 
@@ -45,11 +45,13 @@ pub fn decode_ssmd_meta_data<H>(
 where
     for<'de> H: Eq + Decode<'de> + Hash
 {
-    let base_offset = format_data.enc_disc_manifest.length;
+    let base_offset = format_data.enc_disc_manifest.offset;
+
+    let manifest_len = format_data.enc_disc_manifest.length as usize;
 
     let disc_manifests: Vec<DiscManifest<H>> = decode(
-        &bin_metadata[..base_offset as usize]
-    ).map_err(|e| DecodeError::MetadataDecode{
+        &bin_metadata[..manifest_len]
+    ).map_err(|e| DecodeError::MetadataDecode {
         data: "Disc Manifest".to_string(),
         error: e.to_string()
     })?;
@@ -74,6 +76,10 @@ where
 
     let chunk_index: HashMap<H, ChunkLocation> = dec_chunk_index
         .into_iter()
+        .map(|(h, mut loc)| {
+            loc.offset += format_data.data_offset;
+            (h, loc)
+        })
         .collect();
 
     let audio_block_index = if format_data.enc_audio_index.length > 0 {
@@ -91,6 +97,10 @@ where
 
         let hash_map: HashMap<H, ChunkLocation> = dec_audio_index
             .into_iter()
+            .map(|(h, mut loc)| {
+                loc.offset += format_data.audio_data.offset;
+                (h, loc)
+            })
             .collect();
 
         Some(hash_map)
@@ -120,12 +130,9 @@ where
         format_data.subheader_table.offset - base_offset
     ) as usize;
 
-    let subheader_table: Vec<[u8; 8]> = decode(
+    let subheader_table: Vec<[u8; 8]> = cast_slice(
         &bin_metadata[tbl_start..]
-    ).map_err(|e| DecodeError::MetadataDecode{
-        data: "Subheader Table".to_string(),
-        error: e.to_string()
-    })?;
+    ).to_vec();
 
     Ok(DecodedSSMDMetadata {
         disc_manifests,

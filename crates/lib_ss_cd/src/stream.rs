@@ -458,7 +458,8 @@ impl<'a, R: Read + Seek> UserDataStream<'a, R> {
                     Some(16..2064),
                 SectorType::PregapMode2 | SectorType::PregapMode2Exception =>
                     Some(24..2072),
-                SectorType::ZeroedData => Some(0..2352),
+                SectorType::ZeroedMode1Data | SectorType::ZeroedMode2Data =>
+                    Some(0..2352),
                 // All other types (Audio, Pregap and PregapAudio) are skipped.
                 _ => None,
             };

@@ -1,12 +1,20 @@
 use std::{
-    cmp::min, collections::{HashMap}, ffi::OsStr, fmt::{Debug, Display}, fs::{
+    cmp::min, collections::HashMap,
+    ffi::OsStr,
+    fmt::{Debug, Display},
+    fs::{
         File, read_to_string
-    }, hash::Hasher, io::{
-        self, Read, Seek, SeekFrom
-    }, path::{Path, PathBuf}, sync::{
-        Arc, atomic::{
-        AtomicBool, Ordering,
-    }}, thread
+    },
+    hash::Hasher, io::{
+        self, BufWriter, Read, Seek, SeekFrom, Write
+    },
+    path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex, atomic::{
+        AtomicBool, AtomicU64, Ordering,
+        }
+    },
+    thread
 };
 
 use bitcode::{Encode, encode};
@@ -23,7 +31,7 @@ use tracing::{
 };
 use sprite_shrink::{
     SS_SEED,
-    ArchiveBuilder, ChunkLocation, FileHeader, FileManifestParent,
+    ArchiveBuilder, ChunkLocation, FileHeader,
     test_compression, dashmap_values_to_vec
 };
 use sprite_shrink_cd::{
@@ -41,7 +49,7 @@ use zerocopy::IntoBytes;
 
 use crate::{
     arg_handling::Args,
-    cli_types::{DiscCompleteData, DiscExceptionBlob, TempFileGuard},
+    cli_types::{DiscCompleteData, TempFileGuard},
     storage_io::{append_data_to_file, write_final_archive},
 };
 use crate::cli_types::{
@@ -121,6 +129,43 @@ where
     debug!("Running optical bin/cue compression mode.");
 
     set_priority()?;
+
+    let mut collection_map: HashMap<String, u8> = HashMap::new();
+
+    let mut next_collection_id = 0u8;
+
+    for path in &file_paths {
+        if let Some(ext) = path.extension() &&
+            (ext == "m3u" || ext == "m3u8") &&
+            let Ok(content) = read_to_string(path)
+        {
+            let mut found_any = false;
+            for line in content.lines() {
+                let line = line.trim();
+
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+
+                let entry_path = Path::new(line);
+
+                if let Some(stem) = entry_path.file_stem() {
+                    collection_map.insert(
+                        stem.to_string_lossy().to_string(),
+                        next_collection_id
+                    );
+                    found_any = true;
+                }
+            }
+
+            if found_any {
+                if next_collection_id == 255 {
+                    debug!("Max collection count reached, wrapping ids");
+                }
+                next_collection_id = next_collection_id.wrapping_add(1);
+            }
+        }
+    }
 
     let prepared_sheets: Vec<(PathBuf, String)> = file_paths
         .into_iter()
@@ -222,11 +267,11 @@ where
         16 * 1024, |byte| byte.as_u64());
 
     //autotune logic
-    if args.auto_tune {
+    /*if args.auto_tune {
         if args.window.is_none() {
 
         }
-    } //else { //Note: for now skip autotune logic to get the core logic sound.
+    } //else { //Note: for now skip autotune logic to get the core logic sound.*/
 
     let proc_result = process_optical_discs::<H>(
         &cue_analysis.cue_sheets,
@@ -287,9 +332,11 @@ where
             .map(|(run, _)| *run as u64)
             .sum();
 
+        let collection_id = collection_map.get(&title).copied().unwrap_or(255);
+
         archive_toc.push(SSMDTocEntry {
             filename: title,
-            collection_id: 255,
+            collection_id,
             uncompressed_size: sector_count * 2352
         });
 
@@ -378,18 +425,18 @@ where
         .with_extension("tmp")
     );
 
+    let tmp_file = File::create(tmp_file_path.as_path())?;
+
+    let writer = Arc::new(
+        Mutex::new(BufWriter::with_capacity(64 * 1024, tmp_file))
+    );
+
     /*Set file guard to clean up tmp files on error. */
     let _tmp_guard = TempFileGuard::new(&tmp_file_path);
-    let mut audio_blob_size = 0u64;
+    let audio_blob_size = Arc::new(AtomicU64::new(0));
 
     if audio_data_size > 0 {
         let audio_chunk_hashes = audio_temp_cache.get_keys()?;
-
-        let mut audio_write_buffer: Vec<u8> = Vec::with_capacity(
-            BUFFER_SIZE * 2352 * 16
-        );
-
-        let mut audio_block_count = 0usize;
 
         let get_audio_data_for_lib = {
             let cb = Arc::clone(&audio_ret_cb);
@@ -406,19 +453,12 @@ where
         };
 
         let tmp_audio_write_cb = {
-            let tfp_clone = Arc::clone(&tmp_file_path);
+            let blob_size_clone = Arc::clone(&audio_blob_size);
+            let writer_clone = Arc::clone(&writer);
             move |data: &[u8], flush_flag: bool| -> Result<(), CliError>{
+                blob_size_clone.fetch_add(data.len() as u64, Ordering::SeqCst);
 
-                audio_write_buffer.extend_from_slice(data);
-                audio_block_count += 1;
-                audio_blob_size += data.len() as u64;
-
-                if (audio_block_count >= BUFFER_SIZE) || flush_flag {
-                    append_data_to_file(&tfp_clone, &audio_write_buffer)?;
-                    audio_write_buffer.clear();
-                    audio_block_count = 0;
-                };
-
+                writer_clone.lock().unwrap().write_all(data)?;
                 Ok(())
             }
         };
@@ -431,6 +471,8 @@ where
         )?;
     }
 
+    let final_audio_blob_size = audio_blob_size.load(Ordering::SeqCst);
+
     let chunk_hashes = data_temp_cache.get_keys()?;
     let chunk_sum = data_temp_cache.get_tot_data_size();
 
@@ -440,9 +482,6 @@ where
     let mut write_buffer: Vec<u8> = Vec::with_capacity(
         BUFFER_SIZE * (best_window_size as usize * 4)
     );
-
-    //Holds the amount of chunks that have been stored in the buffer.
-    let mut chunk_count = 0usize;
 
     let get_chunk_data_for_lib = {
         let cb = Arc::clone(&chunk_ret_cb);
@@ -462,17 +501,11 @@ where
     Flush flag can be used to force the data to be written if the buffer has
     not reached the BUFFER_SIZE.*/
     let tmp_chunk_write_cb = {
-        let tfp_clone = Arc::clone(&tmp_file_path);
+        let writer_clone = Arc::clone(&writer);
         move |chunk: &[u8], flush_flag: bool| -> Result<(), CliError>{
             write_buffer.extend_from_slice(chunk);
-            chunk_count += 1;
 
-            if (chunk_count >= BUFFER_SIZE) || flush_flag {
-                append_data_to_file(&tfp_clone, &write_buffer)?;
-                write_buffer.clear();
-                chunk_count = 0;
-            };
-
+            writer_clone.lock().unwrap().write_all(chunk)?;
             Ok(())
         }
     };
@@ -490,6 +523,13 @@ where
         .worker_threads(args.threads.unwrap_or(0));
 
     let comp_data = comp_data_builder.build()?;
+
+    writer.lock().unwrap().flush()?;
+    let blob_size = _tmp_guard.size();
+
+    archive_toc.iter_mut().for_each(|toc|{
+        toc.filename.push_str(".bin");
+    });
 
     let enc_toc = encode(&archive_toc);
 
@@ -520,7 +560,7 @@ where
         enc_excep_index.len() as u64,
         subheader_table.len() as u64 * 8 ,
         exception_blob.len() as u64,
-        audio_blob_size
+        final_audio_blob_size
     );
 
     let mut final_data = Vec::with_capacity(
@@ -544,7 +584,6 @@ where
     final_data.extend_from_slice(subheader_table.as_bytes());
     final_data.extend_from_slice(&exception_blob);
 
-    let blob_size = _tmp_guard.size();
     println!("Estimated final data size with blob: {}", final_data.len() + blob_size as usize);
 
     let final_output_path = args.output
@@ -617,11 +656,6 @@ where
     let shared_subheader_registry = Arc::new(SubheaderRegistry::default());
 
     let shared_exception_registry = Arc::new(ExceptionRegistry::default());
-
-    let shared_exception_blobs: Arc<
-        DashMap<String,
-        DiscExceptionBlob
-    >> = Arc::new(DashMap::new());
 
     let system_thread_count = thread::available_parallelism()?.get();
 
@@ -765,11 +799,6 @@ where
             "Failed to unwrap Arc for verification hashes".to_string()
         ))?;
 
-    let final_exception_blob = Arc::try_unwrap(shared_exception_blobs)
-        .map_err(|_| CliError::InternalError(
-            "Failed to unwrap Arc for exception blob".to_string()
-        ))?;
-
     let subheader_table = shared_subheader_registry.generate_blob();
 
     let (exception_blob, exception_index) = shared_exception_registry
@@ -811,7 +840,7 @@ where
     };
 
     let mut sha_hasher = sha2::Sha512::new();
-    let mut xxh3_hasher = Xxh3::with_seed(SS_SEED);
+    let mut xxh3_hasher = Xxh3::new();
     let mut buffer = [0u8; 65536];
     source_stream.seek(SeekFrom::Start(0))?;
     loop {
@@ -871,7 +900,7 @@ where
             SectorType::Mode2Form2 | SectorType::Mode2Form2Exception |
             SectorType::PregapMode1 | SectorType::PregapMode1Exception |
             SectorType::PregapMode2 | SectorType::PregapMode2Exception |
-            SectorType::ZeroedData => {
+            SectorType::ZeroedMode1Data | SectorType::ZeroedMode2Data => {
                 let run_map = SectorMap {
                     sectors: vec![*sector_type; *run_length as usize],
                 };

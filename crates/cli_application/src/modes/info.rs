@@ -208,7 +208,7 @@ fn ssmd_print_info_table(
         let collection_id = if toc_entry.collection_id == 255 {
             "-".to_string()
         } else {
-            toc_entry.collection_id.to_string()
+            (toc_entry.collection_id + 1).to_string()
         };
 
         println!("{}\t| {}\t| {} | {}",

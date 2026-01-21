@@ -1,7 +1,11 @@
 use std::{
-    collections::{HashMap, VecDeque},
-    sync::Arc,
+    collections::{HashMap, VecDeque}, fmt::Display, fs::File, hash::Hasher, io::{BufWriter, Read, Write}, sync::{Arc, Condvar, Mutex}, thread::scope
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
 
 use crate::{
     analyze::SYNC_PATTERN,
@@ -10,9 +14,13 @@ use crate::{
     lib_structs::{
         DecodedSectorInfo, DiscManifest, ExceptionInfo, IntMap, MsfTime,
         ReconstructionContext, ReconstructionInfo, RleSectorMap, SectorType,
-        StreamChunkInfo, SubHeaderEntry
+        SSMDIndices, StreamChunkInfo, SubHeaderEntry
     },
-    util::{spawn_data_fetcher},
+    util::{
+        SharedBuffer,
+        pull_data, spawn_audio_decomp_worker, spawn_chunk_decomp_worker,
+        spawn_data_fetcher
+    },
 };
 
 use dashmap::mapref::entry;
@@ -24,6 +32,7 @@ use sprite_shrink::{
     Hashable
 };
 use thiserror::Error;
+use xxhash_rust::xxh3::Xxh3;
 
 
 #[derive(Error, Debug)]
@@ -285,7 +294,6 @@ where
         BATCH_SIZE
     );
 
-    //let recon_ctx = ReconstructionContext::new(&manifest);
     let expanded_sector_types = expand_sector_map(&manifest.rle_sector_map);
     let total_sectors = expanded_sector_types.len();
 
@@ -512,7 +520,6 @@ fn rebuild_mode2form1_sec(
     sector_buf: &mut [u8],
     user_data: &[u8],
     metadata_bytes: &[u8; 8],
-    //sector_num: u32,
 ) -> Result<(), ReconstructionError> {
     if user_data.len() != 2048 {
         return Err(ReconstructionError::DataLengthMismatch {
@@ -714,7 +721,7 @@ pub fn rebuild_sector_bitwise(
                 exception_data
             )?;
         }
-        SectorType::ZeroedData => {
+        SectorType::ZeroedMode1Data | SectorType::ZeroedMode2Data => {
             if user_data.len() != 2352 {
                 return Err(ReconstructionError::DataLengthMismatch {
                     sector_type: "ZeroedData".to_string(),
@@ -799,7 +806,7 @@ pub fn rebuild_sector_simd(
                 exception_data
             )?;
         }
-        SectorType::ZeroedData => {
+        SectorType::ZeroedMode1Data | SectorType::ZeroedMode2Data => {
             if user_data.len() != 2352 {
                 return Err(ReconstructionError::DataLengthMismatch {
                     sector_type: "ZeroedData".to_string(),
@@ -818,4 +825,214 @@ pub fn rebuild_sector_simd(
 
 const fn to_bcd(v: u8) -> u8 {
     ((v / 10) << 4) | (v % 10)
+}
+
+
+
+pub fn write_disc<H, W>(
+    manifest: &DiscManifest<H>,
+    indices: &SSMDIndices<H>,
+    dictionary: &[u8],
+    archive_file: &File,
+    exception_blob: &[u8],
+    subheader_table: &[[u8; 8]],
+    writer: &mut BufWriter<W>,
+    //mut progress_cb: P
+) -> Result<(), SpriteShrinkCDError>
+where
+    H: Hashable + Display,
+    //P: FnMut(u64) + Sync + Send + 'static,
+    W: Write
+{
+    const MAX_BUFFER_SIZE: usize = 25 * 1024 * 1024; //25 megabytes
+
+    let (data_tx, data_rx) = bounded(4);
+    let (audio_tx, audio_rx) = bounded(4);
+
+    let chunk_hashes: Vec<H> = manifest.data_stream_layout.iter().map(|data| {
+        data.hash
+    }).collect();
+
+    let audio_hashes: Vec<H> = manifest.audio_block_map.iter().map(|block| {
+        block.content_hash
+    }).collect();
+
+    let expanded_sector_types = expand_sector_map(&manifest.rle_sector_map);
+    let total_sectors = expanded_sector_types.len();
+
+    let subheader_map = expand_subheader_map(
+        &manifest.subheader_index,
+        total_sectors
+    );
+    let expand_disc_excep_idx = expand_exception_index(
+        &manifest.disc_exception_index,
+        total_sectors
+    );
+
+    let mut hasher = Xxh3::new();
+
+    let mut loop_count = 0usize;
+
+    let lba_map = &manifest.lba_map;
+    let mut current_msf_offset = lba_map[0].1;
+    let mut lba_index = 0;
+
+    let shared_data_buffer: SharedBuffer = Arc::new((
+        Mutex::new((VecDeque::with_capacity(MAX_BUFFER_SIZE), false)),
+        Condvar::new(),
+    ));
+
+    let shared_audio_buffer: SharedBuffer = Arc::new((
+        Mutex::new((VecDeque::with_capacity(MAX_BUFFER_SIZE), false)),
+        Condvar::new(),
+    ));
+
+    let cloned_data_buffer =  shared_data_buffer.clone();
+    let cloned_audio_buffer =  shared_audio_buffer.clone();
+
+    scope(|scope| -> Result<(), SpriteShrinkCDError>{
+        let data_fetch_handle = spawn_chunk_decomp_worker(
+            scope,
+            chunk_hashes,
+            &indices.chunk_index,
+            dictionary,
+            archive_file,
+            cloned_data_buffer,
+            MAX_BUFFER_SIZE,
+            data_tx
+        );
+
+        let audio_fetch_handle = spawn_audio_decomp_worker(
+            scope,
+            audio_hashes,
+            &indices.audio_block_index,
+            archive_file,
+            cloned_audio_buffer,
+            MAX_BUFFER_SIZE,
+            audio_tx
+        );
+
+        for (i, sector_type) in expanded_sector_types.iter().enumerate() {
+            let sector_idx = i as u32;
+
+            let sector_result = match sector_type {
+                SectorType::Audio | SectorType::PregapAudio |
+                SectorType::ZeroedAudio => {
+                    let mut reconstructed_sector = [0u8; 2352];
+
+                    if let Ok(err) = audio_rx.try_recv() {
+                        return Err(err);
+                    }
+
+                    let audio_data = pull_data(
+                        &shared_audio_buffer,
+                        2352,
+                        &audio_rx
+                    )?;
+
+                    if audio_data.len() != 2352 {
+
+                        return Err(ReconstructionError::InternalError(
+                            format!("Audio stream ended prematurely. Expected 2352 bytes, got {}", audio_data.len())
+                        ).into());
+                    }
+
+                    reconstructed_sector.copy_from_slice(&audio_data);
+                    Ok(reconstructed_sector)
+                }
+                _ => {
+                    let needed = sector_type.data_size() as usize;
+
+                    if let Ok(err) = data_rx.try_recv() {
+                        return Err(err);
+                    }
+
+                    let user_data = pull_data(
+                        &shared_data_buffer,
+                        needed,
+                        &data_rx
+                    )?;
+
+                    if user_data.len() != sector_type.data_size() as usize {
+                        return Err(ReconstructionError::InternalError(
+                            format!("Data stream ended prematurely. Expected {} bytes, got {}", sector_type.data_size(), user_data.len())
+                        ).into());
+                    }
+
+                    let exception = expand_disc_excep_idx.get(
+                        sector_idx as usize
+                    ).and_then(|opt| *opt)
+                    .map(|excep_id| {
+                        let offset: usize = indices.exception_index[
+                            excep_id as usize
+                        ] as usize;
+                        let size = sector_type.excep_size();
+                        &exception_blob[offset..offset + size]
+                    });
+
+                    let metadata = subheader_map.get(i)
+                        .and_then(|opt| *opt)
+                        .map(|did| &subheader_table[did as usize])
+                        .ok_or(ReconstructionError::MissingSubheader(i))?;
+
+                    if lba_map.len() - 1 > lba_index &&
+                        current_msf_offset + i as u32 >= lba_map[lba_index + 1].0
+                    {
+                        lba_index += 1;
+                        current_msf_offset = lba_map[lba_index].1;
+                    }
+
+
+
+                    rebuild_sector_simd(
+                        &user_data,
+                        metadata,
+                        *sector_type,
+                        sector_idx + current_msf_offset,
+                        exception,
+                    )
+                }
+            };
+
+            let reconstructed_sector = sector_result.map_err(|e| {
+                SpriteShrinkCDError::Reconstruction(e)
+            })?;
+
+            hasher.update(&reconstructed_sector);
+
+            writer.write_all(&reconstructed_sector)?;
+
+            loop_count += 1;
+        }
+
+        data_fetch_handle.join().map_err(|_| ReconstructionError::ThreadPanic(
+            "Chunk fetching thread panicked.".to_string()))?;
+
+        audio_fetch_handle.join().map_err(|_| ReconstructionError::ThreadPanic(
+            "Audio fetching thread panicked.".to_string()))?;
+
+        Ok(())
+    })?;
+
+    let calculated_hash = hasher.finish();
+
+    if calculated_hash == manifest.integrity_hash {
+        writer.flush()?;
+
+        Ok(())
+    } else {
+        let orig_hash_string: String = format!(
+            "{:02x}",
+            manifest.integrity_hash
+        );
+        let calc_hash_string: String = format!(
+            "{:02x}",
+            calculated_hash
+        );
+
+        Err(ReconstructionError::HashMismatchError{
+            orig_hash: orig_hash_string,
+            calc_hash: calc_hash_string
+        }.into())
+    }
 }

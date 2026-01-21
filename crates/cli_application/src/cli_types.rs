@@ -69,12 +69,6 @@ pub struct ChunkMessage<H: Hashable> {
     pub chunk_size: usize
 }
 
-pub struct DiscExceptionBlob {
-    pub title: String,
-    pub exception_index: HashMap<u64, ExceptionInfo>,
-    pub disc_blob: Vec<u8>
-}
-
 
 #[derive(Debug)]
 pub struct DiscCompleteData<H: Hashable> {

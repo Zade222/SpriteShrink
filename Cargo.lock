@@ -1211,6 +1211,7 @@ dependencies = [
  "sprite_shrink",
  "thiserror 2.0.12",
  "tracing",
+ "xxhash-rust",
  "zerocopy",
 ]
 

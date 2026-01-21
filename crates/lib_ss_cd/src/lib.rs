@@ -3,6 +3,11 @@ pub use analyze::{
     FileSizeProvider, analyze_cue_sheets, resolve_file_sector_counts
 };
 
+mod cue_gen;
+pub use cue_gen::{
+    generate_cue_string
+};
+
 mod cue_parser;
 
 mod decode;
@@ -25,7 +30,8 @@ pub use lib_structs::{
     SSMD_UID,
     CueSheet, ContentBlock, DataChunkLayout, DiscManifest,
     ExceptionInfo, ExceptionRegistry, ExceptionType, RleSectorMap, SectorMap,
-    SectorType, SSMDFormatData, SSMDTocEntry, SubHeaderEntry, SubheaderRegistry
+    SectorType, SSMDFormatData, SSMDIndices, SSMDTocEntry, SubHeaderEntry,
+    SubheaderRegistry
 };
 
 mod mapper;
@@ -37,7 +43,8 @@ mod reconstruction;
 pub use reconstruction::{
     ReconstructionError,
     expand_exception_index, expand_sector_map, expand_subheader_map,
-    rebuild_sector_bitwise, rebuild_sector_simd, verify_disc_integrity
+    rebuild_sector_bitwise, rebuild_sector_simd, verify_disc_integrity,
+    write_disc
 };
 
 mod stream;

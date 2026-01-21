@@ -184,8 +184,17 @@ pub fn analyze_data_sector(
         }
         0 =>{
             if *sector == [0u8; 2352] {
+                let zero_type = match sector_type {
+                    SectorType::Mode2Form1 |
+                    SectorType::Mode2Form2 |
+                    SectorType::PregapMode2 => SectorType::ZeroedMode2Data,
+
+                    _ => SectorType::ZeroedMode1Data,
+                };
+
+
                 Ok(SectorAnalysis {
-                    sector_type: SectorType::ZeroedData,
+                    sector_type: zero_type,
                     user_data_range: 0..2352,
                     exception_data: None,
                 })

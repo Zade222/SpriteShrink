@@ -8,6 +8,7 @@ use crate::{
     mapper::MapperError,
     decode::DecodeError,
     reconstruction::ReconstructionError,
+    util::UtilError,
 };
 
 #[derive(Error, Debug)]
@@ -38,4 +39,7 @@ pub enum SpriteShrinkCDError {
 
     #[error("Reconstruction error: {0}")]
     Reconstruction(#[from] ReconstructionError),
+
+    #[error("Library utility error: {0}")]
+    Util(#[from] UtilError),
 }

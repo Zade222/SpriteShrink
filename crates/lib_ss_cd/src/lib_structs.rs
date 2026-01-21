@@ -354,7 +354,8 @@ pub enum SectorType {
     PregapMode2Exception,
     PregapAudio,
     ZeroedAudio,
-    ZeroedData,
+    ZeroedMode1Data,
+    ZeroedMode2Data,
     None
 }
 
@@ -374,7 +375,8 @@ impl SectorType {
             SectorType::PregapMode2Exception => 2048,
             SectorType::PregapAudio => 2352,
             SectorType::ZeroedAudio => 2352,
-            SectorType::ZeroedData => 2352,
+            SectorType::ZeroedMode1Data => 2352,
+            SectorType::ZeroedMode2Data => 2352,
             SectorType::None => 0
         }
     }
@@ -388,6 +390,17 @@ impl SectorType {
             SectorType::PregapMode2Exception => 296,
             _ => 0
         }
+    }
+
+    pub fn is_pregap(&self) -> bool {
+        matches!(
+            self,
+            SectorType::PregapAudio
+                | SectorType::PregapMode1
+                | SectorType::PregapMode1Exception
+                | SectorType::PregapMode2
+                | SectorType::PregapMode2Exception
+        )
     }
 }
 
@@ -425,10 +438,10 @@ impl SSMDFormatData {
         let data_dict_offset = man_offset + man_length as u64;
         let enc_chunk_idx_offset = data_dict_offset + data_dict_length;
         let enc_audio_idx_offset = enc_chunk_idx_offset + enc_chunk_idx_length;
-        let enc_except_idx_offset = enc_audio_idx_offset + enc_excep_index_length;
-        let subheader_tbl_offset = enc_except_idx_offset + enc_audio_idx_length;
+        let enc_except_idx_offset = enc_audio_idx_offset + enc_audio_idx_length;
+        let subheader_tbl_offset = enc_except_idx_offset + enc_excep_index_length;
         let exception_data_offset = subheader_tbl_offset + subheader_tbl_size;
-        let audio_data_offset = exception_data_offset + subheader_tbl_size;
+        let audio_data_offset = exception_data_offset + exception_data_length;
         let data_offset = audio_data_offset + audio_data_length;
 
         SSMDFormatData {
@@ -470,6 +483,13 @@ impl SSMDFormatData {
 }
 
 
+pub struct SSMDIndices<H> {
+    pub chunk_index: HashMap<H, ChunkLocation>,
+    pub audio_block_index: HashMap<H, ChunkLocation>,
+    pub exception_index: Vec<u64>,
+}
+
+
 #[derive(Decode, Encode, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SSMDTocEntry {
     pub filename: String,
@@ -505,6 +525,45 @@ pub struct Track {
 pub struct TrackIndex {
     pub number: u8,
     pub position: MsfTime,
+}
+
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum TrackMode {
+    Audio,
+    Mode1,
+    Mode2,
+}
+
+impl TrackMode {
+    pub fn from_sector_type(st: SectorType) -> Option<Self> {
+        match st {
+            SectorType::Audio | SectorType::PregapAudio | SectorType::ZeroedAudio => {
+                Some(TrackMode::Audio)
+            }
+            SectorType::Mode1
+            | SectorType::PregapMode1
+            | SectorType::Mode1Exception
+            | SectorType::PregapMode1Exception
+            | SectorType::ZeroedMode1Data=> Some(TrackMode::Mode1),
+            SectorType::Mode2Form1
+            | SectorType::PregapMode2
+            | SectorType::Mode2Form1Exception
+            | SectorType::PregapMode2Exception
+            | SectorType::Mode2Form2
+            | SectorType::Mode2Form2Exception
+            | SectorType::ZeroedMode2Data=> Some(TrackMode::Mode2),
+            SectorType::None => None,
+        }
+    }
+
+    pub fn to_cue_type_string(&self) -> &'static str {
+        match self {
+            TrackMode::Audio => "AUDIO",
+            TrackMode::Mode1 => "MODE1/2352",
+            TrackMode::Mode2 => "MODE2/2352",
+        }
+    }
 }
 
 

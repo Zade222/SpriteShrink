@@ -165,7 +165,8 @@ pub fn analyze_and_map_disc(
 
         let coarse_type = match track.track_type {
             TrackType::Audio => SectorType::Audio,
-            TrackType::Mode1_2352 | TrackType::Mode2_2352 => SectorType::Mode1,
+            TrackType::Mode1_2352 => SectorType::Mode1,
+            TrackType::Mode2_2352 => SectorType::Mode2Form1
         };
 
         for i in content_start..next_track_start {
@@ -188,6 +189,7 @@ pub fn analyze_and_map_disc(
     for i in 0..total_sectors {
         let sector_data = provider.read_sector(i)?;
         if sectors[i as usize] == SectorType::Mode1 ||
+            sectors[i as usize] == SectorType::Mode2Form1 ||
             sectors[i as usize] == SectorType::PregapMode1 ||
             sectors[i as usize] == SectorType::PregapMode2
         {
@@ -345,7 +347,6 @@ fn normalize_cue_sheet(
         ))
     }
 
-    //let cue_type = detect_cue_type(source_sheet);
     let mut normalized_tracks = Vec::new();
     let mut file_start_offset: u32 = 0;
 
@@ -353,12 +354,6 @@ fn normalize_cue_sheet(
         for track in &file.tracks {
             let mut new_track = track.clone();
             new_track.indices.clear();
-
-            /*let offset = if cue_type == CueSheetType::Relative {
-                file_start_offset
-            } else {
-                0
-            };*/
 
             let offset = file_start_offset;
 
@@ -373,9 +368,7 @@ fn normalize_cue_sheet(
             normalized_tracks.push(new_track);
         }
 
-        //if cue_type == CueSheetType::Relative {
         file_start_offset += file_sec_count[file_idx];
-        //}
     }
 
     Ok(CueSheet {

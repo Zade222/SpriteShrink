@@ -569,7 +569,7 @@ pub struct TempCache<H: Hash + Eq> {
     backend: Arc<Mutex<CacheBackend<H>>>,
 }
 
-impl<H: Hash + Eq + Copy + Display + Send + Sync + 'static> TempCache<H> {
+impl<H: Copy + Display + Eq + Hash + Ord + Send + Sync + 'static> TempCache<H> {
     pub fn new(file_path: PathBuf, use_in_memory: bool) -> io::Result<Self> {
         let backend = if use_in_memory {
 
@@ -687,7 +687,7 @@ impl<H: Hash + Eq + Copy + Display + Send + Sync + 'static> TempCache<H> {
     pub fn get_keys(&self) -> Result<Vec<H>, CliError> {
         let backend_guard = self.backend.lock().unwrap();
 
-        let keys = match &*backend_guard {
+        let mut keys: Vec<H> = match &*backend_guard {
             CacheBackend::InMemory{map, ..} => {
                 map.iter()
                 .map(|entry| *entry.key())
@@ -700,6 +700,8 @@ impl<H: Hash + Eq + Copy + Display + Send + Sync + 'static> TempCache<H> {
                     .collect()
             }
         };
+
+        keys.sort();
 
         Ok(keys)
     }
