@@ -1,6 +1,7 @@
 name: Release Binaries and Library
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - 'v*.*.*'
