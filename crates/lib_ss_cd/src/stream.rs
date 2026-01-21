@@ -2,18 +2,19 @@ use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::PathBuf;
 
-use thiserror::Error;
+//use thiserror::Error;
 
 
 use crate::lib_structs::{
     SectorMap, SectorType
 };
 
+/*
 #[derive(Error, Debug)]
 pub enum StreamError {
     #[error(transparent)]
     Io(#[from] io::Error),
-}
+}*/
 
 /// A stream that provides a unified `Read` and `Seek` interface over multiple
 /// underlying `.bin` files.

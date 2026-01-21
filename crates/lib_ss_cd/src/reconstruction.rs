@@ -1,5 +1,11 @@
 use std::{
-    collections::{HashMap, VecDeque}, fmt::Display, fs::File, hash::Hasher, io::{BufWriter, Read, Write}, sync::{Arc, Condvar, Mutex}, thread::scope
+    collections::VecDeque,
+    fmt::Display,
+    fs::File,
+    hash::Hasher,
+    io::{BufWriter, Write},
+    sync::{Arc, Condvar, Mutex},
+    thread::scope
 };
 
 #[cfg(unix)]
@@ -12,9 +18,8 @@ use crate::{
     ecc::{calc_ecc_simd_inplace, calc_ecc_bitwise, calculate_edc},
     lib_error_handling::SpriteShrinkCDError,
     lib_structs::{
-        DecodedSectorInfo, DiscManifest, ExceptionInfo, IntMap, MsfTime,
-        ReconstructionContext, ReconstructionInfo, RleSectorMap, SectorType,
-        SSMDIndices, StreamChunkInfo, SubHeaderEntry
+        DiscManifest, MsfTime, RleSectorMap, SectorType, SSMDIndices,
+        SubHeaderEntry
     },
     util::{
         SharedBuffer,
@@ -23,7 +28,6 @@ use crate::{
     },
 };
 
-use dashmap::mapref::entry;
 use flume::{
     bounded,
 };
@@ -69,92 +73,6 @@ pub enum ReconstructionError {
 }
 
 
-impl<H: Copy + Eq> DiscManifest<H> {
-    fn build_stream_info(
-        &self,
-        sector_info: &DecodedSectorInfo
-    ) -> Option<ReconstructionInfo<H>> {
-        let target_stream_offset = sector_info.stream_offset;
-
-        let target_user_data_len = sector_info.sector_type.data_size();
-
-
-        if target_user_data_len == 0 { return None; }
-
-        let mut needed_chunks = Vec::new();
-        let mut bytes_remaining_in_sector = target_user_data_len;
-        let mut current_search_offset = target_stream_offset;
-        let mut chunk_stream_offset = 0u64;
-
-        for chunk_layout in &self.data_stream_layout {
-            let chunk_start = chunk_stream_offset;
-            let chunk_end = chunk_stream_offset + chunk_layout.uncomp_len as u64;
-
-            if chunk_start < (
-                current_search_offset + bytes_remaining_in_sector as u64
-            ) && chunk_end > current_search_offset {
-                let overlap_start_in_stream = current_search_offset
-                    .max(chunk_start);
-
-                let overlap_end_in_stream = (
-                    target_stream_offset + target_user_data_len as u64
-                    ).min(chunk_end);
-                let overlap_len = (
-                    overlap_end_in_stream - overlap_start_in_stream
-                ) as u32;
-
-                needed_chunks.push(StreamChunkInfo {
-                    chunk_hash: chunk_layout.hash,
-                    read_from_offset: (
-                        overlap_start_in_stream - chunk_start
-                    ) as u32,
-                    read_length: overlap_len,
-                });
-
-                bytes_remaining_in_sector -= overlap_len as u16;
-                current_search_offset += overlap_len as u64;
-                if bytes_remaining_in_sector == 0 {
-                    break;
-                }
-            }
-
-            chunk_stream_offset = chunk_end;
-        }
-
-        if needed_chunks.is_empty() {
-            None
-        } else {
-            Some(ReconstructionInfo::FromStream { chunks: needed_chunks })
-        }
-    }
-}
-
-fn build_decoded_map(rle_map: &RleSectorMap) -> Vec<DecodedSectorInfo> {
-    let total_sectors: usize = rle_map.runs
-        .iter()
-        .map(|(count, _)| *count as usize)
-        .sum();
-
-    let mut map = Vec::with_capacity(total_sectors);
-    let mut current_stream_offset = 0u64;
-
-    for (run_count, run_type) in &rle_map.runs {
-        let user_data_size = run_type.data_size() as u64;
-        for _ in 0..*run_count {
-            map.push(DecodedSectorInfo {
-                sector_type: *run_type,
-                stream_offset: current_stream_offset,
-            });
-
-            if user_data_size > 0 {
-                current_stream_offset += user_data_size;
-            }
-        }
-    }
-    map
-}
-
-
 pub fn expand_exception_index(
     excep_idx: &[(u32, u32)],
     total_sectors: usize
@@ -172,7 +90,7 @@ pub fn expand_exception_index(
 pub fn expand_sector_map(rle_map: &RleSectorMap) -> Vec<SectorType> {
     let mut sectors = Vec::new();
     for (count, s_type) in &rle_map.runs {
-        sectors.extend(std::iter::repeat(*s_type).take(*count as usize));
+        sectors.extend(std::iter::repeat_n(*s_type, *count as usize));
     }
     sectors
 }
@@ -194,53 +112,6 @@ pub fn expand_subheader_map(
     };
 
     metadata_map
-}
-
-
-impl<'a, H: Copy + Eq> ReconstructionContext<'a, H> {
-    pub fn new(manifest: &'a DiscManifest<H>) -> Self {
-        let decoded_map = build_decoded_map(&manifest.rle_sector_map);
-
-        Self {manifest, decoded_map}
-    }
-
-    pub fn get_reconstruction_info(
-        &self,
-        target_sector: u32,
-    ) -> Option<ReconstructionInfo<H>> {
-        let sector_info = self.decoded_map.get(target_sector as usize)?;
-
-        match sector_info.sector_type {
-            SectorType::Audio | SectorType::PregapAudio => {
-                for block in &self.manifest.audio_block_map {
-                    if target_sector >= block.start_sector &&
-                        target_sector < (
-                            block.start_sector + block.sector_count
-                        )
-                    {
-                        let offset_in_block = (
-                            target_sector - block.start_sector
-                        ) * 2352;
-
-                        return Some(ReconstructionInfo::FromBlock {
-                            content_hash: block.content_hash,
-                            offset_in_block,
-                        });
-                    }
-                }
-                None
-            }
-            SectorType::Mode1 | SectorType::Mode1Exception |
-                SectorType::Mode2Form1 | SectorType::Mode2Form1Exception |
-                SectorType::Mode2Form2 | SectorType::Mode2Form2Exception =>
-            {
-                self.manifest.build_stream_info(
-                    sector_info
-                )
-            }
-            _ => Some(ReconstructionInfo::None),
-        }
-    }
 }
 
 

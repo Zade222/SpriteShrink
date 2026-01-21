@@ -64,13 +64,11 @@ pub fn analyze_data_sector(
                 if sector_type == SectorType::PregapMode1 {
                     Ok(SectorAnalysis {
                         sector_type: SectorType::PregapMode1,
-                        user_data_range: 16..2064,
                         exception_data: None
                     })
                 } else {
                     Ok(SectorAnalysis {
                         sector_type: SectorType::Mode1,
-                        user_data_range: 16..2064,
                         exception_data: None
                     })
                 }
@@ -89,13 +87,11 @@ pub fn analyze_data_sector(
                 if sector_type == SectorType::PregapMode1 {
                     Ok(SectorAnalysis {
                         sector_type: SectorType::PregapMode1Exception,
-                        user_data_range: 16..2064,
                         exception_data: Some(meta_data_vec)
                     })
                 } else {
                     Ok(SectorAnalysis {
                         sector_type: SectorType::Mode1Exception,
-                        user_data_range: 16..2064,
                         exception_data: Some(meta_data_vec)
                     })
                 }
@@ -116,7 +112,6 @@ pub fn analyze_data_sector(
                 ) {
                     Ok(SectorAnalysis {
                         sector_type: SectorType::Mode2Form2,
-                        user_data_range: 24..2348,
                         exception_data: None
                     })
                 } else {
@@ -130,7 +125,6 @@ pub fn analyze_data_sector(
 
                     Ok(SectorAnalysis {
                         sector_type: SectorType::Mode2Form2Exception,
-                        user_data_range: 24..2348,
                         exception_data: Some(meta_data_vec)
                     })
                 }
@@ -147,13 +141,11 @@ pub fn analyze_data_sector(
                 if sector_type == SectorType::PregapMode2 {
                     Ok(SectorAnalysis {
                         sector_type: SectorType::PregapMode2,
-                        user_data_range: 24..2072,
                         exception_data: None
                     })
                 } else {
                     Ok(SectorAnalysis {
                         sector_type: SectorType::Mode2Form1,
-                        user_data_range: 24..2072,
                         exception_data: None
                     })
                 }
@@ -170,13 +162,11 @@ pub fn analyze_data_sector(
                 if sector_type == SectorType::PregapMode2 {
                     Ok(SectorAnalysis {
                         sector_type: SectorType::PregapMode2Exception,
-                        user_data_range: 24..2072,
                         exception_data: Some(meta_data_vec),
                     })
                 } else {
                     Ok(SectorAnalysis {
                         sector_type: SectorType::Mode2Form1Exception,
-                        user_data_range: 24..2072,
                         exception_data: Some(meta_data_vec),
                     })
                 }
@@ -195,7 +185,6 @@ pub fn analyze_data_sector(
 
                 Ok(SectorAnalysis {
                     sector_type: zero_type,
-                    user_data_range: 0..2352,
                     exception_data: None,
                 })
             } else {

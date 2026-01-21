@@ -2,7 +2,7 @@ use std::fmt::Write;
 
 use sprite_shrink::Hashable;
 
-use crate::lib_structs::{DiscManifest, MsfTime, SectorType, TrackMode};
+use crate::lib_structs::{DiscManifest, MsfTime, TrackMode};
 
 pub fn generate_cue_string<H: Hashable>(
     manifest: &DiscManifest<H>,

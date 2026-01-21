@@ -1,6 +1,5 @@
 use std::{
     borrow::Cow,
-    collections::HashMap,
     io::{self, Read, Seek},
     iter::repeat_n,
 };
@@ -13,7 +12,7 @@ use crate::lib_error_handling::SpriteShrinkCDError;
 
 use crate::lib_structs::{
     ContentBlock, CueFile, CueSheet, ExceptionRegistry, ExceptionType, MsfTime,
-    RleSectorMap, SectorAnalysis, SectorMap, SectorMapResult, SectorType,
+    RleSectorMap, SectorMap, SectorMapResult, SectorType,
     SubHeaderEntry, SubheaderRegistry, Track, TrackType
 };
 

@@ -1,9 +1,7 @@
 use std::{
     collections::HashMap,
     fmt,
-    hash::{Hasher, BuildHasherDefault},
     mem,
-    ops::Range,
     sync::atomic::{AtomicU16, AtomicU32, Ordering,}
 };
 
@@ -82,13 +80,6 @@ impl fmt::Display for CueSheet {
 pub struct DataChunkLayout<H> {
     pub hash: H,
     pub uncomp_len: u32,
-}
-
-
-#[derive(Clone, Copy, Debug)]
-pub struct DecodedSectorInfo {
-    pub sector_type: SectorType,
-    pub stream_offset: u64,
 }
 
 
@@ -192,32 +183,6 @@ impl ExceptionType {
 }
 
 
-pub struct IdentityHasher {
-    hash: u64,
-}
-
-
-impl Hasher for IdentityHasher {
-    fn write(&mut self, _: &[u8]) {
-        panic!("IdentityHasher only supports primitive integer types");
-    }
-    fn write_u64(&mut self, i: u64) {
-        self.hash = i;
-    }
-    fn write_u32(&mut self, i: u32) {
-        self.hash = i as u64;
-    }
-    fn write_usize(&mut self, i: usize) {
-        self.hash = i as u64;
-    }
-    fn finish(&self) -> u64 {
-        self.hash
-    }
-}
-
-pub type IntMap<K, V> = HashMap<K, V, BuildHasherDefault<IdentityHasher>>;
-
-
 pub struct SubheaderRegistry {
     map: DashMap<[u8; 8], u16>,
     next_id: AtomicU16,
@@ -292,26 +257,6 @@ impl fmt::Display for MsfTime {
 }
 
 
-pub struct ReconstructionContext<'a, H> {
-    pub manifest: &'a DiscManifest<H>,
-    pub decoded_map: Vec<DecodedSectorInfo>,
-}
-
-
-pub enum ReconstructionInfo<H> {
-    FromBlock {
-        content_hash: H,
-        offset_in_block: u32,
-    },
-
-    FromStream {
-        chunks: Vec<StreamChunkInfo<H>>,
-    },
-
-    None,
-}
-
-
 #[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
 pub struct RleSectorMap {
     pub runs: Vec<(u32, SectorType)>,
@@ -320,7 +265,6 @@ pub struct RleSectorMap {
 
 pub struct SectorAnalysis{
     pub sector_type: SectorType,
-    pub user_data_range: Range<usize>,
     pub exception_data: Option<Vec<u8>>,
 }
 
@@ -498,13 +442,6 @@ pub struct SSMDTocEntry {
 }
 
 
-pub struct StreamChunkInfo<H> {
-    pub chunk_hash: H,
-    pub read_from_offset: u32,
-    pub read_length: u32,
-}
-
-
 #[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
 pub struct SubHeaderEntry {
     pub start_lba: u32,
@@ -557,7 +494,7 @@ impl TrackMode {
         }
     }
 
-    pub fn to_cue_type_string(&self) -> &'static str {
+    pub fn to_cue_type_string(self) -> &'static str {
         match self {
             TrackMode::Audio => "AUDIO",
             TrackMode::Mode1 => "MODE1/2352",

@@ -16,8 +16,8 @@ use crate::{
 
 #[derive(Error, Debug)]
 pub enum DecodeError {
-    #[error("Failed to decode index: {0}")]
-    IndexDecodeError(String),
+    //#[error("Failed to decode index: {0}")]
+    //IndexDecodeError(String),
 
     #[error("Failed to decode {data}: {error}")]
     MetadataDecode{ data: String, error: String },
@@ -25,8 +25,8 @@ pub enum DecodeError {
     #[error("Format data is malformed. {0}")]
     InvalidFormatData(String),
 
-    #[error("Failed to decode file manifest: {0}")]
-    ManifestDecodeError(String),
+    //#[error("Failed to decode file manifest: {0}")]
+    //ManifestDecodeError(String),
 }
 
 pub fn decode_ssmd_format_data(
