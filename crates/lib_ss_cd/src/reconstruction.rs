@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{VecDeque},
     fmt::Display,
     fs::File,
     hash::Hasher,
@@ -8,18 +8,13 @@ use std::{
     thread::scope
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
-
 use crate::{
     analyze::SYNC_PATTERN,
     ecc::{calc_ecc_simd_inplace, calc_ecc_bitwise, calculate_edc},
     lib_error_handling::SpriteShrinkCDError,
     lib_structs::{
-        DiscManifest, MsfTime, RleSectorMap, SectorType, SSMDIndices,
-        SubHeaderEntry
+        DecodedSectorInfo, DiscManifest, MsfTime, RleSectorMap,
+        SectorType, SSMDIndices, SubHeaderEntry
     },
     util::{
         SharedBuffer,
@@ -33,7 +28,7 @@ use flume::{
 };
 use sha2::{Digest,Sha512};
 use sprite_shrink::{
-    Hashable
+    Hashable,
 };
 use thiserror::Error;
 use xxhash_rust::xxh3::Xxh3;
@@ -70,6 +65,32 @@ pub enum ReconstructionError {
 
     #[error("Reconstruction failure.")]
     ReconstructionFailure,
+}
+
+
+pub fn build_decoded_map(rle_map: &RleSectorMap) -> Vec<DecodedSectorInfo> {
+    let total_sectors: usize = rle_map.runs
+        .iter()
+        .map(|(count, _)| *count as usize)
+        .sum();
+
+    let mut map = Vec::with_capacity(total_sectors);
+    let mut current_stream_offset = 0u64;
+
+    for (run_count, run_type) in &rle_map.runs {
+        let user_data_size = run_type.data_size() as u64;
+        for _ in 0..*run_count {
+            map.push(DecodedSectorInfo {
+                sector_type: *run_type,
+                stream_offset: current_stream_offset,
+            });
+
+            if user_data_size > 0 {
+                current_stream_offset += user_data_size;
+            }
+        }
+    }
+    map
 }
 
 

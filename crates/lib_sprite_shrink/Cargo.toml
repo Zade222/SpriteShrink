@@ -17,7 +17,7 @@ fastcdc = { version = "3.2", default-features = false }
 flume = { version = "0.11", default-features = false }
 libc =  { version = "0.2.174", default-features = false }
 rayon = { version = "1.10", default-features = false }
-serde = { version = "1.0", default-features = false, features = ["derive"] }
+serde = { version = "1.0", default-features = false, features = ["derive",  "std"] }
 sha2 = { version = "0.10", default-features = false}
 thiserror = { version = "2.0", default-features = false}
 xxhash-rust = { version = "0.8", default-features = false, features = ["xxh3"] }

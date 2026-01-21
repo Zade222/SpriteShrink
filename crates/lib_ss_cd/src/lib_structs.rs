@@ -1,15 +1,34 @@
 use std::{
     collections::HashMap,
-    fmt,
+    fmt::{self, Display, Formatter},
+    fs::File,
     mem,
     sync::atomic::{AtomicU16, AtomicU32, Ordering,}
+};
+
+#[cfg(unix)]
+use std::os::unix::fs::FileExt;
+#[cfg(windows)]
+use std::os::windows::fs::FileExt;
+
+use crate::{
+    flac::decompress_flac_block,
+    lib_error_handling::SpriteShrinkCDError,
+    reconstruction::{
+        ReconstructionError,
+        build_decoded_map, expand_exception_index, expand_sector_map,
+        expand_subheader_map, rebuild_sector_simd
+    },
 };
 
 use bitcode::{Decode, Encode};
 use bytemuck::{Pod, Zeroable};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
-use sprite_shrink::{ChunkLocation, FileRegion};
+use sprite_shrink::{
+    ChunkLocation, FileRegion, Hashable,
+    decompress_chunk
+};
 use zerocopy::{Immutable, IntoBytes, FromBytes};
 
 
@@ -55,8 +74,8 @@ impl CueSheet {
     }
 }
 
-impl fmt::Display for CueSheet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for CueSheet {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         for file in &self.files {
             writeln!(f, "FILE \"{}\" BINARY", file.name)?;
 
@@ -83,6 +102,13 @@ pub struct DataChunkLayout<H> {
 }
 
 
+#[derive(Clone, Copy, Debug)]
+pub struct DecodedSectorInfo {
+    pub sector_type: SectorType,
+    pub stream_offset: u64,
+}
+
+
 pub struct DecodedSSMDMetadata<H> {
     pub disc_manifests:     Vec<DiscManifest<H>>,
     pub data_dictionary:    Vec<u8>,
@@ -102,6 +128,274 @@ pub struct DiscManifest<H> {
     pub subheader_index: Vec<SubHeaderEntry>,
     pub disc_exception_index: Vec<(u32, u32)>,
     pub integrity_hash: u64,
+}
+
+
+impl<H: Copy + Eq> DiscManifest<H> {
+    pub fn build_stream_info(
+        &self,
+        sector_info: &DecodedSectorInfo
+    ) -> Option<ReconstructionInfo<H>> {
+        let target_stream_offset = sector_info.stream_offset;
+
+        let target_user_data_len = sector_info.sector_type.data_size();
+
+
+        if target_user_data_len == 0 { return None; }
+
+        let mut needed_chunks = Vec::new();
+        let mut bytes_remaining_in_sector = target_user_data_len;
+        let mut current_search_offset = target_stream_offset;
+        let mut chunk_stream_offset = 0u64;
+
+        for chunk_layout in &self.data_stream_layout {
+            let chunk_start = chunk_stream_offset;
+            let chunk_end = chunk_stream_offset + chunk_layout.uncomp_len as u64;
+
+            if chunk_start < (
+                current_search_offset + bytes_remaining_in_sector as u64
+            ) && chunk_end > current_search_offset {
+                let overlap_start_in_stream = current_search_offset
+                    .max(chunk_start);
+
+                let overlap_end_in_stream = (
+                    target_stream_offset + target_user_data_len as u64
+                    ).min(chunk_end);
+                let overlap_len = (
+                    overlap_end_in_stream - overlap_start_in_stream
+                ) as u32;
+
+                needed_chunks.push(StreamChunkInfo {
+                    chunk_hash: chunk_layout.hash,
+                    read_from_offset: (
+                        overlap_start_in_stream - chunk_start
+                    ) as u32,
+                    read_length: overlap_len,
+                });
+
+                bytes_remaining_in_sector -= overlap_len as u16;
+                current_search_offset += overlap_len as u64;
+                if bytes_remaining_in_sector == 0 {
+                    break;
+                }
+            }
+
+            chunk_stream_offset = chunk_end;
+        }
+
+        if needed_chunks.is_empty() {
+            None
+        } else {
+            Some(ReconstructionInfo::FromStream {
+                chunks: needed_chunks
+            })
+        }
+    }
+}
+
+
+pub struct DiscReconstructor<'a, H> {
+    manifest: &'a DiscManifest<H>,
+    indices: &'a SSMDIndices<H>,
+    dictionary: &'a [u8],
+    archive_file: &'a File,
+    exception_blob: &'a [u8],
+    subheader_table: &'a [[u8; 8]],
+
+    context: ReconstructionContext<'a, H>,
+
+    expanded_subheader_map: Vec<Option<u16>>,
+    expanded_exception_map: Vec<Option<u32>>,
+    expanded_sector_types: Vec<SectorType>,
+}
+
+impl<'a, H> DiscReconstructor<'a, H>
+where
+    H: Hashable + Display + Copy + Eq,
+{
+    pub fn new(
+        manifest: &'a DiscManifest<H>,
+        indices: &'a SSMDIndices<H>,
+        dictionary: &'a [u8],
+        archive_file: &'a File,
+        exception_blob: &'a [u8],
+        subheader_table: &'a [[u8; 8]],
+    ) -> Self {
+        let context = ReconstructionContext::new(manifest);
+
+        let expanded_sector_types = expand_sector_map(
+            &manifest.rle_sector_map
+        );
+        let total_sectors = expanded_sector_types.len();
+
+        let expanded_subheader_map = expand_subheader_map(
+            &manifest.subheader_index,
+            total_sectors
+        );
+        let expanded_exception_map = expand_exception_index(
+            &manifest.disc_exception_index,
+            total_sectors
+        );
+
+        Self {
+            manifest,
+            indices,
+            dictionary,
+            archive_file,
+            exception_blob,
+            subheader_table,
+            context,
+            expanded_subheader_map,
+            expanded_exception_map,
+            expanded_sector_types,
+        }
+    }
+
+    /// Reads and reconstructs a specific sector by its index
+    /// (0-based from start of disc).
+    pub fn get_sector_data(
+        &self, sector_idx: u32
+    ) -> Result<[u8; 2352], SpriteShrinkCDError> {
+        let sector_idx_usize = sector_idx as usize;
+
+        if sector_idx_usize >= self.expanded_sector_types.len() {
+            return Err(SpriteShrinkCDError::Reconstruction(
+                ReconstructionError::InternalError(format!(
+                    "Sector index {} out of bounds (max {})",
+                    sector_idx,
+                    self.expanded_sector_types.len() - 1
+                ))
+            ));
+        }
+
+        let sector_type = self.expanded_sector_types[sector_idx_usize];
+
+        let reconstruction_info = self.context.get_reconstruction_info(
+            sector_idx
+        );
+        let mut sector_data = [0u8; 2352];
+
+        let read_chunk_data = |
+            offset: u64,
+            len: usize
+        | -> Result<Vec<u8>, SpriteShrinkCDError> {
+            let mut buf = vec![0u8; len];
+            #[cfg(unix)]
+            self.archive_file.read_at(&mut buf, offset)?;
+            #[cfg(windows)]
+            self.archive_file.seek_read(&mut buf, offset)?;
+            Ok(buf)
+        };
+
+        match reconstruction_info {
+            Some(ReconstructionInfo::FromBlock {
+                content_hash,
+                offset_in_block
+            }) => {
+                let chunk_loc = self.indices.audio_block_index.get(&content_hash)
+                    .ok_or_else(|| ReconstructionError::InternalError(
+                        format!("Missing audio hash {}", content_hash)
+                    ))?;
+
+                let comp_data = read_chunk_data(
+                    chunk_loc.offset,
+                    chunk_loc.compressed_length as usize
+                )?;
+                let decomp = decompress_flac_block(&comp_data)
+                    .map_err(|e| SpriteShrinkCDError::External(Box::new(e)))?;
+
+                let start = offset_in_block as usize;
+                let end = start + 2352;
+                if decomp.len() < end {
+                    return Err(ReconstructionError::InternalError(
+                        "Audio block too short for requested sector".into()
+                    ).into());
+                }
+                sector_data.copy_from_slice(&decomp[start..end]);
+            },
+            Some(ReconstructionInfo::FromStream { chunks }) => {
+                let mut write_cursor: usize = 0;
+                for chunk in chunks {
+                    let chunk_loc = self.indices.chunk_index.get(
+                        &chunk.chunk_hash
+                    ).ok_or_else(|| ReconstructionError::InternalError(
+                        format!("Missing data hash {}", chunk.chunk_hash)
+                    ))?;
+
+                    let comp_data = read_chunk_data(
+                        chunk_loc.offset,
+                        chunk_loc.compressed_length as usize
+                    )?;
+                    let decomp = decompress_chunk(
+                        &comp_data,
+                        self.dictionary
+                    ).map_err(|e| SpriteShrinkCDError::External(Box::new(e)))?;
+
+                    let start = chunk.read_from_offset as usize;
+                    let len = chunk.read_length as usize;
+                    if decomp.len() < start + len {
+                        return Err(ReconstructionError::InternalError(
+                            "Data chunk too short for requested slice".into()
+                        ).into());
+                    }
+
+                    let target_slice = &mut sector_data[
+                        write_cursor..write_cursor + len
+                    ];
+                    target_slice.copy_from_slice(&decomp[start..start + len]);
+                    write_cursor += len;
+                }
+            },
+            Some(ReconstructionInfo::None) | None => {
+                //Data already zeroed
+            }
+        }
+
+        if matches!(sector_type, SectorType::Audio |
+            SectorType::PregapAudio | SectorType::ZeroedAudio
+        ) {
+            return Ok(sector_data);
+        }
+
+
+        let exception = self.expanded_exception_map[sector_idx_usize]
+            .map(|excep_id| {
+                let offset = self.indices.exception_index[excep_id as usize] as usize;
+                let size = sector_type.excep_size();
+                &self.exception_blob[offset..offset + size]
+            });
+
+        let metadata = self.expanded_subheader_map[sector_idx_usize]
+            .map(|did| &self.subheader_table[did as usize])
+            .ok_or(ReconstructionError::MissingSubheader(sector_idx_usize))?;
+
+        let lba_map = &self.manifest.lba_map;
+        let mut current_msf_offset = lba_map[0].1;
+        let mut lba_index = 0;
+
+        while lba_index < lba_map.len() - 1 {
+            let next_threshold = lba_map[lba_index + 1].0;
+            if (sector_idx + current_msf_offset) >= next_threshold {
+                lba_index += 1;
+                current_msf_offset = lba_map[lba_index].1;
+            } else {
+                break;
+            }
+        }
+        let lba = sector_idx + current_msf_offset;
+
+        let user_data_len = sector_type.data_size() as usize;
+
+        let rebuilt_sector = rebuild_sector_simd(
+            &sector_data[..user_data_len],
+            metadata,
+            sector_type,
+            lba,
+            exception,
+        ).map_err(SpriteShrinkCDError::Reconstruction)?;
+
+        Ok(rebuilt_sector)
+    }
 }
 
 
@@ -250,8 +544,8 @@ impl MsfTime {
     }
 }
 
-impl fmt::Display for MsfTime {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for MsfTime {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{:02}:{:02}:{:02}", self.minute, self.second, self.frame)
     }
 }
@@ -260,6 +554,73 @@ impl fmt::Display for MsfTime {
 #[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
 pub struct RleSectorMap {
     pub runs: Vec<(u32, SectorType)>,
+}
+
+
+pub struct ReconstructionContext<'a, H> {
+    pub manifest: &'a DiscManifest<H>,
+    pub decoded_map: Vec<DecodedSectorInfo>,
+}
+
+
+impl<'a, H: Copy + Eq> ReconstructionContext<'a, H> {
+    pub fn new(manifest: &'a DiscManifest<H>) -> Self {
+        let decoded_map = build_decoded_map(&manifest.rle_sector_map);
+
+        Self {manifest, decoded_map}
+    }
+
+    pub fn get_reconstruction_info(
+        &self,
+        target_sector: u32,
+    ) -> Option<ReconstructionInfo<H>> {
+        let sector_info = self.decoded_map.get(target_sector as usize)?;
+
+        match sector_info.sector_type {
+            SectorType::Audio | SectorType::PregapAudio => {
+                for block in &self.manifest.audio_block_map {
+                    if target_sector >= block.start_sector &&
+                        target_sector < (
+                            block.start_sector + block.sector_count
+                        )
+                    {
+                        let offset_in_block = (
+                            target_sector - block.start_sector
+                        ) * 2352;
+
+                        return Some(ReconstructionInfo::FromBlock {
+                            content_hash: block.content_hash,
+                            offset_in_block,
+                        });
+                    }
+                }
+                None
+            }
+            SectorType::Mode1 | SectorType::Mode1Exception |
+                SectorType::Mode2Form1 | SectorType::Mode2Form1Exception |
+                SectorType::Mode2Form2 | SectorType::Mode2Form2Exception =>
+            {
+                self.manifest.build_stream_info(
+                    sector_info
+                )
+            }
+            _ => Some(ReconstructionInfo::None),
+        }
+    }
+}
+
+
+pub enum ReconstructionInfo<H> {
+    FromBlock {
+        content_hash: H,
+        offset_in_block: u32,
+    },
+
+    FromStream {
+        chunks: Vec<StreamChunkInfo<H>>,
+    },
+
+    None,
 }
 
 
@@ -442,6 +803,13 @@ pub struct SSMDTocEntry {
 }
 
 
+pub struct StreamChunkInfo<H> {
+    pub chunk_hash: H,
+    pub read_from_offset: u32,
+    pub read_length: u32,
+}
+
+
 #[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
 pub struct SubHeaderEntry {
     pub start_lba: u32,
@@ -511,8 +879,8 @@ pub enum TrackType {
     Mode2_2352,
 }
 
-impl fmt::Display for TrackType {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Display for TrackType {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
             TrackType::Audio => write!(f, "AUDIO"),
             TrackType::Mode1_2352 => write!(f, "MODE1/2352"),

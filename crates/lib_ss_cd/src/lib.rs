@@ -29,9 +29,9 @@ mod lib_structs;
 pub use lib_structs::{
     SSMD_UID,
     CueSheet, ContentBlock, DataChunkLayout, DiscManifest,
-    ExceptionInfo, ExceptionRegistry, ExceptionType, RleSectorMap, SectorMap,
-    SectorType, SSMDFormatData, SSMDIndices, SSMDTocEntry, SubHeaderEntry,
-    SubheaderRegistry
+    ExceptionInfo, ExceptionRegistry, ExceptionType, DiscReconstructor,
+    RleSectorMap, SectorMap, SectorType, SSMDFormatData, SSMDIndices,
+    SSMDTocEntry, SubHeaderEntry, SubheaderRegistry
 };
 
 mod mapper;
