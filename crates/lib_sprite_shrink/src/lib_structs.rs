@@ -90,8 +90,8 @@ pub struct FileHeader {
     pub _pad1:              u8,
     pub format_id:          u16,
     pub _pad2:              [u8; 2],
-    pub enc_toc_offset:         u32,
-    pub enc_toc_length:         u32,
+    pub enc_toc_offset:     u32,
+    pub enc_toc_length:     u32,
     pub format_data_offset: u32,
 }
 
