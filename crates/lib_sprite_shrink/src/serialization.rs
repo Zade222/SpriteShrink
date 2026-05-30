@@ -308,3 +308,157 @@ where
 
     Ok(serialized_data)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::SSAChunkMeta;
+    use std::fmt;
+
+    #[derive(Debug)]
+    struct TestError {
+        message: &'static str,
+        cancelled: bool,
+    }
+
+    impl fmt::Display for TestError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}", self.message)
+        }
+    }
+
+    impl std::error::Error for TestError {}
+
+    impl IsCancelled for TestError {
+        fn is_cancelled(&self) -> bool {
+            self.cancelled
+        }
+    }
+
+    fn manifest_with_chunks(chunks: Vec<SSAChunkMeta<u64>>)
+        -> FileManifestParent<u64>
+    {
+        FileManifestParent {
+            chunk_count: chunks.len() as u64,
+            chunk_metadata: chunks,
+        }
+    }
+
+    #[test]
+    fn dashmap_values_to_vec_clones_all_values() {
+        let map = DashMap::new();
+        map.insert("a", 1u64);
+        map.insert("b", 2u64);
+
+        let mut values = dashmap_values_to_vec(&map);
+        values.sort();
+
+        assert_eq!(values, vec![1, 2]);
+    }
+
+    #[test]
+    fn serialize_store_assigns_offsets_in_hash_order() {
+        let hashes = vec![10u64, 20u64, 30u64];
+
+        let index = serialize_store(&hashes, &|requested: &[u64]| {
+            Ok::<_, TestError>(
+                requested
+                    .iter()
+                    .map(|hash| vec![*hash as u8; (*hash / 10) as usize])
+                    .collect()
+            )
+        })
+        .unwrap();
+
+        assert_eq!(index[&10].offset, 0);
+        assert_eq!(index[&10].compressed_length, 1);
+        assert_eq!(index[&20].offset, 1);
+        assert_eq!(index[&20].compressed_length, 2);
+        assert_eq!(index[&30].offset, 3);
+        assert_eq!(index[&30].compressed_length, 3);
+    }
+
+    #[test]
+    fn serialize_store_rejects_empty_chunk_data() {
+        let err = serialize_store(&[42u64], &|_: &[u64]| {
+            Ok::<_, TestError>(vec![Vec::new()])
+        })
+        .unwrap_err();
+
+        assert!(
+            matches!(err, SerializationError::MissingChunk(message) if message == "42")
+        );
+    }
+
+    #[test]
+    fn serialize_store_wraps_callback_error() {
+        let err = serialize_store(&[42u64], &|_: &[u64]|
+            -> Result<Vec<Vec<u8>>, TestError>
+        {
+            Err(TestError {
+                message: "callback failed",
+                cancelled: false,
+            })
+        })
+        .unwrap_err();
+
+        assert!(
+            matches!(err, SerializationError::External(message) if message == "callback failed")
+        );
+    }
+
+    #[test]
+    fn serialize_uncompressed_data_sorts_toc_and_manifest_by_filename() {
+        let file_manifest = DashMap::new();
+        file_manifest.insert(
+            "zeta.bin".to_string(),
+            manifest_with_chunks(vec![SSAChunkMeta {
+                hash: 2,
+                offset: 0,
+                length: 2,
+            }]),
+        );
+        file_manifest.insert(
+            "alpha.bin".to_string(),
+            manifest_with_chunks(vec![SSAChunkMeta {
+                hash: 1,
+                offset: 0,
+                length: 1,
+            }]),
+        );
+
+        let serialized = serialize_uncompressed_data(
+            &file_manifest,
+            &|| Ok::<_, TestError>(vec![1u64, 2u64]),
+            &|hashes: &[u64]| {
+                Ok::<_, TestError>(
+                    hashes.iter().map(|hash| vec![*hash as u8]).collect()
+                )
+            },
+        )
+        .unwrap();
+
+        assert_eq!(serialized.archive_toc[0].filename, "alpha.bin");
+        assert_eq!(serialized.archive_toc[1].filename, "zeta.bin");
+        assert_eq!(serialized.ser_file_manifest[0].chunk_metadata[0].hash, 1);
+        assert_eq!(serialized.ser_file_manifest[1].chunk_metadata[0].hash, 2);
+    }
+
+    #[test]
+    fn serialize_uncompressed_data_propagates_cancelled_key_callback() {
+        let file_manifest: DashMap<String, FileManifestParent<u64>> =
+            DashMap::new();
+
+        let err = serialize_uncompressed_data(
+            &file_manifest,
+            &|| Err::<Vec<u64>, _>(TestError {
+                message: "cancelled",
+                cancelled: true,
+            }),
+            &|_: &[u64]| Ok::<_, TestError>(Vec::new()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, SpriteShrinkError::Cancelled));
+    }
+}

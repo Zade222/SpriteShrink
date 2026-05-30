@@ -185,3 +185,206 @@ pub fn parse_format_data(
 
     Ok(*parsed_format_data)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lib_structs::{SSAChunkMeta, SSMCFormatData};
+
+    fn valid_header() -> FileHeader {
+        FileHeader::build_file_header(2, 1, 1, 0, 64)
+    }
+
+    // --- Constants ---
+
+    #[test]
+    fn test_magic_number_spells_ssarchv1() {
+        assert_eq!(&MAGIC_NUMBER, b"SSARCHV1");
+    }
+
+    #[test]
+    fn test_ss_seed_has_expected_value() {
+        assert_eq!(SS_SEED, 0x4202803010192019);
+    }
+
+    // --- parse_file_header ---
+
+    #[test]
+    fn test_parse_file_header_succeeds_with_valid_header() {
+        let header = valid_header();
+        let result = parse_file_header(bytemuck::bytes_of(&header)).unwrap();
+        assert_eq!(result.magic_num, MAGIC_NUMBER);
+        assert_eq!(result.file_version, SUPPORTED_VERSION);
+        assert_eq!(result.file_count, 2);
+    }
+
+    #[test]
+    fn test_parse_file_header_rejects_wrong_magic_number() {
+        let mut header = valid_header();
+        header.magic_num = *b"BADMAGIC";
+        let result = parse_file_header(bytemuck::bytes_of(&header));
+        assert!(matches!(result, Err(SpriteShrinkError::Parsing(ParsingError::InvalidHeader(_)))));
+    }
+
+    #[test]
+    fn test_parse_file_header_rejects_newer_file_version() {
+        let mut header = valid_header();
+        header.file_version = SUPPORTED_VERSION + 1;
+        let result = parse_file_header(bytemuck::bytes_of(&header));
+        assert!(matches!(result, Err(SpriteShrinkError::Parsing(ParsingError::InvalidFileVersion()))));
+    }
+
+    #[test]
+    fn test_parse_file_header_accepts_older_file_version() {
+        let mut header = valid_header();
+        header.file_version = SUPPORTED_VERSION - 1;
+        let result = parse_file_header(bytemuck::bytes_of(&header));
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_parse_file_header_accepts_current_file_version() {
+        let header = valid_header();
+        let result = parse_file_header(bytemuck::bytes_of(&header));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().file_version, SUPPORTED_VERSION);
+    }
+
+    #[test]
+    fn test_parse_file_header_rejects_slice_too_small() {
+        let result = parse_file_header(&[0u8; 4]);
+        assert!(matches!(result, Err(SpriteShrinkError::Parsing(ParsingError::InvalidHeader(_)))));
+    }
+
+    #[test]
+    fn test_parse_file_header_rejects_slice_too_large() {
+        let bytes = vec![0u8; std::mem::size_of::<FileHeader>() + 1];
+        let result = parse_file_header(&bytes);
+        assert!(matches!(result, Err(SpriteShrinkError::Parsing(ParsingError::InvalidHeader(_)))));
+    }
+
+    // --- parse_file_metadata ---
+
+    #[test]
+    fn test_parse_file_metadata_round_trips_manifest() {
+        let manifests: Vec<FileManifestParent<u64>> = vec![FileManifestParent {
+            chunk_count: 2,
+            chunk_metadata: vec![
+                SSAChunkMeta { hash: 0xdead_beef_u64, offset: 0,   length: 100 },
+                SSAChunkMeta { hash: 0xcafe_babe_u64, offset: 100, length: 200 },
+            ],
+        }];
+        let encoded = bitcode::encode(&manifests);
+        let parsed = parse_file_metadata::<u64>(&encoded).unwrap();
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].chunk_count, 2);
+        assert_eq!(parsed[0].chunk_metadata[0].hash, 0xdead_beef_u64);
+        assert_eq!(parsed[0].chunk_metadata[1].offset, 100);
+    }
+
+    #[test]
+    fn test_parse_file_metadata_round_trips_u128_hashes() {
+        let manifests: Vec<FileManifestParent<u128>> = vec![FileManifestParent {
+            chunk_count: 1,
+            chunk_metadata: vec![
+                SSAChunkMeta { hash: u128::MAX, offset: 0, length: 50 },
+            ],
+        }];
+        let encoded = bitcode::encode(&manifests);
+        let parsed = parse_file_metadata::<u128>(&encoded).unwrap();
+        assert_eq!(parsed[0].chunk_metadata[0].hash, u128::MAX);
+    }
+
+    #[test]
+    fn test_parse_file_metadata_returns_empty_vec_for_empty_manifest() {
+        let encoded = bitcode::encode(&Vec::<FileManifestParent<u64>>::new());
+        let parsed = parse_file_metadata::<u64>(&encoded).unwrap();
+        assert_eq!(parsed.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_file_metadata_rejects_corrupt_data() {
+        let result = parse_file_metadata::<u64>(b"not valid bitcode");
+        assert!(matches!(result, Err(SpriteShrinkError::Parsing(ParsingError::ManifestDecodeError(_)))));
+    }
+
+    // --- parse_file_chunk_index ---
+
+    #[test]
+    fn test_parse_file_chunk_index_round_trips_index() {
+        let entries: Vec<(u64, ChunkLocation)> = vec![
+            (0xaabb_u64, ChunkLocation { offset: 0,  compressed_length: 50 }),
+            (0xccdd_u64, ChunkLocation { offset: 50, compressed_length: 75 }),
+        ];
+        let encoded = bitcode::encode(&entries);
+        let map = parse_file_chunk_index::<u64>(&encoded).unwrap();
+        assert_eq!(map.len(), 2);
+        assert_eq!(map[&0xaabb_u64].offset, 0);
+        assert_eq!(map[&0xccdd_u64].compressed_length, 75);
+    }
+
+    #[test]
+    fn test_parse_file_chunk_index_returns_empty_map_for_empty_index() {
+        let encoded = bitcode::encode(&Vec::<(u64, ChunkLocation)>::new());
+        let map = parse_file_chunk_index::<u64>(&encoded).unwrap();
+        assert_eq!(map.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_file_chunk_index_rejects_corrupt_data() {
+        let result = parse_file_chunk_index::<u64>(b"not valid bitcode");
+        assert!(matches!(result, Err(SpriteShrinkError::Parsing(ParsingError::IndexDecodeError(_)))));
+    }
+
+    // --- parse_file_toc ---
+
+    #[test]
+    fn test_parse_file_toc_round_trips_entries() {
+        let toc = vec![
+            SSMCTocEntry { filename: "sprite.png".into(), uncompressed_size: 4096 },
+            SSMCTocEntry { filename: "level.dat".into(),  uncompressed_size: 1024 },
+        ];
+        let encoded = bitcode::encode(&toc);
+        let parsed = parse_file_toc(&encoded).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].filename, "sprite.png");
+        assert_eq!(parsed[1].uncompressed_size, 1024);
+    }
+
+    #[test]
+    fn test_parse_file_toc_returns_empty_vec_for_empty_toc() {
+        let encoded = bitcode::encode(&Vec::<SSMCTocEntry>::new());
+        let parsed = parse_file_toc(&encoded).unwrap();
+        assert_eq!(parsed.len(), 0);
+    }
+
+    #[test]
+    fn test_parse_file_toc_rejects_corrupt_data() {
+        let result = parse_file_toc(b"not valid bitcode");
+        assert!(matches!(result, Err(SpriteShrinkError::Parsing(ParsingError::TOCDecodeError(_)))));
+    }
+
+    // --- parse_format_data ---
+
+    #[test]
+    fn test_parse_format_data_round_trips_format_data() {
+        let fd = SSMCFormatData::build_format_data(100, 200, 300, 400);
+        let parsed = parse_format_data(bytemuck::bytes_of(&fd)).unwrap();
+        assert_eq!(parsed.data_offset, fd.data_offset);
+        assert_eq!(parsed.enc_manifest.length, fd.enc_manifest.length);
+        assert_eq!(parsed.data_dictionary.offset, fd.data_dictionary.offset);
+    }
+
+    #[test]
+    fn test_parse_format_data_rejects_slice_too_small() {
+        let result = parse_format_data(&[0u8; 8]);
+        assert!(matches!(result, Err(SpriteShrinkError::Parsing(ParsingError::InvalidFormatData(_)))));
+    }
+
+    #[test]
+    fn test_parse_format_data_rejects_slice_too_large() {
+        let bytes = vec![0u8; std::mem::size_of::<SSMCFormatData>() + 1];
+        let result = parse_format_data(&bytes);
+        assert!(matches!(result, Err(SpriteShrinkError::Parsing(ParsingError::InvalidFormatData(_)))));
+    }
+}

@@ -799,3 +799,26 @@ pub fn decompress_chunk(
 
     Ok(decompressed_chunk_data)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compress_with_dict_round_trips_with_zstd_decoder() {
+        let payload = b"aaaaabbbbbcccccaaaaabbbbbccccc";
+        let dict = b"aaaaabbbbbccccc";
+        let compressed = compress_with_dict(payload, dict, &3).unwrap();
+        let decoded = decompress_chunk(&compressed, dict).unwrap();
+
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn compress_with_dict_handles_empty_payload() {
+        let compressed = compress_with_dict(&[], b"dictionary", &1).unwrap();
+        let decoded = decompress_chunk(&compressed, b"dictionary").unwrap();
+
+        assert!(decoded.is_empty());
+    }
+}

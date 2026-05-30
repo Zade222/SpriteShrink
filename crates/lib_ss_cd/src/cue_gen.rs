@@ -62,3 +62,67 @@ pub fn generate_cue_string<H: Hashable>(
 
     Ok(output)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lib_structs::{DiscManifest, RleSectorMap, SectorType};
+
+    fn manifest_with_runs(runs: Vec<(u32, SectorType)>) -> DiscManifest<u64> {
+        DiscManifest {
+            lba_map: Vec::new(),
+            rle_sector_map: RleSectorMap { runs },
+            audio_block_map: Vec::new(),
+            data_stream_layout: Vec::new(),
+            subheader_index: Vec::new(),
+            disc_exception_index: Vec::new(),
+            integrity_hash: 0,
+        }
+    }
+
+    #[test]
+    fn generate_cue_string_emits_track_for_each_mode_change() {
+        let manifest = manifest_with_runs(vec![
+            (150, SectorType::Mode1),
+            (75, SectorType::Audio),
+            (75, SectorType::Mode2Form1),
+        ]);
+
+        let cue = generate_cue_string(&manifest, "disc.bin").unwrap();
+
+        assert!(cue.contains("FILE \"disc.bin\" BINARY"));
+        assert!(cue.contains("  TRACK 01 MODE1/2352"));
+        assert!(cue.contains("    INDEX 01 00:00:00"));
+        assert!(cue.contains("  TRACK 02 AUDIO"));
+        assert!(cue.contains("    INDEX 01 00:02:00"));
+        assert!(cue.contains("  TRACK 03 MODE2/2352"));
+        assert!(cue.contains("    INDEX 01 00:03:00"));
+    }
+
+    #[test]
+    fn generate_cue_string_writes_index_zero_for_pregap() {
+        let manifest = manifest_with_runs(vec![
+            (75, SectorType::PregapAudio),
+            (75, SectorType::Audio),
+        ]);
+
+        let cue = generate_cue_string(&manifest, "disc.bin").unwrap();
+
+        assert!(cue.contains("  TRACK 01 AUDIO"));
+        assert!(cue.contains("    INDEX 00 00:00:00"));
+        assert!(cue.contains("    INDEX 01 00:01:00"));
+    }
+
+    #[test]
+    fn generate_cue_string_skips_none_sectors_but_advances_time() {
+        let manifest = manifest_with_runs(vec![
+            (75, SectorType::None),
+            (75, SectorType::Mode1),
+        ]);
+
+        let cue = generate_cue_string(&manifest, "disc.bin").unwrap();
+
+        assert!(cue.contains("  TRACK 01 MODE1/2352"));
+        assert!(cue.contains("    INDEX 01 00:01:00"));
+    }
+}

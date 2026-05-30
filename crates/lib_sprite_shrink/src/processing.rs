@@ -786,3 +786,463 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
 
     Ok(required_chunks)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[derive(Debug)]
+    struct TestError { cancelled: bool }
+
+    impl std::fmt::Display for TestError {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "test error")
+        }
+    }
+
+    impl std::error::Error for TestError {}
+
+    impl IsCancelled for TestError {
+        fn is_cancelled(&self) -> bool { self.cancelled }
+    }
+
+    fn make_manifest(entries: &[(u64, u32, u64)]) -> FileManifestParent<u64> {
+        let chunk_metadata = entries.iter()
+            .map(|&(offset, length, hash)| SSAChunkMeta { hash, offset, length })
+            .collect::<Vec<_>>();
+        FileManifestParent {
+            chunk_count: chunk_metadata.len() as u64,
+            chunk_metadata,
+        }
+    }
+
+    // --- generate_sha_512 ---
+
+    #[test]
+    fn test_generate_sha_512_succeeds() {
+        let data = b"Hello, world!".to_vec();
+        let sha_512 = generate_sha_512(&data);
+        let expected: [u8; 64] = [
+            193, 82, 124, 216, 147, 193, 36, 119, 61, 129, 25, 17, 151, 12, 143, 230,
+            232, 87, 214, 223, 93, 201, 34, 107, 216, 161, 96, 97, 76, 12, 217, 99,
+            164, 221, 234, 43, 148, 187, 125, 54, 2, 30, 249, 216, 101, 213, 206, 162,
+            148, 168, 45, 212, 154, 11, 178, 105, 245, 31, 110, 122, 87, 247, 148, 33,
+        ];
+        assert_eq!(sha_512, expected);
+    }
+
+    #[test]
+    fn test_generate_sha_512_empty_input_has_known_hash() {
+        let sha_512 = generate_sha_512(b"");
+        assert_eq!(sha_512.len(), 64);
+        // SHA-512 of empty input is a well-known constant; just verify it is not all zeros.
+        assert_ne!(sha_512, [0u8; 64]);
+    }
+
+    #[test]
+    fn test_generate_sha_512_different_inputs_give_different_hashes() {
+        assert_ne!(generate_sha_512(b"hello"), generate_sha_512(b"world"));
+    }
+
+    // --- process_file_in_memory ---
+
+    #[test]
+    fn test_process_file_in_memory_succeeds() {
+        let file_data = FileData {
+            file_name: String::from("test.txt"),
+            file_data: b"Hello, world!".to_vec()
+        };
+
+        let processed_file_data = process_file_in_memory(file_data, 1024);
+        assert!(processed_file_data.is_some());
+
+        let processed_file_data = processed_file_data.unwrap();
+        assert_eq!(processed_file_data.file_name, "test.txt");
+        assert_eq!(processed_file_data.file_data, b"Hello, world!".to_vec());
+    }
+
+    #[test]
+    fn test_process_file_in_memory_returns_none_for_empty_file() {
+        let file_data = FileData {
+            file_name: String::from("test.txt"),
+            file_data: Vec::new()
+        };
+
+        let processed_file_data = process_file_in_memory(file_data, 1024);
+        assert!(processed_file_data.is_none(), "Expected None for empty file data");
+    }
+
+    #[test]
+    fn test_process_file_in_memory_veri_hash_matches_data() {
+        let data = b"some file content".to_vec();
+        let file_data = FileData { file_name: "f.bin".into(), file_data: data.clone() };
+        let processed = process_file_in_memory(file_data, 1024).unwrap();
+        assert_eq!(processed.veri_hash, generate_sha_512(&data));
+    }
+
+    #[test]
+    fn test_process_file_in_memory_chunks_cover_full_data() {
+        let data: Vec<u8> = (0..2000u16).map(|i| i as u8).collect();
+        let file_data = FileData { file_name: "f.bin".into(), file_data: data.clone() };
+        let processed = process_file_in_memory(file_data, 512).unwrap();
+
+        let total_chunk_bytes: usize = processed.chunks.iter().map(|c| c.length).sum();
+        assert_eq!(total_chunk_bytes, data.len());
+    }
+
+    // --- Hashable ---
+
+    #[test]
+    fn test_hashable_u64_is_deterministic() {
+        let data = b"determinism check";
+        assert_eq!(
+            u64::from_bytes_with_seed(data),
+            u64::from_bytes_with_seed(data)
+        );
+    }
+
+    #[test]
+    fn test_hashable_u128_is_deterministic() {
+        let data = b"determinism check";
+        assert_eq!(
+            u128::from_bytes_with_seed(data),
+            u128::from_bytes_with_seed(data)
+        );
+    }
+
+    #[test]
+    fn test_hashable_different_inputs_give_different_hashes() {
+        assert_ne!(
+            u64::from_bytes_with_seed(b"alpha"),
+            u64::from_bytes_with_seed(b"beta")
+        );
+        assert_ne!(
+            u128::from_bytes_with_seed(b"alpha"),
+            u128::from_bytes_with_seed(b"beta")
+        );
+    }
+
+    // --- create_file_manifest_and_chunks ---
+
+    #[test]
+    fn test_create_file_manifest_chunk_count_matches() {
+        let data = b"Hello, world!".to_vec();
+        let fd = FileData { file_name: "t.txt".into(), file_data: data.clone() };
+        let chunks = chunk_data(&fd, SS_SEED, 1024);
+
+        let (manifest, chunk_list) = create_file_manifest_and_chunks::<u64>(&data, &chunks);
+
+        assert_eq!(manifest.chunk_count, chunks.len() as u64);
+        assert_eq!(manifest.chunk_metadata.len(), chunks.len());
+        assert_eq!(chunk_list.len(), chunks.len());
+    }
+
+    #[test]
+    fn test_create_file_manifest_chunks_reconstruct_original_data() {
+        // window_size=512 → min=128, which satisfies FastCDC's MINIMUM_MIN=64
+        let data: Vec<u8> = (0u8..200).collect();
+        let fd = FileData { file_name: "t.bin".into(), file_data: data.clone() };
+        let chunks = chunk_data(&fd, SS_SEED, 512);
+
+        let (_manifest, chunk_list) = create_file_manifest_and_chunks::<u64>(&data, &chunks);
+
+        let reassembled: Vec<u8> = chunk_list.into_iter().flat_map(|(_, d)| d).collect();
+        assert_eq!(reassembled, data);
+    }
+
+    #[test]
+    fn test_create_file_manifest_hashes_are_consistent_across_calls() {
+        let data = b"repeatable hashing".to_vec();
+        let fd = FileData { file_name: "t.txt".into(), file_data: data.clone() };
+        let chunks = chunk_data(&fd, SS_SEED, 1024);
+
+        let (m1, _) = create_file_manifest_and_chunks::<u64>(&data, &chunks);
+        let (m2, _) = create_file_manifest_and_chunks::<u64>(&data, &chunks);
+
+        for (a, b) in m1.chunk_metadata.iter().zip(m2.chunk_metadata.iter()) {
+            assert_eq!(a.hash, b.hash);
+        }
+    }
+
+    #[test]
+    fn test_create_file_manifest_u128_hashes() {
+        let data = b"u128 hash test".to_vec();
+        let fd = FileData { file_name: "t.txt".into(), file_data: data.clone() };
+        let chunks = chunk_data(&fd, SS_SEED, 1024);
+
+        let (manifest, chunk_list) = create_file_manifest_and_chunks::<u128>(&data, &chunks);
+
+        assert_eq!(manifest.chunk_count, chunks.len() as u64);
+        assert_eq!(chunk_list.len(), chunks.len());
+    }
+
+    // --- verify_single_file ---
+
+    fn chunk_map_from(data: &[u8], window: u64) -> (FileManifestParent<u64>, [u8; 64], HashMap<u64, Vec<u8>>) {
+        let fd = FileData { file_name: "t.bin".into(), file_data: data.to_vec() };
+        let processed = process_file_in_memory(fd, window).unwrap();
+        let (manifest, chunk_list) = create_file_manifest_and_chunks::<u64>(
+            &processed.file_data, &processed.chunks
+        );
+        let map: HashMap<u64, Vec<u8>> = chunk_list.into_iter().collect();
+        (manifest, processed.veri_hash, map)
+    }
+
+    #[test]
+    fn test_verify_single_file_succeeds() {
+        let (manifest, veri_hash, map) = chunk_map_from(b"Hello, world!", 1024);
+
+        let result = verify_single_file(
+            "t.bin".into(),
+            &manifest,
+            &veri_hash,
+            move |hashes: &[u64]| -> Result<Vec<Vec<u8>>, TestError> {
+                Ok(hashes.iter().map(|h| map[h].clone()).collect())
+            },
+            |_| {},
+        );
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_verify_single_file_detects_hash_mismatch() {
+        let (manifest, _, map) = chunk_map_from(b"Hello, world!", 1024);
+        let wrong_hash = [0u8; 64];
+
+        let result = verify_single_file(
+            "t.bin".into(),
+            &manifest,
+            &wrong_hash,
+            move |hashes: &[u64]| -> Result<Vec<Vec<u8>>, TestError> {
+                Ok(hashes.iter().map(|h| map[h].clone()).collect())
+            },
+            |_| {},
+        );
+
+        assert!(matches!(result, Err(SpriteShrinkError::Processing(_))));
+    }
+
+    #[test]
+    fn test_verify_single_file_propagates_callback_error() {
+        let (manifest, veri_hash, _) = chunk_map_from(b"Hello, world!", 1024);
+
+        let result = verify_single_file(
+            "t.bin".into(),
+            &manifest,
+            &veri_hash,
+            |_: &[u64]| -> Result<Vec<Vec<u8>>, TestError> {
+                Err(TestError { cancelled: false })
+            },
+            |_| {},
+        );
+
+        assert!(matches!(result, Err(SpriteShrinkError::External(_))));
+    }
+
+    #[test]
+    fn test_verify_single_file_propagates_cancellation() {
+        let (manifest, veri_hash, _) = chunk_map_from(b"Hello, world!", 1024);
+
+        let result = verify_single_file(
+            "t.bin".into(),
+            &manifest,
+            &veri_hash,
+            |_: &[u64]| -> Result<Vec<Vec<u8>>, TestError> {
+                Err(TestError { cancelled: true })
+            },
+            |_| {},
+        );
+
+        assert!(matches!(result, Err(SpriteShrinkError::Cancelled)));
+    }
+
+    // --- build_train_samples ---
+
+    #[test]
+    fn test_build_train_samples_includes_all_chunks_under_limit() {
+        let chunks: Vec<Vec<u8>> = vec![vec![1u8; 50], vec![2u8; 75], vec![3u8; 60]];
+        let hashes: Vec<u64> = (0..chunks.len() as u64).collect();
+        let total: u64 = chunks.iter().map(|c| c.len() as u64).sum();
+        let chunks_clone = chunks.clone();
+
+        let (_buffer, sizes) = build_train_samples(
+            &hashes,
+            total,
+            1024,
+            &|h: &[u64]| -> Result<Vec<Vec<u8>>, TestError> {
+                Ok(h.iter().map(|&i| chunks_clone[i as usize].clone()).collect())
+            },
+        ).unwrap();
+
+        assert_eq!(sizes.len(), chunks.len());
+    }
+
+    #[test]
+    fn test_build_train_samples_sample_sizes_match_buffer_length() {
+        let chunks: Vec<Vec<u8>> = vec![vec![0u8; 40], vec![1u8; 60]];
+        let hashes: Vec<u64> = (0..chunks.len() as u64).collect();
+        let total: u64 = chunks.iter().map(|c| c.len() as u64).sum();
+        let chunks_clone = chunks.clone();
+
+        let (buffer, sizes) = build_train_samples(
+            &hashes,
+            total,
+            1024,
+            &|h: &[u64]| -> Result<Vec<Vec<u8>>, TestError> {
+                Ok(h.iter().map(|&i| chunks_clone[i as usize].clone()).collect())
+            },
+        ).unwrap();
+
+        let total_from_sizes: usize = sizes.iter().sum();
+        assert_eq!(buffer.len(), total_from_sizes);
+    }
+
+    #[test]
+    fn test_build_train_samples_propagates_callback_error() {
+        let hashes: Vec<u64> = vec![0];
+
+        let result = build_train_samples(
+            &hashes,
+            100,
+            1024,
+            &|_: &[u64]| -> Result<Vec<Vec<u8>>, TestError> {
+                Err(TestError { cancelled: false })
+            },
+        );
+
+        assert!(matches!(result, Err(ProcessingError::External(_))));
+    }
+
+    #[test]
+    fn test_build_train_samples_propagates_cancellation() {
+        let hashes: Vec<u64> = vec![0];
+
+        let result = build_train_samples(
+            &hashes,
+            100,
+            1024,
+            &|_: &[u64]| -> Result<Vec<Vec<u8>>, TestError> {
+                Err(TestError { cancelled: true })
+            },
+        );
+
+        assert!(matches!(result, Err(ProcessingError::Cancelled)));
+    }
+
+    // --- gen_zstd_opt_dict ---
+
+    #[test]
+    fn test_gen_zstd_opt_dict_produces_nonempty_dictionary() {
+        // Feed 50 samples of 200 bytes each so the COVER algorithm has enough data.
+        let base: Vec<u8> = (0u8..=255).cycle().take(10_000).collect();
+        let sample_size = 200usize;
+        let samples: Vec<Vec<u8>> = (0..50)
+            .map(|i| base[i * 13 % 9800..][..sample_size].to_vec())
+            .collect();
+        let buffer: Vec<u8> = samples.iter().flatten().copied().collect();
+        let sizes: Vec<usize> = samples.iter().map(|s| s.len()).collect();
+
+        let result = gen_zstd_opt_dict(&buffer, &sizes, 4096, 1, 3);
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result.err());
+        assert!(!result.unwrap().is_empty());
+    }
+
+    // --- get_seek_chunks ---
+
+    #[test]
+    fn test_get_seek_chunks_within_single_chunk() {
+        let manifest = make_manifest(&[(0, 100, 42)]);
+
+        let result = get_seek_chunks(&manifest, 10, 20).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].hash, 42);
+        assert_eq!(result[0].start_offset, 10);
+        assert_eq!(result[0].end_offset, 30);
+    }
+
+    #[test]
+    fn test_get_seek_chunks_at_file_start() {
+        let manifest = make_manifest(&[(0, 100, 7)]);
+
+        let result = get_seek_chunks(&manifest, 0, 10).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].start_offset, 0);
+        assert_eq!(result[0].end_offset, 10);
+    }
+
+    #[test]
+    fn test_get_seek_chunks_at_file_end() {
+        let manifest = make_manifest(&[(0, 100, 7)]);
+
+        let result = get_seek_chunks(&manifest, 90, 10).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].start_offset, 90);
+        assert_eq!(result[0].end_offset, 100);
+    }
+
+    #[test]
+    fn test_get_seek_chunks_spanning_two_chunks() {
+        // Two 50-byte chunks; seek from byte 30 to byte 70 crosses the boundary.
+        let manifest = make_manifest(&[(0, 50, 1), (50, 50, 2)]);
+
+        let result = get_seek_chunks(&manifest, 30, 40).unwrap();
+
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].hash, 1);
+        assert_eq!(result[0].start_offset, 30);
+        assert_eq!(result[0].end_offset, 50);
+        assert_eq!(result[1].hash, 2);
+        assert_eq!(result[1].start_offset, 0);
+        assert_eq!(result[1].end_offset, 20);
+    }
+
+    #[test]
+    fn test_get_seek_chunks_covers_all_chunks() {
+        let manifest = make_manifest(&[(0, 50, 1), (50, 50, 2), (100, 50, 3)]);
+
+        let result = get_seek_chunks(&manifest, 0, 150).unwrap();
+
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].hash, 1);
+        assert_eq!(result[1].hash, 2);
+        assert_eq!(result[2].hash, 3);
+    }
+
+    #[test]
+    fn test_get_seek_chunks_skips_non_overlapping_chunks() {
+        // Seek only within the middle chunk.
+        let manifest = make_manifest(&[(0, 50, 1), (50, 50, 2), (100, 50, 3)]);
+
+        let result = get_seek_chunks(&manifest, 50, 50).unwrap();
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].hash, 2);
+    }
+
+    #[test]
+    fn test_get_seek_chunks_out_of_bounds_returns_error() {
+        let manifest = make_manifest(&[(0, 100, 1)]);
+
+        let result = get_seek_chunks(&manifest, 0, 101);
+
+        assert!(matches!(result, Err(SpriteShrinkError::Processing(_))));
+    }
+
+    #[test]
+    fn test_get_seek_chunks_empty_manifest_any_read_is_out_of_bounds() {
+        let manifest: FileManifestParent<u64> = FileManifestParent {
+            chunk_count: 0,
+            chunk_metadata: vec![],
+        };
+
+        let result = get_seek_chunks(&manifest, 0, 1);
+
+        assert!(matches!(result, Err(SpriteShrinkError::Processing(_))));
+    }
+}

@@ -547,3 +547,62 @@ impl<'a, R: Read + Seek> Read for UserDataStream<'a, R> {
         Ok(bytes_written_to_buf)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    fn write_temp_file(
+        dir: &tempfile::TempDir,
+        name: &str,
+        data: &[u8],
+    ) -> PathBuf {
+        let path = dir.path().join(name);
+        let mut file = File::create(&path).unwrap();
+        file.write_all(data).unwrap();
+        path
+    }
+
+    #[test]
+    fn multi_bin_stream_reads_from_current_file() {
+        let dir = tempdir().unwrap();
+        let first = write_temp_file(&dir, "a.bin", b"abc");
+        let second = write_temp_file(&dir, "b.bin", b"defg");
+        let mut stream = MultiBinStream::new(vec![first, second]).unwrap();
+        let mut buf = [0u8; 3];
+
+        let read = stream.read(&mut buf).unwrap();
+
+        assert_eq!(read, 3);
+        assert_eq!(&buf, b"abc");
+    }
+
+    #[test]
+    fn multi_bin_stream_seek_start_then_reads_remaining_bytes_in_file() {
+        let dir = tempdir().unwrap();
+        let first = write_temp_file(&dir, "a.bin", b"abc");
+        let second = write_temp_file(&dir, "b.bin", b"defg");
+        let mut stream = MultiBinStream::new(vec![first, second]).unwrap();
+        let mut buf = [0u8; 3];
+
+        let pos = stream.seek(SeekFrom::Start(2)).unwrap();
+        let read = stream.read(&mut buf).unwrap();
+
+        assert_eq!(pos, 2);
+        assert_eq!(read, 1);
+        assert_eq!(&buf[..read], b"c");
+    }
+
+    #[test]
+    fn multi_bin_stream_rejects_negative_seek() {
+        let dir = tempdir().unwrap();
+        let first = write_temp_file(&dir, "a.bin", b"abc");
+        let mut stream = MultiBinStream::new(vec![first]).unwrap();
+
+        let err = stream.seek(SeekFrom::Current(-1)).unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+    }
+}

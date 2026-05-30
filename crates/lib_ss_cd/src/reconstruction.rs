@@ -928,3 +928,38 @@ where
         }.into())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expand_exception_index_places_exception_ids_by_sector() {
+        let lookup = expand_exception_index(&[(0, 11), (3, 44)], 5);
+        assert_eq!(lookup, vec![Some(11), None, None, Some(44), None]);
+    }
+
+    #[test]
+    fn expand_sector_map_repeats_each_run() {
+        let rle = RleSectorMap {
+            runs: vec![(1, SectorType::Audio), (2, SectorType::Mode1)],
+        };
+
+        assert_eq!(
+            expand_sector_map(&rle),
+            vec![SectorType::Audio, SectorType::Mode1, SectorType::Mode1]
+        );
+    }
+
+    #[test]
+    fn expand_subheader_map_clamps_entries_to_total_sectors() {
+        let index = vec![
+            SubHeaderEntry { start_lba: 1, count: 2, data_id: 7 },
+            SubHeaderEntry { start_lba: 4, count: 3, data_id: 9 },
+        ];
+
+        let map = expand_subheader_map(&index, 5);
+
+        assert_eq!(map, vec![None, Some(7), Some(7), None, Some(9)]);
+    }
+}

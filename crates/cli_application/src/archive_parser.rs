@@ -189,3 +189,106 @@ where
         CliError::InternalError(format!("Failed to decode TOC: {}", e))
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bitcode::encode;
+    use sprite_shrink::{SSAChunkMeta, SSMCTocEntry};
+    use std::fs;
+    use zerocopy::IntoBytes;
+
+    fn write_archive_bytes(data: &[u8]) -> tempfile::NamedTempFile {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        fs::write(file.path(), data).unwrap();
+        file
+    }
+
+    #[test]
+    fn get_file_header_reads_and_parses_header() {
+        let header = FileHeader::build_file_header(3, 1, 1, 0, 0);
+        let file = write_archive_bytes(header.as_bytes());
+
+        let parsed = get_file_header(file.path()).unwrap();
+
+        assert_eq!(parsed.file_count, 3);
+        assert_eq!(parsed.algorithm, 1);
+    }
+
+    #[test]
+    fn get_max_rom_index_returns_file_count_as_u8() {
+        let header = FileHeader::build_file_header(7, 1, 1, 0, 0);
+        let file = write_archive_bytes(header.as_bytes());
+
+        assert_eq!(get_max_rom_index(file.path()).unwrap(), 7);
+    }
+
+    #[test]
+    fn get_file_manifest_reads_encoded_manifest_section() {
+        let manifest = vec![FileManifestParent {
+            chunk_count: 1,
+            chunk_metadata: vec![SSAChunkMeta {
+                hash: 42u64,
+                offset: 0,
+                length: 5,
+            }],
+        }];
+        let encoded = encode(&manifest);
+        let mut bytes = b"prefix".to_vec();
+        let offset = bytes.len() as u64;
+        bytes.extend_from_slice(&encoded);
+        let file = write_archive_bytes(&bytes);
+
+        let parsed =
+            get_file_manifest::<u64>(file.path(), offset, encoded.len())
+                .unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].chunk_count, 1);
+        assert_eq!(parsed[0].chunk_metadata[0].hash, 42);
+    }
+
+    #[test]
+    fn get_chunk_index_reads_encoded_index_section() {
+        let entries = vec![(
+            42u64,
+            ChunkLocation {
+                offset: 11,
+                compressed_length: 5,
+            },
+        )];
+        let encoded = encode(&entries);
+        let mut bytes = b"prefix".to_vec();
+        let offset = bytes.len() as u64;
+        bytes.extend_from_slice(&encoded);
+        let file = write_archive_bytes(&bytes);
+
+        let parsed =
+            get_chunk_index::<u64>(file.path(), offset, encoded.len() as u64)
+                .unwrap();
+
+        assert_eq!(parsed[&42].offset, 11);
+        assert_eq!(parsed[&42].compressed_length, 5);
+    }
+
+    #[test]
+    fn get_toc_reads_encoded_toc_section() {
+        let toc = vec![SSMCTocEntry {
+            filename: "rom.bin".to_string(),
+            uncompressed_size: 123,
+        }];
+        let encoded = encode(&toc);
+        let mut bytes = b"prefix".to_vec();
+        let offset = bytes.len() as u32;
+        bytes.extend_from_slice(&encoded);
+        let file = write_archive_bytes(&bytes);
+
+        let parsed =
+            get_toc::<SSMCTocEntry>(file.path(), offset, encoded.len())
+                .unwrap();
+
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed[0].filename, "rom.bin");
+        assert_eq!(parsed[0].uncompressed_size, 123);
+    }
+}

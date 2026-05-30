@@ -791,3 +791,114 @@ pub fn read_metadata_block(
 
     read_file_data(file_path, read_start, read_amount)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::tempdir;
+
+    fn write_file(path: &Path, data: &[u8]) {
+        let mut file = File::create(path).unwrap();
+        file.write_all(data).unwrap();
+    }
+
+    #[test]
+    fn organize_paths_separates_existing_files_and_directories() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("rom.bin");
+        let sub_dir = dir.path().join("input");
+        let missing_path = dir.path().join("missing.bin");
+        fs::create_dir(&sub_dir).unwrap();
+        write_file(&file_path, b"rom");
+
+        let (files, dirs) = organize_paths(&[
+            file_path.clone(),
+            sub_dir.clone(),
+            missing_path,
+        ])
+        .unwrap();
+
+        assert_eq!(files, vec![file_path]);
+        assert_eq!(dirs, vec![sub_dir]);
+    }
+
+    #[test]
+    fn files_from_dirs_collects_only_shallow_regular_files() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("a.bin");
+        let nested_dir = dir.path().join("nested");
+        fs::create_dir(&nested_dir).unwrap();
+        write_file(&file_path, b"a");
+        write_file(&nested_dir.join("b.bin"), b"b");
+
+        let files = files_from_dirs(&[dir.path().to_path_buf()]).unwrap();
+
+        assert_eq!(files, vec![file_path]);
+    }
+
+    #[test]
+    fn read_file_data_reads_exact_slice() {
+        let dir = tempdir().unwrap();
+        let file_path = dir.path().join("data.bin");
+        write_file(&file_path, b"abcdef");
+
+        let data = read_file_data(&file_path, 2, 3).unwrap();
+
+        assert_eq!(data, b"cde");
+    }
+
+    #[test]
+    fn write_final_archive_writes_header_then_temp_payload_and_removes_temp() {
+        let dir = tempdir().unwrap();
+        let output_path = dir.path().join("out").join("archive.ssmc");
+        let tmp_path = dir.path().join("payload.tmp");
+        write_file(&tmp_path, b"payload");
+
+        write_final_archive(&output_path, &tmp_path, b"header").unwrap();
+
+        assert_eq!(fs::read(&output_path).unwrap(), b"headerpayload");
+        assert!(!tmp_path.exists());
+    }
+
+    #[test]
+    fn temp_cache_in_memory_deduplicates_keys_and_tracks_size() {
+        let cache = TempCache::<u64>::new(PathBuf::new(), true).unwrap();
+
+        cache.insert_batch(&[
+            (2, b"bb".to_vec()),
+            (1, b"a".to_vec()),
+            (2, b"ignored".to_vec()),
+        ])
+        .unwrap();
+
+        assert_eq!(cache.get_keys().unwrap(), vec![1, 2]);
+        assert_eq!(
+            cache.get_chunks(&[1, 2]).unwrap(),
+            vec![b"a".to_vec(), b"bb".to_vec()]
+        );
+        assert_eq!(cache.get_tot_data_size(), 3);
+    }
+
+    #[test]
+    fn temp_cache_on_disk_reads_inserted_chunks_and_removes_file_on_drop() {
+        let dir = tempdir().unwrap();
+        let cache_path = dir.path().join("cache.tmp");
+
+        {
+            let cache = TempCache::<u64>::new(cache_path.clone(), false).unwrap();
+            cache
+                .insert_batch(&[(2, b"bb".to_vec()), (1, b"a".to_vec())])
+                .unwrap();
+
+            assert_eq!(cache.get_keys().unwrap(), vec![1, 2]);
+            assert_eq!(
+                cache.get_chunks(&[2, 1]).unwrap(),
+                vec![b"bb".to_vec(), b"a".to_vec()]
+            );
+            assert_eq!(cache.get_tot_data_size(), 3);
+        }
+
+        assert!(!cache_path.exists());
+    }
+}

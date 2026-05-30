@@ -459,3 +459,132 @@ pub fn merge_config_and_args (
 
     args
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::{CommandFactory, FromArgMatches};
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn parse_args(argv: &[&str]) -> (Args, ArgMatches) {
+        let matches = Args::command().try_get_matches_from(argv).unwrap();
+        let args = Args::from_arg_matches(&matches).unwrap();
+        (args, matches)
+    }
+
+    #[test]
+    fn validate_args_requires_output_for_compression() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("a.bin");
+        let second = dir.path().join("b.bin");
+        fs::write(&first, b"a").unwrap();
+        fs::write(&second, b"b").unwrap();
+        let first = first.to_string_lossy().to_string();
+        let second = second.to_string_lossy().to_string();
+        let (args, matches) =
+            parse_args(&["sprite-shrink", "-i", &first, "-i", &second]);
+
+        let err = validate_args(&args, &matches).unwrap_err();
+
+        assert!(
+            matches!(err, CliError::MissingFlag(message) if message.contains("Output path"))
+        );
+    }
+
+    #[test]
+    fn validate_args_rejects_single_file_compression() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("a.bin");
+        let output = dir.path().join("out.ssmc");
+        fs::write(&first, b"a").unwrap();
+        let first = first.to_string_lossy().to_string();
+        let output = output.to_string_lossy().to_string();
+        let (args, matches) =
+            parse_args(&["sprite-shrink", "-i", &first, "-o", &output]);
+
+        let err = validate_args(&args, &matches).unwrap_err();
+
+        assert!(matches!(err, CliError::NotEnoughFiles));
+    }
+
+    #[test]
+    fn validate_args_rejects_optical_mode_with_metadata() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("a.ssmc");
+        fs::write(&first, b"a").unwrap();
+        let first = first.to_string_lossy().to_string();
+        let (args, matches) = parse_args(&[
+            "sprite-shrink",
+            "-i",
+            &first,
+            "--mode",
+            "optical",
+            "--metadata",
+        ]);
+
+        let err = validate_args(&args, &matches).unwrap_err();
+
+        assert!(
+            matches!(err, CliError::ConflictingArguments(message) if message.contains("optical"))
+        );
+    }
+
+    #[test]
+    fn validate_args_rejects_missing_input_path() {
+        let dir = tempdir().unwrap();
+        let missing = dir.path().join("missing.bin");
+        let output = dir.path().join("out.ssmc");
+        let missing = missing.to_string_lossy().to_string();
+        let output = output.to_string_lossy().to_string();
+        let (args, matches) = parse_args(&[
+            "sprite-shrink",
+            "-i",
+            &missing,
+            "-o",
+            &output,
+        ]);
+
+        let err = validate_args(&args, &matches).unwrap_err();
+
+        assert!(
+            matches!(err, CliError::InvalidPath(message) if message.contains("does not exist"))
+        );
+    }
+
+    #[test]
+    fn merge_config_and_args_preserves_cli_values_when_present() {
+        let dir = tempdir().unwrap();
+        let first = dir.path().join("a.ssmc");
+        fs::write(&first, b"a").unwrap();
+        let first = first.to_string_lossy().to_string();
+        let (args, matches) = parse_args(&[
+            "sprite-shrink",
+            "-i",
+            &first,
+            "--compression-level",
+            "5",
+            "--metadata",
+        ]);
+        let config = SpriteShrinkConfig {
+            compression_level: 7,
+            window_size: "8KiB".to_string(),
+            dictionary_size: "64KiB".to_string(),
+            hash_bit_length: 128,
+            auto_tune: true,
+            autotune_timeout: 9,
+            optimize_dictionary: true,
+            threads: 3,
+            low_memory: true,
+            json_output: false,
+            log_retention_days: 5,
+            quiet_output: true,
+            log_level: "debug".to_string(),
+        };
+
+        let merged = merge_config_and_args(&config, args, &matches);
+
+        assert_eq!(merged.compression_level, 5);
+        assert!(merged.metadata);
+    }
+}

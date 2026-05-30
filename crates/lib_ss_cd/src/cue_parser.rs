@@ -186,3 +186,92 @@ fn parse_msf(
 
     Ok(MsfTime { minute, second, frame })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_cue_accepts_multiple_files_and_tracks() {
+        let content = r#"
+            FILE "disc01.bin" BINARY
+              TRACK 01 MODE1/2352
+                INDEX 01 00:00:00
+              TRACK 02 AUDIO
+                INDEX 00 00:02:00
+                INDEX 01 00:04:00
+            FILE "disc02.bin" BINARY
+              TRACK 03 MODE2/2352
+                INDEX 01 01:00:00
+        "#;
+
+        let sheet = parse_cue("source.cue", content).unwrap();
+
+        assert_eq!(sheet.source_filename, "source.cue");
+        assert_eq!(sheet.files.len(), 2);
+        assert_eq!(sheet.files[0].name, "disc01.bin");
+        assert_eq!(sheet.files[0].tracks.len(), 2);
+        assert_eq!(sheet.files[0].tracks[0].track_type, TrackType::Mode1_2352);
+        assert_eq!(sheet.files[0].tracks[1].track_type, TrackType::Audio);
+        assert_eq!(
+            sheet.files[0].tracks[1].indices[0].position.to_total_frames(),
+            150
+        );
+        assert_eq!(
+            sheet.files[0].tracks[1].indices[1].position.to_total_frames(),
+            300
+        );
+        assert_eq!(sheet.files[1].tracks[0].track_type, TrackType::Mode2_2352);
+    }
+
+    #[test]
+    fn parse_cue_rejects_track_before_file() {
+        let err = parse_cue("bad.cue", "TRACK 01 AUDIO").unwrap_err();
+        assert_eq!(err, ParseError::MissingFile);
+    }
+
+    #[test]
+    fn parse_cue_rejects_index_before_track() {
+        let content = r#"
+            FILE "disc.bin" BINARY
+            INDEX 01 00:00:00
+        "#;
+
+        let err = parse_cue("bad.cue", content).unwrap_err();
+        assert_eq!(err, ParseError::MissingTrack);
+    }
+
+    #[test]
+    fn parse_cue_rejects_unsupported_file_type() {
+        let err = parse_cue("bad.cue", r#"FILE "disc.wav" WAVE"#).unwrap_err();
+        assert_eq!(err, ParseError::UnsupportedFileType("WAVE".to_string()));
+    }
+
+    #[test]
+    fn parse_cue_rejects_invalid_msf_bounds() {
+        let content = r#"
+            FILE "disc.bin" BINARY
+              TRACK 01 AUDIO
+                INDEX 01 00:60:00
+        "#;
+
+        let err = parse_cue("bad.cue", content).unwrap_err();
+        assert_eq!(
+            err,
+            ParseError::InvalidTimestamp(
+                "00".to_string(),
+                "60".to_string(),
+                "00".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn parse_msf_converts_valid_timestamp_to_frames() {
+        let msf = parse_msf("01", "02", "03").unwrap();
+        assert_eq!(msf.minute, 1);
+        assert_eq!(msf.second, 2);
+        assert_eq!(msf.frame, 3);
+        assert_eq!(msf.to_total_frames(), 4653);
+    }
+}

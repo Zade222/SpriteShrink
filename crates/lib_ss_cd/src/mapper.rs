@@ -437,3 +437,64 @@ const fn from_bcd (bcd: u8) -> u8 {
     let ones = bcd & 0x0F;
     tens + ones
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rle_encode_map_returns_empty_runs_for_empty_sector_map() {
+        let encoded = rle_encode_map(&SectorMap { sectors: Vec::new() });
+        assert!(encoded.runs.is_empty());
+    }
+
+    #[test]
+    fn rle_encode_map_groups_adjacent_equal_sector_types() {
+        let sector_map = SectorMap {
+            sectors: vec![
+                SectorType::Mode1,
+                SectorType::Mode1,
+                SectorType::Audio,
+                SectorType::Audio,
+                SectorType::Audio,
+                SectorType::Mode2Form1,
+            ],
+        };
+
+        let encoded = rle_encode_map(&sector_map);
+
+        assert_eq!(
+            encoded.runs,
+            vec![
+                (2, SectorType::Mode1),
+                (3, SectorType::Audio),
+                (1, SectorType::Mode2Form1),
+            ]
+        );
+    }
+
+    #[test]
+    fn rle_decode_map_expands_runs_to_original_sector_map() {
+        let encoded = RleSectorMap {
+            runs: vec![
+                (2, SectorType::Mode1),
+                (1, SectorType::PregapAudio),
+                (3, SectorType::Mode2Form2),
+            ],
+        };
+
+        let decoded = rle_decode_map(&encoded);
+
+        assert_eq!(
+            decoded.sectors,
+            vec![
+                SectorType::Mode1,
+                SectorType::Mode1,
+                SectorType::PregapAudio,
+                SectorType::Mode2Form2,
+                SectorType::Mode2Form2,
+                SectorType::Mode2Form2,
+            ]
+        );
+    }
+}
