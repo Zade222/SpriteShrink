@@ -46,13 +46,19 @@ cd SpriteShrink
 
 ### Building the Project
 
-SpriteShrink is a Cargo workspace with two main crates: `cli_application` (the executable) and `lib_sprite_shrink` (the library). You can build the entire project using a single Cargo command:
+SpriteShrink is a Cargo workspace with three crates:
+
+* `cli_application`: the `sprite-shrink` executable.
+* `lib_sprite_shrink`: the core library (`sprite_shrink`), which handles chunking, deduplication, compression and the archive format.
+* `lib_ss_cd`: the CD image library (`sprite_shrink_cd`), which handles CUE parsing, sector analysis and reconstruction, and FLAC audio compression for the `optical` mode.
+
+You can build the entire project using a single Cargo command:
 
 ```bash
 cargo build --release
 ```
 
-This will compile both the CLI application and the library in release mode.
+This will compile the CLI application and both libraries in release mode.
 
 ## 2. Contribution Workflow
 
@@ -99,16 +105,12 @@ When creating your PR, please ensure you fill out the provided Pull Request temp
 
 ### Rustfmt
 
-All source code merged into the `main` branch must adhere to the standard Rust style guidelines enforced by the `rustfmt` tool.
+The codebase isn't formatted with `rustfmt` yet. Its style, such as aligned struct fields and wrapped comments, needs `rustfmt` options that are only available on nightly, so CI doesn't check formatting for now.
 
-You can check and format your code locally using:
+Until that changes:
 
-```bash
-cargo fmt --check # To check for formatting issues
-cargo fmt         # To automatically format your code
-```
-
-Our Continuous Integration (CI) pipeline will automatically run `cargo fmt --check` for every submitted pull request, and it must pass before your PR can be merged.
+* Match the style of the surrounding code, and keep lines within 80 characters.
+* Don't run `cargo fmt` on whole files or crates. It reformats unrelated code, which makes a pull request hard to review.
 
 ### Documentation
 
@@ -118,6 +120,48 @@ All public items (functions, structs, enums, etc.) in the `lib_sprite_shrink` li
 * Explanations for all parameters.
 * Details on the return value.
 * At least one working usage example (where applicable).
+
+### Testing
+
+Run the full test suite before submitting a pull request:
+
+```bash
+cargo test --workspace
+```
+
+CI runs the tests on Linux and Windows, in both debug and release mode, for every push and pull request. It also checks that the generated C header compiles, and runs the `lib_ss_cd` tests under QEMU on an emulated CPU without AVX2 so the non-AVX2 SIMD path is covered.
+
+To run only part of the suite, filter by crate, test binary or module path:
+
+```bash
+cargo test -p sprite_shrink --test integration format_layout::
+```
+
+**Where tests go:**
+
+* **Unit tests** go in a `#[cfg(test)] mod tests` at the bottom of the file they test. Use them for private functions, and to check which error variant a function returns.
+* **Integration tests** go in `crates/<crate>/tests/integration/`. Each crate builds a single integration test binary from `main.rs`, which only declares modules, so add a new file there as a module. Integration tests use only the public API.
+* Name tests `<unit>_<condition>_<expected>`, for example `parse_file_header_wrong_magic_returns_invalid_header`.
+
+**Known bugs:** a test for a confirmed bug that isn't fixed yet is marked `#[ignore = "<what currently fails>"]`. Run these with `cargo test -- --ignored`. When you fix the bug, remove the `#[ignore]`.
+
+**Lints:** `clippy.toml` allows `unwrap`, `expect`, indexing, `panic!` and `dbg!` in test code. For any other exception, use `#[expect(lint, reason = "...")]` rather than `#[allow]`.
+
+**Benchmarks:** if a change touches sector reconstruction or the ECC code, compare its performance before and after:
+
+```bash
+cargo bench -p sprite_shrink_cd --bench sector_rebuild -- --save-baseline before
+# apply your change, then:
+cargo bench -p sprite_shrink_cd --bench sector_rebuild -- --baseline before
+```
+
+Differences of 1-2% are within run-to-run noise. For a smaller change, run the two builds alternately and pin them to one core (`taskset -c 2` on Linux).
+
+To test the non-AVX2 path locally on Linux, install QEMU user-mode emulation and run:
+
+```bash
+CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="qemu-x86_64 -cpu Westmere" cargo test -p sprite_shrink_cd
+```
 
 ### Error Handling
 
