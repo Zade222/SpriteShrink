@@ -33,5 +33,9 @@ zstd-sys = { version = "~2.0", default-features = false, features = ["experiment
 [build-dependencies]
 cbindgen = "0.29"
 
+[dev-dependencies]
+# The integration tests serialize headers the same way the CLI writes them.
+zerocopy = { version = "~0.8", default-features = false }
+
 [lints]
 workspace = true
