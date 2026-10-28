@@ -36,5 +36,12 @@ zerocopy = { version = "~0.8", default-features = false, features = ["derive"] }
 [build-dependencies]
 cbindgen = "0.29"
 
+[dev-dependencies]
+criterion = { version = "~0.8", default-features = false, features = ["cargo_bench_support"] }
+
+[[bench]]
+name = "sector_rebuild"
+harness = false
+
 [lints]
 workspace = true
