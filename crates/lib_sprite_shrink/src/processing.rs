@@ -154,6 +154,10 @@ fn generate_sha_512(data: &[u8]) -> [u8; 64]{
 /// * `file_data`: A reference to the `FileData` struct to be chunked.
 /// * `seed`: A `u64` value to initialize the chunking algorithm.
 ///
+/// The size bounds and normalization level match the CLI's `StreamCDC`
+/// chunker, so a file is cut at the same points whether it's chunked in
+/// memory or streamed. Level 0 produced smaller archives than level 1.
+///
 /// # Returns
 ///
 /// A `Result` which is:
@@ -168,7 +172,7 @@ fn chunk_data(
         (window_size/4) as u32,
         window_size as u32,
         (window_size*4) as u32,
-        Normalization::Level1, seed);
+        Normalization::Level0, seed);
 
     chunker.collect()
 }
@@ -785,4 +789,62 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     }
 
     Ok(required_chunks)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use fastcdc::v2020::StreamCDC;
+
+    use super::*;
+
+    /// Pseudo-random bytes from a fixed-seed xorshift generator.
+    fn test_bytes(len: usize) -> Vec<u8> {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_be_bytes()[0]
+            })
+            .collect()
+    }
+
+    // The CLI streams files through StreamCDC with these settings
+    // (`default.rs` and `optical.rs`). If they drift apart, the same file is
+    // cut differently depending on which path compressed it.
+    #[test]
+    fn chunk_data_matches_cli_stream_chunker() {
+        let window_size: u64 = 4096;
+        let file_data = FileData {
+            file_name: "test.bin".to_string(),
+            file_data: test_bytes(1 << 20),
+        };
+
+        let in_memory: Vec<(u64, usize)> =
+            chunk_data(&file_data, SS_SEED, window_size)
+                .iter()
+                .map(|c| (u64::try_from(c.offset).unwrap(), c.length))
+                .collect();
+
+        let streamed: Vec<(u64, usize)> = StreamCDC::with_level_and_seed(
+            Cursor::new(&file_data.file_data),
+            u32::try_from(window_size / 4).unwrap(),
+            u32::try_from(window_size).unwrap(),
+            u32::try_from(window_size * 4).unwrap(),
+            Normalization::Level0,
+            SS_SEED,
+        )
+        .map(|c| {
+            let c = c.unwrap();
+            (c.offset, c.length)
+        })
+        .collect();
+
+        assert!(in_memory.len() > 100, "too few chunks to compare");
+        assert_eq!(in_memory, streamed);
+    }
 }
