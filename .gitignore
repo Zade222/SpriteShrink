@@ -1,3 +1,119 @@
 /target
 /.cargo
 /notes
+
+# ==============================================================================
+# AI Coding Harnesses, CLI Agents, and Evaluation Frameworks
+# ==============================================================================
+
+# ------------------------------------------------------------------------------
+# 1. Ephemeral Secrets & Provider Credential Stores
+# ------------------------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+oauth-keys.env
+**/[Aa]gent*/**/credentials.json
+
+# ------------------------------------------------------------------------------
+# 2. Aider (CLI Assistant)
+# ------------------------------------------------------------------------------
+# Interaction logs, prompt buffers, and full API traces
+.aider.chat.history.md
+.aider.input.history
+.aider.llm.history
+
+# Local AST indexing databases (SQLite) and runtime metadata
+.aider.tags.cache.v*
+.aider.model.settings.yml
+.aider.model.metadata.json
+
+# Retain project-level conventions and context boundaries:
+# !.aiderignore
+# !.aider.conf.yml
+
+# ------------------------------------------------------------------------------
+# 3. Claude Code (Anthropic CLI Agent)
+# ------------------------------------------------------------------------------
+# Machine-local instructions and developer preferences
+CLAUDE.local.md
+.claude/*.local.md
+
+# Machine-local permission approvals and execution allowances
+.claude/settings.local.json
+
+# Ephemeral auto-memory databases and analytics dumps
+.claude/memory/
+.claude/analytics.json
+
+# Retain team-wide instructions, execution policies, and rules:
+# !CLAUDE.md
+# !.claude/settings.json
+# !.claude/rules/
+
+# ------------------------------------------------------------------------------
+# 4. Cursor IDE
+# ------------------------------------------------------------------------------
+# Internal indexing databases, Merkle trees, and local state
+.cursor/*
+!.cursor/rules/
+!.cursor/skills/
+
+# ------------------------------------------------------------------------------
+# 5. Continue.dev
+# ------------------------------------------------------------------------------
+# Vector databases (LanceDB), symbol caches, and session state
+.continue/*
+!.continue/config.yaml
+!.continue/config.json
+
+# ------------------------------------------------------------------------------
+# 6. Cline, Roo Code, and VS Code Agent Extensions
+# ------------------------------------------------------------------------------
+# Ephemeral task state, checkpoints, and telemetry
+.cline/
+.roo/
+.void/
+.trae/
+.kilocode/
+.codebuddy/
+
+# Retain behavioral directives and context ignore boundaries:
+# !.clinerules
+# !.roomodes
+# !.clineignore
+
+# ------------------------------------------------------------------------------
+# 7. Windsurf & Codeium Cascade
+# ------------------------------------------------------------------------------
+.windsurf/*
+!.windsurf/rules/
+!.windsurf/workflows/
+.codeium/
+
+# ------------------------------------------------------------------------------
+# 8. OpenHands (OpenDevin) & Agent Execution Platforms
+# ------------------------------------------------------------------------------
+.openhands/
+.openhands-state/
+openhands_runtime/
+.agent/
+.agents/*
+!.agents/skills/
+
+# ------------------------------------------------------------------------------
+# 9. Amazon Q Developer & Block Goose
+# ------------------------------------------------------------------------------
+goose-*.log
+.goose/*
+!.goose/recipes/
+.amazonq/*
+!.amazonq/rules/
+
+# ------------------------------------------------------------------------------
+# 10. Misc
+# ------------------------------------------------------------------------------
+.pi
+.gsd
