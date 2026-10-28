@@ -14,8 +14,8 @@ mod lib_structs;
 pub use lib_structs::{
     SSMC_UID,
     ChunkLocation, FileData, FileHeader, FileManifestParent, FileRegion,
-    ProcessedFileData, Progress, SerializedData, SSAChunkMeta, SSMCFormatData,
-    SSMCTocEntry
+    ProcessedFileData, Progress, SeekMetadata, SerializedData, SSAChunkMeta,
+    SSMCFormatData, SSMCTocEntry
 };
 
 mod parsing;
