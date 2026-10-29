@@ -16,11 +16,12 @@
 use std::{
     fs,
     path::{Path, PathBuf},
-    process::Command,
 };
 
 use sprite_shrink_cd::{SectorType, rebuild_sector_bitwise};
 use tempfile::TempDir;
+
+use crate::common::run_cli;
 
 const BLESS_VAR: &str = "SPRITE_SHRINK_BLESS";
 
@@ -63,25 +64,6 @@ fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/baseline")
         .join(name)
-}
-
-/// Runs the CLI and fails the test if it reports an error. The CLI exits 0
-/// even when it fails, so the output is checked as well as the status.
-fn run_cli(args: &[&str]) {
-    let output = Command::new(env!("CARGO_BIN_EXE_sprite-shrink"))
-        .args(["--ignore-config", "--disable-logging", "--threads", "1"])
-        .args(args)
-        .output()
-        .unwrap();
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success()
-            && !stdout.contains("encountered an error")
-            && !stderr.contains("encountered an error"),
-        "sprite-shrink {args:?} failed\nstdout:\n{stdout}\nstderr:\n{stderr}"
-    );
 }
 
 /// Compares `archive` with the committed fixture, or replaces the fixture

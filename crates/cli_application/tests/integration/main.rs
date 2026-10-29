@@ -3,3 +3,9 @@
 
 #[cfg(test)]
 mod baseline_archives;
+
+#[cfg(test)]
+mod common;
+
+#[cfg(test)]
+mod compat_archives;
