@@ -16,8 +16,9 @@ use thiserror::Error;
 
 use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{
-    ChunkLocation, FileHeader, FileManifestParent, SSMCTocEntry,
-    SSMCFormatData
+    SSMC_UID,
+    ChunkLocation, FileHeader, FileManifestParent, FileRegion, ParsedSSMC,
+    SSMCTocEntry, SSMCFormatData
 };
 
 #[derive(Error, Debug)]
@@ -36,6 +37,9 @@ pub enum ParsingError {
 
     #[error("Failed to decode file manifest: {0}")]
     ManifestDecodeError(String),
+
+    #[error("Archive section is out of bounds. {0}")]
+    SectionOutOfBounds(String),
 
     #[error("Failed to decode table of contents: {0}")]
     TOCDecodeError(String)
@@ -145,6 +149,9 @@ where
 /// `bitcode` to decode the data into a `HashMap` for efficient lookups
 /// during file extraction.
 ///
+/// Offsets are returned as stored, relative to the format data's
+/// `data_offset`. [`parse_ssmc_prefix`] returns absolute file offsets.
+///
 /// # Arguments
 ///
 /// * `chunk_index_data`: A byte slice of the binary-encoded chunk index.
@@ -195,12 +202,93 @@ pub fn parse_format_data(
     Ok(SSMCFormatData::from_le_bytes(format_bytes))
 }
 
+/// Reads every part of an SSMC archive's metadata from its prefix.
+///
+/// `prefix` is the start of the archive, at least up to
+/// `SSMCFormatData::metadata_prefix_end`; any bytes past that are ignored.
+/// A host reads the header and format data first to find that length.
+/// Each section is found only through the offsets the header and format
+/// data record, and each is checked against the end of `prefix`.
+///
+/// The returned chunk index holds absolute file offsets, not the offsets
+/// stored in the archive, which are relative to `data_offset`.
+///
+/// # Errors
+///
+/// Returns a `ParsingError` if the header is invalid or isn't for an SSMC
+/// archive, a section lies outside `prefix`, a section fails to decode, or
+/// a chunk's absolute offset doesn't fit in a `u64`.
+pub fn parse_ssmc_prefix<H>(
+    prefix: &[u8]
+) -> Result<ParsedSSMC<H>, SpriteShrinkError>
+where
+    for<'de> H: Eq + std::hash::Hash + Deserialize<'de> + Decode<'de>,
+{
+    let header_region = FileRegion {
+        offset: 0,
+        length: FileHeader::HEADER_SIZE.into(),
+    };
+    let header = parse_file_header(header_region.bytes_in(prefix, "header")?)?;
+
+    if header.format_id != SSMC_UID {
+        return Err(ParsingError::InvalidHeader(format!(
+            "Format ID {:#06x} is not an SSMC archive.",
+            header.format_id
+        )).into());
+    }
+
+    let toc_region = FileRegion {
+        offset: header.enc_toc_offset.into(),
+        length: header.enc_toc_length.into(),
+    };
+    let toc = parse_file_toc(toc_region.bytes_in(prefix, "table of contents")?)?;
+
+    let format_data_region = FileRegion {
+        offset: header.format_data_offset.into(),
+        length: SSMCFormatData::SIZE,
+    };
+    let format_data = parse_format_data(
+        format_data_region.bytes_in(prefix, "format data")?
+    )?;
+
+    let manifests = parse_file_metadata(
+        format_data.enc_manifest.bytes_in(prefix, "file manifest")?
+    )?;
+
+    let dictionary = format_data.data_dictionary
+        .bytes_in(prefix, "dictionary")?
+        .to_vec();
+
+    let mut chunk_index: HashMap<H, ChunkLocation> = parse_file_chunk_index(
+        format_data.enc_chunk_index.bytes_in(prefix, "chunk index")?
+    )?;
+
+    for location in chunk_index.values_mut() {
+        location.offset = location.offset
+            .checked_add(format_data.data_offset)
+            .ok_or_else(|| ParsingError::SectionOutOfBounds(format!(
+                "Chunk offset {} past data offset {} doesn't fit in a u64.",
+                location.offset,
+                format_data.data_offset
+            )))?;
+    }
+
+    Ok(ParsedSSMC {
+        header,
+        format_data,
+        toc,
+        manifests,
+        dictionary,
+        chunk_index,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use bitcode::encode;
 
     use super::*;
-    use crate::lib_structs::{ALGORITHM_ZSTD, SSAChunkMeta, SSMC_UID};
+    use crate::lib_structs::{ALGORITHM_ZSTD, SSAChunkMeta};
 
     /// An 8-byte aligned buffer, so a test can place bytes at an offset
     /// that is known to be misaligned.

@@ -14,7 +14,7 @@ mod lib_structs;
 pub use lib_structs::{
     ALGORITHM_ZSTD, SSMC_UID,
     ChunkLocation, CompressionResult, FileData, FileHeader, FileManifestParent, FileRegion,
-    ProcessedFileData, Progress, SeekMetadata, SerializedData, SSAChunkMeta,
+    ParsedSSMC, ProcessedFileData, Progress, SeekMetadata, SerializedData, SSAChunkMeta,
     SSMCFormatData, SSMCTocEntry
 };
 
@@ -22,7 +22,7 @@ mod parsing;
 pub use parsing::{
     SUPPORTED_VERSION, MAGIC_NUMBER, SS_SEED,
     parse_file_chunk_index, parse_file_header, parse_file_metadata,
-    parse_file_toc, parse_format_data
+    parse_file_toc, parse_format_data, parse_ssmc_prefix
 };
 
 mod processing;

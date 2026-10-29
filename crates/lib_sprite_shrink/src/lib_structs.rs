@@ -21,6 +21,7 @@ use zerocopy::{Immutable, IntoBytes, FromBytes};
 use crate::{
     MAGIC_NUMBER, SUPPORTED_VERSION,
     lib_error_handling::SpriteShrinkError,
+    parsing::ParsingError,
     serialization::SerializationError,
 };
 
@@ -285,6 +286,51 @@ impl FileRegion {
             length: u64::from_le(region.length),
         }
     }
+
+    /// Returns the bytes this region covers in `bytes`, which must start at
+    /// the beginning of the archive. `section` names the region in the
+    /// error message.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ParsingError::SectionOutOfBounds` if the region ends past
+    /// the end of `bytes`, or its end doesn't fit in a `u64`.
+    pub fn bytes_in<'a>(
+        &self,
+        bytes: &'a [u8],
+        section: &str,
+    ) -> Result<&'a [u8], SpriteShrinkError> {
+        let range = self.offset.checked_add(self.length).and_then(|end| {
+            Some(usize::try_from(self.offset).ok()?..usize::try_from(end).ok()?)
+        });
+
+        range.and_then(|range| bytes.get(range)).ok_or_else(|| {
+            ParsingError::SectionOutOfBounds(format!(
+                "The {section} at offset {} with length {} doesn't fit in \
+                {} bytes.",
+                self.offset,
+                self.length,
+                bytes.len()
+            )).into()
+        })
+    }
+}
+
+/// The metadata of an SSMC archive, read from its prefix by
+/// [`parse_ssmc_prefix`].
+///
+/// [`parse_ssmc_prefix`]: crate::parse_ssmc_prefix
+#[derive(Clone, Debug)]
+pub struct ParsedSSMC<H> {
+    pub header:      FileHeader,
+    pub format_data: SSMCFormatData,
+    pub toc:         Vec<SSMCTocEntry>,
+    pub manifests:   Vec<FileManifestParent<H>>,
+    pub dictionary:  Vec<u8>,
+    /// Where each chunk is stored. Unlike the encoded index, each `offset`
+    /// is a position in the archive file, so a host can seek straight to
+    /// it.
+    pub chunk_index: HashMap<H, ChunkLocation>,
 }
 
 /// Holds the results of the initial file processing stage.
