@@ -1,0 +1,4 @@
+# Archive fixtures are compared byte for byte, so git must never convert
+# their line endings.
+*.ssmc binary
+*.ssmd binary

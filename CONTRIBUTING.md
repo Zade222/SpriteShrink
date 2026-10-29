@@ -145,7 +145,9 @@ cargo test -p sprite_shrink --test integration format_layout::
 
 **Known bugs:** a test for a confirmed bug that isn't fixed yet is marked `#[ignore = "<what currently fails>"]`. Run these with `cargo test -- --ignored`. When you fix the bug, remove the `#[ignore]`.
 
-**Lints:** `clippy.toml` allows `unwrap`, `expect`, indexing, `panic!` and `dbg!` in test code. For any other exception, use `#[expect(lint, reason = "...")]` rather than `#[allow]`.
+**Lints:** `clippy.toml` allows `unwrap`, `expect`, indexing, `panic!` and `dbg!` in test code. Clippy only treats `#[test]` functions and `#[cfg(test)]` modules as test code, so declare each integration test module in `main.rs` with `#[cfg(test)]` to cover its helper functions too. For any other exception, use `#[expect(lint, reason = "...")]` rather than `#[allow]`.
+
+**Baseline archives:** `crates/cli_application/tests/fixtures/baseline/` holds archives the CLI wrote from fixed generated input. The `baseline_archives` tests recompress that input and require identical bytes. If a change is meant to alter the archive bytes, regenerate the fixtures with `SPRITE_SHRINK_BLESS=1 cargo test -p sprite_shrink_application --test integration baseline_archives::` and commit them with the change.
 
 **Benchmarks:** if a change touches sector reconstruction or the ECC code, compare its performance before and after:
 

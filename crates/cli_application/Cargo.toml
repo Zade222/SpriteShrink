@@ -45,5 +45,8 @@ zerocopy = { version = "~0.8", default-features = false, features = ["derive"] }
 [features]
 dhat-heap = ["dhat"]
 
+[dev-dependencies]
+tempfile = { version = "~3.27", default-features = false }
+
 [lints]
 workspace = true
