@@ -40,7 +40,6 @@ tracing = { version = "~0.1", default-features = false }
 tracing-appender = { version = "~0.2", default-features = false }
 tracing-subscriber = { version = "~0.3", default-features = false, features = ["fmt", "json"] }
 xxhash-rust = { version = "~0.8", default-features = false, features = ["xxh3"] }
-zerocopy = { version = "~0.8", default-features = false, features = ["derive"] }
 
 [features]
 dhat-heap = ["dhat"]

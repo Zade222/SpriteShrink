@@ -1335,7 +1335,6 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "xxhash-rust",
- "zerocopy",
 ]
 
 [[package]]

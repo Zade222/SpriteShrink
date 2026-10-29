@@ -17,7 +17,7 @@ use std::{
     thread
 };
 
-use bitcode::{Encode, encode};
+use bitcode::Encode;
 use dashmap::DashMap;
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::bounded;
@@ -29,21 +29,20 @@ use tracing::{
     debug,
 };
 use sprite_shrink::{
-    ALGORITHM_ZSTD, SS_SEED,
-    ArchiveBuilder, ChunkLocation, FileHeader,
+    SS_SEED,
+    ArchiveBuilder, ChunkLocation,
 };
 use sprite_shrink_cd::{
-    SSMD_UID,
     ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
     FileSizeProvider, ExceptionRegistry, MultiBinStream,
     ReconstructionError, SectorDataProvider, SectorRegionStream, SectorMap,
-    SectorType, SpriteShrinkCDError, SSMDFormatData, SSMDTocEntry,
+    SectorType, SpriteShrinkCDError, SSMDPrefix, SSMDTocEntry,
     SubheaderRegistry, UserDataStream,
-    analyze_cue_sheets, analyze_and_map_disc, compress_audio_blocks,
-    resolve_file_sector_counts, rle_encode_map, verify_disc_integrity
+    analyze_cue_sheets, analyze_and_map_disc, build_ssmd_prefix,
+    compress_audio_blocks, resolve_file_sector_counts, rle_encode_map,
+    verify_disc_integrity
 };
 use xxhash_rust::xxh3::Xxh3;
-use zerocopy::IntoBytes;
 
 use crate::{
     arg_handling::Args,
@@ -486,58 +485,20 @@ where
         toc.filename.push_str(".bin");
     });
 
-    let enc_toc = encode(&archive_toc);
-
-    let enc_disc_manifest = encode(&disc_manifests);
-
-    let enc_audio_index = if !audio_block_index.is_empty() {
-        encode(&audio_block_index)
-    } else {
-        vec![0u8; 0]
-    };
-
-    let enc_excep_index = encode(&exception_index);
-
-    let file_header = FileHeader::build_file_header(
-        archive_toc.len(),
-        ALGORITHM_ZSTD,
-        *hash_type_id,
-        SSMD_UID,
-        enc_toc.len()
-    )?;
-
-    let format_data = SSMDFormatData::build_format_data(
-        FileHeader::HEADER_SIZE as usize + enc_toc.len(),
-        enc_disc_manifest.len(),
-        comp_data.dictionary_size,
-        comp_data.enc_chunk_index_size,
-        enc_audio_index.len() as u64,
-        enc_excep_index.len() as u64,
-        subheader_table.len() as u64 * 8 ,
-        exception_blob.len() as u64,
-        final_audio_blob_size
-    );
-
-    let mut final_data = Vec::with_capacity(
-        FileHeader::HEADER_SIZE as usize + enc_toc.len() +
-            SSMDFormatData::SIZE as usize + enc_disc_manifest.len() +
-            comp_data.dictionary_size as usize +
-            comp_data.enc_chunk_index_size as usize +
-            subheader_table.len()
-    );
-
-    final_data.extend_from_slice(&file_header.to_le_bytes());
-    final_data.extend_from_slice(&enc_toc);
-    final_data.extend_from_slice(&format_data.to_le_bytes());
-    final_data.extend_from_slice(&enc_disc_manifest);
-    final_data.extend_from_slice(&comp_data.dictionary);
-    final_data.extend_from_slice(&comp_data.enc_chunk_index);
-    if !audio_block_index.is_empty() {
-        final_data.extend_from_slice(&enc_audio_index);
-    }
-    final_data.extend_from_slice(&enc_excep_index);
-    final_data.extend_from_slice(subheader_table.as_bytes());
-    final_data.extend_from_slice(&exception_blob);
+    /*Builds every byte of the archive that comes before the compressed
+    audio and data: header, TOC, format data, disc manifest, dictionary,
+    indexes, subheader table and exception data.*/
+    let final_data = build_ssmd_prefix(&SSMDPrefix {
+        toc: &archive_toc,
+        disc_manifests: &disc_manifests,
+        comp: &comp_data,
+        audio_block_index: &audio_block_index,
+        exception_index: &exception_index,
+        subheader_table: &subheader_table,
+        exception_blob: &exception_blob,
+        audio_blob_size: final_audio_blob_size,
+        hash_type: *hash_type_id,
+    })?;
 
     println!("Estimated final data size with blob: {}", final_data.len() + blob_size as usize);
 
