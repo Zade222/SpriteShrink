@@ -17,7 +17,6 @@ use std::{
     },
 };
 use bitcode::Decode;
-use rayon::join;
 use serde::{Deserialize, Serialize};
 use tracing::{
     debug
@@ -25,24 +24,22 @@ use tracing::{
 
 use sprite_shrink::{
     SSMC_UID,
-    Hashable, FileHeader, SSMCFormatData, SSMCTocEntry,
-    decompress_chunk, parse_file_metadata, parse_file_chunk_index,
-    parse_format_data
+    Hashable, FileHeader, ParsedSSMC,
+    decompress_chunk
 };
 
 use sprite_shrink_cd::{
     SSMD_UID,
-    SSMDFormatData, SSMDTocEntry, SSMDIndices,
-    decode_ssmd_format_data, decode_ssmd_meta_data, generate_cue_string,
-    write_disc
+    ParsedSSMD,
+    generate_cue_string, write_disc
 };
 
 use crate::{
-    archive_parser::{get_file_header, get_toc},
+    archive_parser::{get_file_header, get_ssmc_prefix, get_ssmd_prefix},
     arg_handling::Args,
     cli_types::TempFileGuard,
     error_handling::CliError,
-    storage_io::{read_file_data, read_metadata_block},
+    storage_io::read_file_data,
 };
 
 /// Executes the file extraction process from an archive.
@@ -133,62 +130,34 @@ where
 {
     match header.format_id {
         SSMC_UID => {
-            let toc: Vec<SSMCTocEntry> = get_toc(
-                file_path,
-                header.enc_toc_offset,
-                header.enc_toc_length as usize
-            )?;
-
-            let bin_format_data = read_file_data(
-                file_path,
-                header.format_data_offset as u64,
-                SSMCFormatData::SIZE as usize
-            )?;
-
-            let format_data = parse_format_data(&bin_format_data)?;
-
-            //Read all required metadata.
-            let metadata_block = read_metadata_block(file_path, &format_data)?;
+            //Read and parse all metadata before the compressed data.
+            let prefix = get_ssmc_prefix::<H>(file_path, header)?;
 
             extract_ssmc_data::<H>(
                 file_path,
                 out_dir,
                 rom_indices,
-                &format_data,
-                &toc,
-                &metadata_block,
+                &prefix,
                 args,
                 running
             )?
         },
         SSMD_UID => {
-            let toc: Vec<SSMDTocEntry> = get_toc(
-                file_path,
-                header.enc_toc_offset,
-                header.enc_toc_length as usize
-            )?;
-
-            let bin_format_data = read_file_data(
-                file_path,
-                header.format_data_offset as u64,
-                SSMDFormatData::SIZE as usize
-            )?;
-
-            let format_data = decode_ssmd_format_data(&bin_format_data)?;
+            //Read and parse all metadata before the audio and data blobs.
+            let prefix = get_ssmd_prefix::<H>(file_path, header)?;
 
             extract_ssmd_data::<H>(
                 file_path,
                 out_dir,
                 rom_indices,
-                &format_data,
-                &toc,
+                prefix,
                 args,
                 running
             )?;
 
         }
         _ => {
-            return Err(CliError::InvalidFormatID(header.hash_type as u16))
+            return Err(CliError::InvalidFormatID(header.format_id))
         }
     }
 
@@ -222,10 +191,8 @@ where
 ///   an `InvalidOutputPath` error is returned.
 /// * `rom_indices`: A vector of `u8` indices specifying which files to
 ///   extract from the archive. These indices are 1-based.
-/// * `header`: A reference to the `sprite_shrink::FileHeader` containing
-///   metadata about the archive.
-/// * `metadata_block`: A slice of `u8` containing the raw metadata block
-///   (manifest, dictionary, and chunk index) read from the archive.
+/// * `prefix`: The archive's parsed metadata: TOC, manifest, dictionary,
+///   and a chunk index holding absolute file offsets.
 /// * `args`: A reference to the main `Args` struct, used to check
 ///   configuration options like `force`.
 /// * `running`: An `Arc<AtomicBool>` used to signal and check for
@@ -240,8 +207,6 @@ where
 /// # Errors
 ///
 /// This function can return an error in several cases, including:
-/// - `CliError::from` for errors originating from parsing the file manifest
-///   or chunk index.
 /// - `CliError::InvalidOutputPath` if `out_dir` does not exist and `args.force`
 ///   is false.
 /// - `CliError::InvalidRomIndex` if a requested ROM index is out of bounds
@@ -259,9 +224,7 @@ fn extract_ssmc_data<H>(
     file_path: &Path,
     out_dir: &Path,
     rom_indices: &Vec<u8>,
-    format_data: &SSMCFormatData,
-    toc: &[SSMCTocEntry],
-    metadata_block: &[u8],
+    prefix: &ParsedSSMC<H>,
     args: &Args,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
@@ -275,22 +238,13 @@ where
         for<'de> Deserialize<'de> +
         for<'de> Decode<'de>,
 {
-    /*Stores the length of each piece of the metadata from the archive as
-     provided by the header.*/
-    let man_length = format_data.enc_manifest.length as usize;
-    let dict_length = format_data.data_dictionary.length as usize;
-
-    let manifest_slice = &metadata_block[0..man_length];
-    let dict_slice = &metadata_block[man_length..man_length + dict_length];
-    let index_slice = &metadata_block[man_length + dict_length..];
-
-    let (manifest_result, index_result) = join(
-        || parse_file_metadata::<H>(manifest_slice).map_err(CliError::from),
-        || parse_file_chunk_index::<H>(index_slice).map_err(CliError::from),
-    );
-
-    let file_manifest = manifest_result?;
-    let chunk_index = index_result?;
+    let ParsedSSMC {
+        toc,
+        manifests: file_manifest,
+        dictionary,
+        chunk_index,
+        ..
+    } = prefix;
 
     if !out_dir.exists() && !args.force{
         return Err(CliError::InvalidOutputPath())
@@ -328,21 +282,16 @@ where
                 ))
             })?;
 
-            /*Store the chunk data offset within the compressed
-            store, from the ChunkLocation struct.*/
-            let absolute_offset =
-                chunk_location.offset +
-                format_data.data_offset;
-
+            //The chunk index already holds absolute file offsets.
             let comp_chunk_data = read_file_data(
                 file_path,
-                absolute_offset,
+                chunk_location.offset,
                 chunk_location.compressed_length as usize
             )?;
 
             let decomp_chunk_data = decompress_chunk(
                     &comp_chunk_data,
-                    dict_slice
+                    dictionary
             )?;
 
             let decomp_chunk_hash = H::from_bytes_with_seed(
@@ -380,8 +329,7 @@ fn extract_ssmd_data<H> (
     file_path: &Path,
     out_dir: &Path,
     disc_indices: &[u8],
-    format_data: &SSMDFormatData,
-    toc: &[SSMDTocEntry],
+    prefix: ParsedSSMD<H>,
     args: &Args,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
@@ -395,33 +343,15 @@ where
         for<'de> Deserialize<'de> +
         for<'de> Decode<'de>,
 {
-    let metadata_len = (
-        format_data.exception_data.offset - format_data.enc_disc_manifest.offset
-    ) as usize;
-
-    let encoded_metadata = read_file_data(
-        file_path,
-        format_data.enc_disc_manifest.offset,
-        metadata_len
-    )?;
-
-    let exception_blob: Vec<u8> = read_file_data(
-        file_path,
-        format_data.exception_data.offset,
-        format_data.exception_data.length as usize
-    )?;
-
-    let result = decode_ssmd_meta_data::<H>(format_data, &encoded_metadata)?;
-
-    let disc_manifests = result.disc_manifests;
-    let dictionary = result.data_dictionary;
-    let subheader_table = result.subheader_table;
-
-    let indices = SSMDIndices {
-        chunk_index: result.chunk_index,
-        audio_block_index: result.audio_block_index.unwrap_or_default(),
-        exception_index: result.exception_index.unwrap_or_default()
-    };
+    let ParsedSSMD {
+        toc,
+        disc_manifests,
+        data_dictionary: dictionary,
+        indices,
+        subheader_table,
+        exception_blob,
+        ..
+    } = prefix;
 
     if !out_dir.exists() && !args.force{
         return Err(CliError::InvalidOutputPath())

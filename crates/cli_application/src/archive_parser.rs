@@ -1,22 +1,26 @@
 //! Parses and extracts data from sprite-shrink archive files.
 //!
 //! This module provides functions to read and interpret the binary
-//! structure of an archive. It is responsible for parsing the file
-//! header, manifest, and chunk index, which are the core components
-//! needed to locate and extract the contained files.
+//! structure of an archive. It is responsible for reading the file
+//! header and the metadata before the compressed data, which are the
+//! core components needed to locate and extract the contained files.
 
 use std::{
-    collections::HashMap,
-    fmt::Display,
+    fs::metadata,
+    hash::Hash,
     path::Path,
 };
 
 use bitcode::Decode;
-use serde::Serialize;
+use serde::Deserialize;
 
 use sprite_shrink::{
-    ChunkLocation, FileHeader, FileManifestParent, Hashable,
-    parse_file_chunk_index, parse_file_header, parse_file_metadata,
+    FileHeader, ParsedSSMC, SSMCFormatData,
+    parse_file_header, parse_format_data, parse_ssmc_prefix,
+};
+use sprite_shrink_cd::{
+    ParsedSSMD, SSMDFormatData,
+    decode_ssmd_format_data, parse_ssmd_prefix,
 };
 
 use crate::error_handling::CliError;
@@ -53,48 +57,6 @@ pub fn get_file_header(file_path: &Path) -> Result<FileHeader, CliError> {
     Ok(header)
 }
 
-/// Reads and parses the file manifest from an archive.
-///
-/// This function extracts the binary file manifest from a given location
-/// within an archive. It reads the raw byte data of the manifest, then
-/// deserializes it into a vector of `FileManifestParent` structs, which
-/// describe the contents and structure of the files in the archive.
-///
-/// # Arguments
-///
-/// * `file_path`: A `Path` pointing to the archive file.
-/// * `man_offset`: The starting byte offset of the manifest data.
-/// * `man_length`: The total length in bytes of the manifest data.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(Vec<FileManifestParent>)` containing the parsed file manifest.
-/// - `Err(CliError)` if reading or parsing the manifest fails.
-pub fn get_file_manifest<H>(
-    file_path: &Path,
-    man_offset: u64,
-    man_length: usize
-) -> Result<Vec<FileManifestParent<H>>, CliError>
-where
-    H: Hashable
-        + Ord
-        + Display
-        + Serialize
-        + for<'de> serde::Deserialize<'de>
-        + for<'de> Decode<'de>,
-{
-    //Read file manifest from file.
-    let bin_vec_manifest = read_file_data(
-        file_path,
-        man_offset,
-        man_length
-    )?;
-
-    //Parse it into the required Vec<FileManifestParent> via the library.
-    parse_file_metadata(&bin_vec_manifest).map_err(CliError::from)
-}
-
 /// Retrieves the maximum valid ROM index from an archive.
 ///
 /// This function reads the archive's header to find the total number of
@@ -125,51 +87,96 @@ pub fn get_max_rom_index(file_path: &Path)
     })
 }
 
-/// Reads and parses the chunk index from an archive file.
+/// Reads and parses every part of an SSMC archive's metadata.
 ///
-/// This function extracts a binary segment containing the chunk index
-/// from an archive. It reads the raw data from a specified offset and
-/// length, then parses it into a `HashMap`. This map associates each
-/// unique chunk hash with its `ChunkLocation`, which provides the offset
-/// and length of the chunk's data within the archive.
+/// Reads the format data to find where the metadata ends, then reads the
+/// archive up to there and parses it with `parse_ssmc_prefix`. The chunk
+/// index it returns holds absolute file offsets.
 ///
-/// # Arguments
+/// # Errors
 ///
-/// * `file_path`: A `Path` pointing to the archive file.
-/// * `chunk_index_offset`: The starting byte offset of the index.
-/// * `chunk_index_length`: The total length in bytes of the index.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(HashMap<u64, ChunkLocation>)` containing the parsed index.
-/// - `Err(CliError)` if reading the file or parsing the data fails.
-pub fn get_chunk_index<H>(
+/// Returns `CliError::DataIntegrity` if the format data says the metadata
+/// ends past the end of the file, or an error from reading the file or
+/// parsing the metadata.
+pub fn get_ssmc_prefix<H>(
     file_path: &Path,
-    chunk_index_offset: u64,
-    chunk_index_length: u64
-) -> Result<HashMap<H, ChunkLocation>, CliError>
+    header: &FileHeader,
+) -> Result<ParsedSSMC<H>, CliError>
 where
-    H: Hashable
-        + Ord
-        + Display
-        + Serialize
-        + for<'de> serde::Deserialize<'de>
-        + for<'de> Decode<'de>,
-    {
-    //Read the chunk_index from the file.
-    let bin_vec_chunk_index = read_file_data(
+    for<'de> H: Eq + Hash + Deserialize<'de> + Decode<'de>,
+{
+    let bin_format_data = read_file_data(
         file_path,
-        chunk_index_offset,
-        chunk_index_length as usize
+        header.format_data_offset.into(),
+        size_of::<SSMCFormatData>()
+    )?;
+    let format_data = parse_format_data(&bin_format_data)?;
+
+    let prefix = read_archive_prefix(
+        file_path,
+        format_data.metadata_prefix_end()
     )?;
 
-    //Parse the binary data into a chunk index HashMap and return the value.
-    parse_file_chunk_index(
-        &bin_vec_chunk_index
-    ).map_err(CliError::from)
+    Ok(parse_ssmc_prefix(&prefix)?)
 }
 
+/// Reads and parses every part of an SSMD archive's metadata.
+///
+/// Reads the format data to find where the metadata ends, then reads the
+/// archive up to there and parses it with `parse_ssmd_prefix`. The chunk
+/// and audio block indexes it returns hold absolute file offsets.
+///
+/// # Errors
+///
+/// Returns `CliError::DataIntegrity` if the format data says the metadata
+/// ends past the end of the file, or an error from reading the file or
+/// parsing the metadata.
+pub fn get_ssmd_prefix<H>(
+    file_path: &Path,
+    header: &FileHeader,
+) -> Result<ParsedSSMD<H>, CliError>
+where
+    for<'de> H: Eq + Hash + Decode<'de>,
+{
+    let bin_format_data = read_file_data(
+        file_path,
+        header.format_data_offset.into(),
+        size_of::<SSMDFormatData>()
+    )?;
+    let format_data = decode_ssmd_format_data(&bin_format_data)?;
+
+    let prefix = read_archive_prefix(
+        file_path,
+        format_data.metadata_prefix_end()
+    )?;
+
+    Ok(parse_ssmd_prefix(&prefix)?)
+}
+
+/// Reads the first `prefix_end` bytes of an archive. The length comes from
+/// the archive itself, so it's checked against the file size before a
+/// buffer that large is allocated.
+fn read_archive_prefix(
+    file_path: &Path,
+    prefix_end: u64,
+) -> Result<Vec<u8>, CliError> {
+    let file_len = metadata(file_path)?.len();
+
+    if prefix_end > file_len {
+        return Err(CliError::DataIntegrity(format!(
+            "the metadata ends at byte {prefix_end}, past the end of the \
+            {file_len}-byte file"
+        )));
+    }
+    let Ok(prefix_len) = usize::try_from(prefix_end) else {
+        return Err(CliError::InternalError(format!(
+            "The archive's {prefix_end}-byte metadata is too large to read \
+            on this platform."
+        )));
+    };
+
+    read_file_data(file_path, 0, prefix_len)
+}
 
 pub fn get_toc<T> (
     file_path: &Path,
