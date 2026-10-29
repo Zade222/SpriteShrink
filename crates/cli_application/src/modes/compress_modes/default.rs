@@ -23,7 +23,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::{bounded};
 use sprite_shrink::{
-    SS_SEED, SSMC_UID,
+    ALGORITHM_ZSTD, SS_SEED, SSMC_UID,
     ArchiveBuilder, FileHeader, FileManifestParent, Hashable, Progress,
     SSAChunkMeta, SSMCFormatData,
     serialize_uncompressed_data, verify_single_file
@@ -615,11 +615,11 @@ where
 
     let file_header = FileHeader::build_file_header(
         file_paths.len() as u32,
-        98, //zstd
+        ALGORITHM_ZSTD,
         *hash_type_id,
         SSMC_UID,
         enc_toc.len() as u32,
-    );
+    )?;
 
     let format_data = SSMCFormatData::build_format_data(
         enc_toc.len() + FileHeader::HEADER_SIZE as usize,

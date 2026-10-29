@@ -8,7 +8,7 @@
 use std::mem::offset_of;
 
 use sprite_shrink::{
-    FileHeader, FileRegion, MAGIC_NUMBER, SS_SEED, SSMC_UID, SSMCFormatData,
+    ALGORITHM_ZSTD, FileHeader, FileRegion, MAGIC_NUMBER, SS_SEED, SSMC_UID, SSMCFormatData,
     SUPPORTED_VERSION, parse_file_header, parse_format_data,
 };
 
@@ -77,11 +77,12 @@ fn format_constants_are_unchanged() {
     // input no longer produces the same archive.
     assert_eq!(SS_SEED, 0x4202_8030_1019_2019);
     assert_eq!(SSMC_UID, 0x0000);
+    assert_eq!(ALGORITHM_ZSTD, 98);
 }
 
 #[test]
 fn build_file_header_places_toc_after_header_and_format_data_after_toc() {
-    let header = FileHeader::build_file_header(3, 98, 1, SSMC_UID, 40);
+    let header = FileHeader::build_file_header(3, 98, 1, SSMC_UID, 40).unwrap();
 
     assert_eq!(header.magic_num, MAGIC_NUMBER);
     assert_eq!(header.file_version, SUPPORTED_VERSION);
@@ -98,7 +99,7 @@ fn build_file_header_places_toc_after_header_and_format_data_after_toc() {
 
 #[test]
 fn build_file_header_serializes_to_golden_bytes() {
-    let header = FileHeader::build_file_header(3, 98, 1, SSMC_UID, 40);
+    let header = FileHeader::build_file_header(3, 98, 1, SSMC_UID, 40).unwrap();
 
     assert_eq!(header.to_le_bytes(), GOLDEN_HEADER);
 }

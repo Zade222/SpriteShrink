@@ -12,8 +12,8 @@ pub use lib_error_handling::{
 
 mod lib_structs;
 pub use lib_structs::{
-    SSMC_UID,
-    ChunkLocation, FileData, FileHeader, FileManifestParent, FileRegion,
+    ALGORITHM_ZSTD, SSMC_UID,
+    ChunkLocation, CompressionResult, FileData, FileHeader, FileManifestParent, FileRegion,
     ProcessedFileData, Progress, SeekMetadata, SerializedData, SSAChunkMeta,
     SSMCFormatData, SSMCTocEntry
 };
@@ -32,4 +32,6 @@ pub use processing::{
     verify_single_file, test_compression};
 
 mod serialization;
-pub use serialization::{dashmap_values_to_vec, serialize_uncompressed_data};
+pub use serialization::{
+    build_ssmc_prefix, dashmap_values_to_vec, serialize_uncompressed_data
+};

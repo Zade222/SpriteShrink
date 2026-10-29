@@ -200,7 +200,7 @@ mod tests {
     use bitcode::encode;
 
     use super::*;
-    use crate::lib_structs::{SSAChunkMeta, SSMC_UID};
+    use crate::lib_structs::{ALGORITHM_ZSTD, SSAChunkMeta, SSMC_UID};
 
     /// An 8-byte aligned buffer, so a test can place bytes at an offset
     /// that is known to be misaligned.
@@ -208,7 +208,7 @@ mod tests {
     struct Aligned<const N: usize>([u8; N]);
 
     fn sample_header() -> FileHeader {
-        FileHeader::build_file_header(3, 98, 1, SSMC_UID, 40)
+        FileHeader::build_file_header(3, ALGORITHM_ZSTD, 1, SSMC_UID, 40).unwrap()
     }
 
     fn sample_manifests<H: Copy>(hashes: [H; 3]) -> Vec<FileManifestParent<H>> {

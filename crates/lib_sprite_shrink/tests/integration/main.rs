@@ -3,3 +3,6 @@
 
 #[cfg(test)]
 mod format_layout;
+
+#[cfg(test)]
+mod ssmc_prefix;

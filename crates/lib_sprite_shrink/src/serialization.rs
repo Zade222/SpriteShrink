@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use bitcode::{Encode, encode};
 use dashmap::DashMap;
 use thiserror::Error;
 
@@ -15,11 +16,16 @@ use crate::lib_error_handling::{
     IsCancelled, SpriteShrinkError
 };
 use crate::lib_structs::{
-    ChunkLocation, FileManifestParent, SerializedData, SSMCTocEntry
+    ALGORITHM_ZSTD, SSMC_UID,
+    ChunkLocation, CompressionResult, FileHeader, FileManifestParent,
+    SerializedData, SSMCFormatData, SSMCTocEntry
 };
 
 #[derive(Error, Debug)]
 pub enum SerializationError {
+    #[error("Archive is too large for the format: {0}")]
+    ArchiveTooLarge(String),
+
     #[error("Chunk missing: {0}")]
     MissingChunk(String),
 
@@ -307,4 +313,85 @@ where
     )?;
 
     Ok(serialized_data)
+}
+
+/// Builds every byte of an SSMC archive that comes before the compressed
+/// data: the file header, table of contents, format data, file manifest,
+/// dictionary and chunk index, in the order the specification lays them out.
+///
+/// The host writes the returned prefix and then appends the compressed chunk
+/// data that [`ArchiveBuilder::build`] passed to its write callback. The
+/// prefix is always `metadata_prefix_end()` bytes long, so the compressed
+/// data starts exactly where the format data says it does.
+///
+/// # Arguments
+///
+/// * `toc`: One entry per file, in the order the files are numbered.
+/// * `manifests`: One manifest per file, in the same order as `toc`.
+/// * `comp`: The dictionary and encoded chunk index from
+///   [`ArchiveBuilder::build`].
+/// * `hash_type`: The hash used for the chunk hashes. 1 = `xxhash3_64`,
+///   2 = `xxhash3_128`.
+///
+/// # Errors
+///
+/// Returns `SerializationError::ArchiveTooLarge` if there are more than
+/// `u32::MAX` files, or the encoded table of contents is too large for the
+/// header's 32-bit offsets.
+///
+/// [`ArchiveBuilder::build`]: crate::ArchiveBuilder::build
+pub fn build_ssmc_prefix<H>(
+    toc: &[SSMCTocEntry],
+    manifests: &[FileManifestParent<H>],
+    comp: &CompressionResult,
+    hash_type: u8,
+) -> Result<Vec<u8>, SpriteShrinkError>
+where
+    H: Encode,
+{
+    let enc_toc = encode(toc);
+    let enc_manifest = encode(manifests);
+
+    let file_count = u32::try_from(toc.len()).map_err(|e| {
+        SerializationError::ArchiveTooLarge(format!(
+            "{} files: {e}", toc.len()
+        ))
+    })?;
+    let enc_toc_length = u32::try_from(enc_toc.len()).map_err(|e| {
+        SerializationError::ArchiveTooLarge(format!(
+            "the table of contents is {} bytes: {e}", enc_toc.len()
+        ))
+    })?;
+
+    let file_header = FileHeader::build_file_header(
+        file_count,
+        ALGORITHM_ZSTD,
+        hash_type,
+        SSMC_UID,
+        enc_toc_length,
+    )?;
+
+    /*Offsets come from the lengths of the bytes actually written, so the
+    format data always matches the prefix.*/
+    let format_data = SSMCFormatData::build_format_data(
+        file_header.format_data_offset as usize,
+        enc_manifest.len(),
+        comp.dictionary.len() as u64,
+        comp.enc_chunk_index.len() as u64,
+    );
+
+    let mut prefix = Vec::with_capacity(
+        size_of::<FileHeader>() + enc_toc.len() +
+            size_of::<SSMCFormatData>() + enc_manifest.len() +
+            comp.dictionary.len() + comp.enc_chunk_index.len()
+    );
+
+    prefix.extend_from_slice(&file_header.to_le_bytes());
+    prefix.extend_from_slice(&enc_toc);
+    prefix.extend_from_slice(&format_data.to_le_bytes());
+    prefix.extend_from_slice(&enc_manifest);
+    prefix.extend_from_slice(&comp.dictionary);
+    prefix.extend_from_slice(&comp.enc_chunk_index);
+
+    Ok(prefix)
 }

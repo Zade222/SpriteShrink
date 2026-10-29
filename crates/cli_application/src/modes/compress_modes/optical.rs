@@ -29,7 +29,7 @@ use tracing::{
     debug,
 };
 use sprite_shrink::{
-    SS_SEED,
+    ALGORITHM_ZSTD, SS_SEED,
     ArchiveBuilder, ChunkLocation, FileHeader,
 };
 use sprite_shrink_cd::{
@@ -500,11 +500,11 @@ where
 
     let file_header = FileHeader::build_file_header(
         archive_toc.len() as u32,
-        98, //zstd
+        ALGORITHM_ZSTD,
         *hash_type_id,
         SSMD_UID,
         enc_toc.len() as u32
-    );
+    )?;
 
     let format_data = SSMDFormatData::build_format_data(
         FileHeader::HEADER_SIZE as usize + enc_toc.len(),

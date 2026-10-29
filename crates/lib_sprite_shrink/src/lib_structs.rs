@@ -19,11 +19,17 @@ use serde::{Deserialize, Serialize};
 use zerocopy::{Immutable, IntoBytes, FromBytes};
 
 use crate::{
-    MAGIC_NUMBER, SUPPORTED_VERSION
+    MAGIC_NUMBER, SUPPORTED_VERSION,
+    lib_error_handling::SpriteShrinkError,
+    serialization::SerializationError,
 };
 
 
 pub const SSMC_UID: u16 = 0x0000;
+
+/// The `algorithm` value in [`FileHeader`] for archives whose data is
+/// compressed with zstd.
+pub const ALGORITHM_ZSTD: u16 = 98;
 
 /// Represents the location of a data chunk within the archive.
 ///
@@ -43,7 +49,22 @@ pub struct ChunkLocation {
     pub compressed_length: u32,
 }
 
-
+/// The compressed sections that [`ArchiveBuilder::build`] produces, ready to
+/// be placed in an archive's metadata prefix.
+///
+/// The compressed chunk data isn't included: `build` hands it to the
+/// caller's write callback as it's produced.
+///
+/// # Fields
+///
+/// * `dictionary`: The zstd dictionary the chunks were compressed with.
+/// * `dictionary_size`: The length of `dictionary` in bytes.
+/// * `enc_chunk_index`: The bitcode-encoded chunk index, mapping each chunk
+///   hash to its location in the compressed data.
+/// * `enc_chunk_index_size`: The length of `enc_chunk_index` in bytes.
+///
+/// [`ArchiveBuilder::build`]: crate::ArchiveBuilder::build
+#[derive(Clone, Debug)]
 pub struct CompressionResult {
     pub dictionary: Vec<u8>,
     pub dictionary_size: u64,
@@ -101,14 +122,28 @@ pub struct FileHeader {
 impl FileHeader {
     pub const HEADER_SIZE: u32 = mem::size_of::<FileHeader>() as u32;
 
+    /// Builds the header for an archive whose encoded table of contents is
+    /// `enc_toc_length` bytes. The TOC directly follows the header, and the
+    /// format data directly follows the TOC.
+    ///
+    /// # Errors
+    ///
+    /// Returns `SerializationError::ArchiveTooLarge` if the format data
+    /// offset, `HEADER_SIZE + enc_toc_length`, doesn't fit in a `u32`.
     pub fn build_file_header(
         file_count: u32,
         algorithm_code: u16,
         hash_type: u8,
         format_id: u16,
         enc_toc_length: u32,
-    ) -> FileHeader {
-        FileHeader {
+    ) -> Result<FileHeader, SpriteShrinkError> {
+        let format_data_offset = Self::HEADER_SIZE
+            .checked_add(enc_toc_length)
+            .ok_or_else(|| SerializationError::ArchiveTooLarge(format!(
+                "the table of contents is {enc_toc_length} bytes"
+            )))?;
+
+        Ok(FileHeader {
             magic_num:      MAGIC_NUMBER,
             file_version:   SUPPORTED_VERSION,
             file_count,
@@ -119,8 +154,8 @@ impl FileHeader {
             _pad2:          [0, 0],
             enc_toc_offset:     Self::HEADER_SIZE,
             enc_toc_length,
-            format_data_offset: Self::HEADER_SIZE + enc_toc_length
-        }
+            format_data_offset,
+        })
     }
 
     /// Returns the header as it's stored in an archive: the fields in
@@ -461,6 +496,17 @@ impl SSMCFormatData {
             },
             data_offset,
         }
+    }
+
+    /// Where the archive's metadata ends and the compressed data begins.
+    /// Every byte before this offset is part of the prefix that
+    /// [`build_ssmc_prefix`] returns, so a host that reads this far has
+    /// everything it needs to locate any chunk.
+    ///
+    /// [`build_ssmc_prefix`]: crate::build_ssmc_prefix
+    #[must_use]
+    pub fn metadata_prefix_end(&self) -> u64 {
+        self.data_offset
     }
 
     /// Returns the format data as it's stored in an archive, with every
