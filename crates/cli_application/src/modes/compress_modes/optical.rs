@@ -528,7 +528,7 @@ where
 
     final_data.extend_from_slice(&file_header.to_le_bytes());
     final_data.extend_from_slice(&enc_toc);
-    final_data.extend_from_slice(format_data.as_bytes());
+    final_data.extend_from_slice(&format_data.to_le_bytes());
     final_data.extend_from_slice(&enc_disc_manifest);
     final_data.extend_from_slice(&comp_data.dictionary);
     final_data.extend_from_slice(&comp_data.enc_chunk_index);

@@ -711,7 +711,10 @@ impl SectorType {
 
 
 #[repr(C)]
-#[derive(Copy, Clone, FromBytes, Immutable, IntoBytes, Pod, Zeroable)]
+#[derive(
+    Clone, Copy, Debug, Eq, FromBytes, Immutable, IntoBytes, PartialEq, Pod,
+    Zeroable
+)]
 pub struct SSMDFormatData {
     pub enc_disc_manifest:      FileRegion,
     pub data_dictionary:        FileRegion,
@@ -783,6 +786,41 @@ impl SSMDFormatData {
                 length: audio_data_length
             },
             data_offset
+        }
+    }
+
+    /// Returns the format data as it's stored in an archive, with every
+    /// integer little-endian whatever the host's byte order.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; size_of::<Self>()] {
+        bytemuck::cast(SSMDFormatData {
+            enc_disc_manifest: FileRegion::to_le(self.enc_disc_manifest),
+            data_dictionary:   FileRegion::to_le(self.data_dictionary),
+            enc_chunk_index:   FileRegion::to_le(self.enc_chunk_index),
+            enc_audio_index:   FileRegion::to_le(self.enc_audio_index),
+            enc_excep_index:   FileRegion::to_le(self.enc_excep_index),
+            subheader_table:   FileRegion::to_le(self.subheader_table),
+            exception_data:    FileRegion::to_le(self.exception_data),
+            audio_data:        FileRegion::to_le(self.audio_data),
+            data_offset:       self.data_offset.to_le(),
+        })
+    }
+
+    /// Reads format data written by [`SSMDFormatData::to_le_bytes`]. The
+    /// bytes are copied, so `bytes` needs no particular alignment.
+    #[must_use]
+    pub fn from_le_bytes(bytes: &[u8; size_of::<Self>()]) -> Self {
+        let raw: SSMDFormatData = bytemuck::cast(*bytes);
+        SSMDFormatData {
+            enc_disc_manifest: FileRegion::from_le(raw.enc_disc_manifest),
+            data_dictionary:   FileRegion::from_le(raw.data_dictionary),
+            enc_chunk_index:   FileRegion::from_le(raw.enc_chunk_index),
+            enc_audio_index:   FileRegion::from_le(raw.enc_audio_index),
+            enc_excep_index:   FileRegion::from_le(raw.enc_excep_index),
+            subheader_table:   FileRegion::from_le(raw.subheader_table),
+            exception_data:    FileRegion::from_le(raw.exception_data),
+            audio_data:        FileRegion::from_le(raw.audio_data),
+            data_offset:       u64::from_le(raw.data_offset),
         }
     }
 }

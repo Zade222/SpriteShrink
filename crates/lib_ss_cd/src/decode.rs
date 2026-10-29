@@ -5,7 +5,7 @@ use std::{
 use bitcode::{
     Decode, decode
 };
-use bytemuck::{cast_slice, try_from_bytes};
+use bytemuck::cast_slice;
 use sprite_shrink::{ChunkLocation};
 use thiserror::Error;
 
@@ -32,10 +32,15 @@ pub enum DecodeError {
 pub fn decode_ssmd_format_data(
     format_data: &[u8]
 ) -> Result<SSMDFormatData, SpriteShrinkCDError> {
-    let decoded_format_data = try_from_bytes::<SSMDFormatData>(format_data)
-        .map_err(|e| DecodeError::InvalidFormatData(e.to_string()))?;
+    let Ok(format_bytes) = format_data.try_into() else {
+        return Err(DecodeError::InvalidFormatData(format!(
+            "Format data must be {} bytes, got {}.",
+            SSMDFormatData::SIZE,
+            format_data.len()
+        )).into());
+    };
 
-    Ok(*decoded_format_data)
+    Ok(SSMDFormatData::from_le_bytes(format_bytes))
 }
 
 pub fn decode_ssmd_meta_data<H>(
@@ -142,4 +147,53 @@ where
         exception_index,
         subheader_table
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An 8-byte aligned buffer, so a test can place bytes at an offset
+    /// that is known to be misaligned.
+    #[repr(C, align(8))]
+    struct Aligned<const N: usize>([u8; N]);
+
+    fn sample_format_data() -> SSMDFormatData {
+        SSMDFormatData::build_format_data(
+            76, 100, 2000, 300, 50, 60, 16, 24, 5000
+        )
+    }
+
+    #[test]
+    fn decode_ssmd_format_data_wrong_length_returns_invalid_format_data() {
+        let buf = [0_u8; 144];
+
+        for len in [0, 135, 137] {
+            let result = decode_ssmd_format_data(&buf[..len]);
+
+            assert!(
+                matches!(
+                    result,
+                    Err(SpriteShrinkCDError::Decode(
+                        DecodeError::InvalidFormatData(_)
+                    ))
+                ),
+                "len {len}"
+            );
+        }
+    }
+
+    // A host can hand over the format data from anywhere in a larger
+    // buffer, so the decoder can't assume the slice is aligned for
+    // `SSMDFormatData`.
+    #[test]
+    fn decode_ssmd_format_data_misaligned_slice_is_accepted() {
+        let format_data = sample_format_data();
+        let mut buf = Aligned([0_u8; 144]);
+        buf.0[4..140].copy_from_slice(&format_data.to_le_bytes());
+
+        let parsed = decode_ssmd_format_data(&buf.0[4..140]).unwrap();
+
+        assert_eq!(parsed, format_data);
+    }
 }

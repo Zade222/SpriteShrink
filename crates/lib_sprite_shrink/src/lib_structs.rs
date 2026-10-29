@@ -255,8 +255,9 @@ pub struct FileRegion {
 
 impl FileRegion {
     /// Converts both fields from native to little-endian byte order, like
-    /// `u64::to_le`.
-    fn to_le(region: Self) -> Self {
+    /// `u64::to_le`. Used by the format data structs' `to_le_bytes`.
+    #[must_use]
+    pub fn to_le(region: Self) -> Self {
         FileRegion {
             offset: region.offset.to_le(),
             length: region.length.to_le(),
@@ -264,8 +265,9 @@ impl FileRegion {
     }
 
     /// Converts both fields from little-endian to native byte order, like
-    /// `u64::from_le`.
-    fn from_le(region: Self) -> Self {
+    /// `u64::from_le`. Used by the format data structs' `from_le_bytes`.
+    #[must_use]
+    pub fn from_le(region: Self) -> Self {
         FileRegion {
             offset: u64::from_le(region.offset),
             length: u64::from_le(region.length),
