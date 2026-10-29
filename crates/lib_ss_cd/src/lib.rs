@@ -12,7 +12,7 @@ mod cue_parser;
 
 mod decode;
 pub use decode::{
-    decode_ssmd_format_data, decode_ssmd_meta_data
+    decode_ssmd_format_data, decode_ssmd_meta_data, parse_ssmd_prefix
 };
 
 mod ecc;
@@ -33,8 +33,8 @@ pub use lib_structs::{
     SSMD_UID,
     CueSheet, ContentBlock, DataChunkLayout, DecodedSSMDMetadata, DiscManifest,
     ExceptionInfo, ExceptionRegistry, ExceptionType, DiscReconstructor,
-    RleSectorMap, SectorMap, SectorType, SSMDFormatData, SSMDIndices,
-    SSMDTocEntry, SubHeaderEntry, SubheaderRegistry
+    ParsedSSMD, RleSectorMap, SectorMap, SectorType, SSMDFormatData,
+    SSMDIndices, SSMDTocEntry, SubHeaderEntry, SubheaderRegistry
 };
 
 mod mapper;

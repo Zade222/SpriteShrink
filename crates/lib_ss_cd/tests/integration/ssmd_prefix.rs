@@ -1,16 +1,20 @@
 //! Checks that `build_ssmd_prefix` lays out an archive's metadata where the
-//! header and format data inside the prefix say it is, and that the existing
-//! SSMD reader decodes it back.
+//! header and format data inside the prefix say it is, and that
+//! `parse_ssmd_prefix` and the older `decode_ssmd_meta_data` read it back.
 
 use bitcode::{Encode, encode};
 use sprite_shrink::{
-    ALGORITHM_ZSTD, ChunkLocation, CompressionResult, FileHeader,
+    ALGORITHM_ZSTD, 
+    ChunkLocation, CompressionResult, FileHeader,
     parse_file_header,
 };
 use sprite_shrink_cd::{
-    SSMD_UID, ContentBlock, DataChunkLayout, DiscManifest, RleSectorMap,
-    SSMDFormatData, SSMDPrefix, SSMDTocEntry, SectorType, SubHeaderEntry,
-    build_ssmd_prefix, decode_ssmd_format_data, decode_ssmd_meta_data,
+    SSMD_UID, 
+    ContentBlock, DataChunkLayout, DiscManifest, RleSectorMap,
+    SSMDFormatData, SSMDPrefix, SSMDTocEntry, SectorType, SpriteShrinkCDError,
+    SubHeaderEntry, 
+    build_ssmd_prefix, decode_ssmd_format_data,
+    decode_ssmd_meta_data, parse_ssmd_prefix,
 };
 
 /// The inputs for a two-disc archive. Owned here so a test can borrow them
@@ -263,4 +267,187 @@ fn build_ssmd_prefix_decodes_with_decode_ssmd_meta_data() {
     let audio_index = decoded.audio_block_index.unwrap();
     assert_eq!(audio_index[&3].offset, fd.audio_data.offset);
     assert_eq!(audio_index[&3].compressed_length, 3000);
+}
+
+/// Returns `prefix` with its header rewritten by `edit`.
+fn with_header(prefix: &[u8], edit: impl FnOnce(&mut FileHeader)) -> Vec<u8> {
+    let (mut header, _) = read_layout(prefix);
+    edit(&mut header);
+
+    let mut edited = prefix.to_vec();
+    edited[..36].copy_from_slice(&header.to_le_bytes());
+    edited
+}
+
+/// Returns `prefix` with its format data rewritten by `edit`.
+fn with_format_data(
+    prefix: &[u8],
+    edit: impl FnOnce(&mut SSMDFormatData),
+) -> Vec<u8> {
+    let (header, mut format_data) = read_layout(prefix);
+    edit(&mut format_data);
+
+    let start = header.format_data_offset as usize;
+    let mut edited = prefix.to_vec();
+    edited[start..start + 136].copy_from_slice(&format_data.to_le_bytes());
+    edited
+}
+
+fn assert_parse_error(prefix: &[u8], context: &str) {
+    let result = parse_ssmd_prefix::<u64>(prefix);
+
+    assert!(
+        matches!(
+            result,
+            Err(SpriteShrinkCDError::Decode(_) | SpriteShrinkCDError::SpriteShrink(_))
+        ),
+        "{context}: {result:?}"
+    );
+}
+
+fn sample_prefix() -> Vec<u8> {
+    build_ssmd_prefix(&inputs_with_audio([1_u64, 2, 3]).parts(1)).unwrap()
+}
+
+fn assert_parse_round_trips<H>(hashes: [H; 3], hash_type: u8)
+where
+    H: Copy + Encode + Eq + std::hash::Hash + std::fmt::Debug,
+    for<'de> H: bitcode::Decode<'de>,
+{
+    let inputs = inputs_with_audio(hashes);
+    let prefix = build_ssmd_prefix(&inputs.parts(hash_type)).unwrap();
+    let (header, fd) = read_layout(&prefix);
+
+    let parsed = parse_ssmd_prefix::<H>(&prefix).unwrap();
+
+    assert_eq!(parsed.header, header);
+    assert_eq!(parsed.format_data, fd);
+    assert_eq!(parsed.toc, inputs.toc);
+    assert_eq!(parsed.disc_manifests, inputs.disc_manifests);
+    assert_eq!(parsed.data_dictionary, inputs.comp.dictionary);
+    assert_eq!(parsed.indices.exception_index, inputs.exception_index);
+    assert_eq!(parsed.exception_blob, inputs.exception_blob);
+
+    // The exception data directly follows the subheader table, so a table
+    // read past its recorded length would pick up those bytes as entries.
+    assert_eq!(parsed.subheader_table, inputs.subheader_table);
+
+    // Chunk offsets become positions in the file: inputs_with_audio stores
+    // the data chunks at 0 and 40 and the audio block at 0.
+    let chunk_index = &parsed.indices.chunk_index;
+    assert_eq!(chunk_index.len(), 2);
+    assert_eq!(chunk_index[&hashes[0]].offset, fd.data_offset);
+    assert_eq!(chunk_index[&hashes[1]].offset, fd.data_offset + 40);
+    assert_eq!(chunk_index[&hashes[1]].compressed_length, 60);
+
+    let audio_index = &parsed.indices.audio_block_index;
+    assert_eq!(audio_index.len(), 1);
+    assert_eq!(audio_index[&hashes[2]].offset, fd.audio_data.offset);
+    assert_eq!(audio_index[&hashes[2]].compressed_length, 3000);
+}
+
+#[test]
+fn parse_ssmd_prefix_u64_round_trips_build_ssmd_prefix() {
+    assert_parse_round_trips([1_u64, u64::MAX, 7], 1);
+}
+
+#[test]
+fn parse_ssmd_prefix_u128_round_trips_build_ssmd_prefix() {
+    assert_parse_round_trips([1_u128, u128::MAX, 7], 2);
+}
+
+#[test]
+fn parse_ssmd_prefix_without_audio_has_empty_audio_index() {
+    let inputs = inputs_without_audio([1_u64, 2, 3]);
+    let prefix = build_ssmd_prefix(&inputs.parts(1)).unwrap();
+
+    let parsed = parse_ssmd_prefix::<u64>(&prefix).unwrap();
+
+    assert!(parsed.indices.audio_block_index.is_empty());
+    assert_eq!(parsed.indices.chunk_index.len(), 2);
+    assert_eq!(parsed.subheader_table, inputs.subheader_table);
+}
+
+// A host may read more than the prefix, up to the whole archive.
+#[test]
+fn parse_ssmd_prefix_ignores_bytes_past_the_prefix() {
+    let prefix = sample_prefix();
+    let mut archive = prefix.clone();
+    archive.extend_from_slice(&[0xEE; 3100]);
+
+    let from_prefix = parse_ssmd_prefix::<u64>(&prefix).unwrap();
+    let from_archive = parse_ssmd_prefix::<u64>(&archive).unwrap();
+
+    assert_eq!(from_archive.disc_manifests, from_prefix.disc_manifests);
+    assert_eq!(from_archive.subheader_table, from_prefix.subheader_table);
+    assert_eq!(from_archive.exception_blob, from_prefix.exception_blob);
+}
+
+#[test]
+fn parse_ssmd_prefix_truncated_prefix_returns_error() {
+    let prefix = sample_prefix();
+
+    for len in 0..prefix.len() {
+        assert_parse_error(&prefix[..len], &format!("{len} bytes"));
+    }
+}
+
+#[test]
+fn parse_ssmd_prefix_section_past_the_end_returns_error() {
+    let prefix = sample_prefix();
+
+    // These sections are raw bytes, so only the bounds check can catch them.
+    let longer_dictionary = with_format_data(&prefix, |fd| {
+        fd.data_dictionary.length = 1 << 40;
+    });
+    assert_parse_error(&longer_dictionary, "dictionary past the end");
+
+    let longer_subheaders = with_format_data(&prefix, |fd| {
+        fd.subheader_table.length = 1 << 40;
+    });
+    assert_parse_error(&longer_subheaders, "subheader table past the end");
+
+    let longer_exceptions = with_format_data(&prefix, |fd| {
+        fd.exception_data.length = 1 << 40;
+    });
+    assert_parse_error(&longer_exceptions, "exception data past the end");
+
+    let wrapping_manifest = with_format_data(&prefix, |fd| {
+        fd.enc_disc_manifest.offset = u64::MAX;
+    });
+    assert_parse_error(&wrapping_manifest, "disc manifest end overflows");
+}
+
+#[test]
+fn parse_ssmd_prefix_partial_subheader_entry_returns_error() {
+    let prefix = sample_prefix();
+
+    let partial_entry = with_format_data(&prefix, |fd| {
+        fd.subheader_table.length = 12;
+    });
+    let result = parse_ssmd_prefix::<u64>(&partial_entry);
+
+    assert!(
+        matches!(result, Err(SpriteShrinkCDError::Decode(_))),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn parse_ssmd_prefix_other_format_id_returns_error() {
+    let other_format = with_header(&sample_prefix(), |header| {
+        header.format_id = SSMD_UID + 1;
+    });
+
+    assert_parse_error(&other_format, "format ID");
+}
+
+#[test]
+fn parse_ssmd_prefix_chunk_offset_overflow_returns_error() {
+    // The data chunk stored at offset 40 ends up past u64::MAX.
+    let near_max = with_format_data(&sample_prefix(), |fd| {
+        fd.data_offset = u64::MAX - 10;
+    });
+
+    assert_parse_error(&near_max, "chunk offset overflow");
 }

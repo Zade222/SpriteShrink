@@ -26,7 +26,7 @@ use bytemuck::{Pod, Zeroable};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sprite_shrink::{
-    ChunkLocation, FileRegion, Hashable,
+    ChunkLocation, FileHeader, FileRegion, Hashable,
     decompress_chunk
 };
 use zerocopy::{Immutable, IntoBytes, FromBytes};
@@ -116,6 +116,25 @@ pub struct DecodedSSMDMetadata<H> {
     pub audio_block_index:  Option<HashMap<H, ChunkLocation>>,
     pub exception_index:    Option<Vec<u64>>,
     pub subheader_table:    Vec<[u8; 8]>,
+}
+
+
+/// The metadata of an SSMD archive, read from its prefix by
+/// [`parse_ssmd_prefix`].
+///
+/// [`parse_ssmd_prefix`]: crate::parse_ssmd_prefix
+#[derive(Debug)]
+pub struct ParsedSSMD<H> {
+    pub header:          FileHeader,
+    pub format_data:     SSMDFormatData,
+    pub toc:             Vec<SSMDTocEntry>,
+    pub disc_manifests:  Vec<DiscManifest<H>>,
+    pub data_dictionary: Vec<u8>,
+    /// The chunk and audio block indexes hold absolute file offsets, so a
+    /// host can seek straight to a chunk or block.
+    pub indices:         SSMDIndices<H>,
+    pub subheader_table: Vec<[u8; 8]>,
+    pub exception_blob:  Vec<u8>,
 }
 
 
@@ -840,6 +859,7 @@ impl SSMDFormatData {
 }
 
 
+#[derive(Debug)]
 pub struct SSMDIndices<H> {
     pub chunk_index: HashMap<H, ChunkLocation>,
     pub audio_block_index: HashMap<H, ChunkLocation>,

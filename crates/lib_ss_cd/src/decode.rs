@@ -6,12 +6,16 @@ use bitcode::{
     Decode, decode
 };
 use bytemuck::cast_slice;
-use sprite_shrink::{ChunkLocation};
+use sprite_shrink::{ChunkLocation, FileHeader, FileRegion, parse_file_header};
 use thiserror::Error;
 
 use crate::{
     lib_error_handling::SpriteShrinkCDError,
-    lib_structs::{DecodedSSMDMetadata, DiscManifest, SSMDFormatData}
+    lib_structs::{
+        SSMD_UID,
+        DecodedSSMDMetadata, DiscManifest, ParsedSSMD, SSMDFormatData,
+        SSMDIndices, SSMDTocEntry
+    }
 };
 
 #[derive(Error, Debug)]
@@ -24,6 +28,9 @@ pub enum DecodeError {
 
     #[error("Format data is malformed. {0}")]
     InvalidFormatData(String),
+
+    #[error("File header is malformed. {0}")]
+    InvalidHeader(String),
 
     //#[error("Failed to decode file manifest: {0}")]
     //ManifestDecodeError(String),
@@ -41,6 +48,161 @@ pub fn decode_ssmd_format_data(
     };
 
     Ok(SSMDFormatData::from_le_bytes(format_bytes))
+}
+
+/// Reads every part of an SSMD archive's metadata from its prefix.
+///
+/// `prefix` is the start of the archive, at least up to
+/// `SSMDFormatData::metadata_prefix_end`; any bytes past that are ignored.
+/// A host reads the header and format data first to find that length.
+/// Each section is found only through the offsets the header and format
+/// data record, and each is checked against the end of `prefix`.
+///
+/// The chunk and audio block indexes hold absolute file offsets, not the
+/// offsets stored in the archive, which are relative to `data_offset` and
+/// `audio_data.offset`. An index section recorded with length 0 is empty.
+///
+/// # Errors
+///
+/// Returns an error if the header is invalid or isn't for an SSMD
+/// archive, a section lies outside `prefix`, a section fails to decode,
+/// the subheader table's length isn't a multiple of 8, or a chunk's
+/// absolute offset doesn't fit in a `u64`.
+pub fn parse_ssmd_prefix<H>(
+    prefix: &[u8]
+) -> Result<ParsedSSMD<H>, SpriteShrinkCDError>
+where
+    for<'de> H: Eq + Decode<'de> + Hash
+{
+    let header_region = FileRegion {
+        offset: 0,
+        length: FileHeader::HEADER_SIZE.into(),
+    };
+    let header = parse_file_header(header_region.bytes_in(prefix, "header")?)?;
+
+    if header.format_id != SSMD_UID {
+        return Err(DecodeError::InvalidHeader(format!(
+            "Format ID {:#06x} is not an SSMD archive.",
+            header.format_id
+        )).into());
+    }
+
+    let toc_region = FileRegion {
+        offset: header.enc_toc_offset.into(),
+        length: header.enc_toc_length.into(),
+    };
+    let toc: Vec<SSMDTocEntry> = decode_section(
+        toc_region.bytes_in(prefix, "table of contents")?,
+        "Table of Contents"
+    )?;
+
+    let format_data_region = FileRegion {
+        offset: header.format_data_offset.into(),
+        length: SSMDFormatData::SIZE,
+    };
+    let format_data = decode_ssmd_format_data(
+        format_data_region.bytes_in(prefix, "format data")?
+    )?;
+
+    let disc_manifests: Vec<DiscManifest<H>> = decode_section(
+        format_data.enc_disc_manifest.bytes_in(prefix, "disc manifest")?,
+        "Disc Manifest"
+    )?;
+
+    let data_dictionary = format_data.data_dictionary
+        .bytes_in(prefix, "dictionary")?
+        .to_vec();
+
+    let chunk_index = decode_location_index(
+        format_data.enc_chunk_index.bytes_in(prefix, "chunk index")?,
+        format_data.data_offset,
+        "Chunk Index"
+    )?;
+
+    let audio_block_index = decode_location_index(
+        format_data.enc_audio_index.bytes_in(prefix, "audio index")?,
+        format_data.audio_data.offset,
+        "Audio Index"
+    )?;
+
+    let exception_index_bytes = format_data.enc_excep_index
+        .bytes_in(prefix, "exception index")?;
+    let exception_index: Vec<u64> = if exception_index_bytes.is_empty() {
+        Vec::new()
+    } else {
+        decode_section(exception_index_bytes, "Exception Index")?
+    };
+
+    let (subheader_table, remainder) = format_data.subheader_table
+        .bytes_in(prefix, "subheader table")?
+        .as_chunks::<8>();
+    if !remainder.is_empty() {
+        return Err(DecodeError::InvalidFormatData(format!(
+            "Subheader table length {} is not a multiple of 8.",
+            format_data.subheader_table.length
+        )).into());
+    }
+
+    let exception_blob = format_data.exception_data
+        .bytes_in(prefix, "exception data")?
+        .to_vec();
+
+    Ok(ParsedSSMD {
+        header,
+        format_data,
+        toc,
+        disc_manifests,
+        data_dictionary,
+        indices: SSMDIndices {
+            chunk_index,
+            audio_block_index,
+            exception_index,
+        },
+        subheader_table: subheader_table.to_vec(),
+        exception_blob,
+    })
+}
+
+/// Decodes one bitcode section, naming it in the error.
+fn decode_section<T>(bytes: &[u8], data: &str) -> Result<T, DecodeError>
+where
+    for<'de> T: Decode<'de>
+{
+    decode(bytes).map_err(|e| DecodeError::MetadataDecode {
+        data: data.to_string(),
+        error: e.to_string()
+    })
+}
+
+/// Decodes a chunk or audio block index and makes each offset absolute by
+/// adding `base`, the start of the blob the offsets are stored relative
+/// to. An empty section is an empty index.
+fn decode_location_index<H>(
+    bytes: &[u8],
+    base: u64,
+    data: &str
+) -> Result<HashMap<H, ChunkLocation>, DecodeError>
+where
+    for<'de> H: Eq + Decode<'de> + Hash
+{
+    if bytes.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    let stored: Vec<(H, ChunkLocation)> = decode_section(bytes, data)?;
+
+    stored
+        .into_iter()
+        .map(|(hash, mut location)| {
+            location.offset = location.offset.checked_add(base).ok_or_else(|| {
+                DecodeError::InvalidFormatData(format!(
+                    "{data} offset {} past {base} doesn't fit in a u64.",
+                    location.offset
+                ))
+            })?;
+            Ok((hash, location))
+        })
+        .collect()
 }
 
 pub fn decode_ssmd_meta_data<H>(
