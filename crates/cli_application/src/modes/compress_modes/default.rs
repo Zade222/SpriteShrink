@@ -16,17 +16,16 @@ use std::{
     thread, time::{Duration}
 };
 
-use bitcode::{Encode, encode};
+use bitcode::Encode;
 use dashmap::DashMap;
 use directories::ProjectDirs;
 use indicatif::{ProgressBar, ProgressStyle};
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::{bounded};
 use sprite_shrink::{
-    ALGORITHM_ZSTD, SS_SEED, SSMC_UID,
-    ArchiveBuilder, FileHeader, FileManifestParent, Hashable, Progress,
-    SSAChunkMeta, SSMCFormatData,
-    serialize_uncompressed_data, verify_single_file
+    SS_SEED,
+    ArchiveBuilder, FileManifestParent, Hashable, Progress, SSAChunkMeta,
+    build_ssmc_prefix, serialize_uncompressed_data, verify_single_file
 };
 use rayon::prelude::*;
 use serde::Serialize;
@@ -609,37 +608,14 @@ where
         .unwrap()
         .with_extension("ssmc");
 
-    let enc_toc = encode(&archive_toc);
-
-    let enc_file_manifest = encode(&serialized_data.ser_file_manifest);
-
-    let file_header = FileHeader::build_file_header(
-        file_paths.len() as u32,
-        ALGORITHM_ZSTD,
+    /*Builds every byte of the archive that comes before the compressed
+    data: header, TOC, format data, manifest, dictionary and chunk index.*/
+    let final_data = build_ssmc_prefix(
+        &archive_toc,
+        &serialized_data.ser_file_manifest,
+        &comp_data,
         *hash_type_id,
-        SSMC_UID,
-        enc_toc.len() as u32,
     )?;
-
-    let format_data = SSMCFormatData::build_format_data(
-        enc_toc.len() + FileHeader::HEADER_SIZE as usize,
-        enc_file_manifest.len(),
-        comp_data.dictionary_size,
-        comp_data.enc_chunk_index_size
-    );
-
-    let mut final_data = Vec::with_capacity(
-        FileHeader::HEADER_SIZE as usize + enc_toc.len() +
-            SSMCFormatData::SIZE as usize + enc_file_manifest.len() +
-            comp_data.dictionary.len() + comp_data.enc_chunk_index.len()
-    );
-
-    final_data.extend_from_slice(&file_header.to_le_bytes());
-    final_data.extend_from_slice(&enc_toc);
-    final_data.extend_from_slice(&format_data.to_le_bytes());
-    final_data.extend_from_slice(&enc_file_manifest);
-    final_data.extend_from_slice(&comp_data.dictionary);
-    final_data.extend_from_slice(&comp_data.enc_chunk_index);
 
     //Write ssmc header to disk and append it with compressed data.
     write_final_archive(
