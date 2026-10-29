@@ -352,23 +352,12 @@ where
     let enc_toc = encode(toc);
     let enc_manifest = encode(manifests);
 
-    let file_count = u32::try_from(toc.len()).map_err(|e| {
-        SerializationError::ArchiveTooLarge(format!(
-            "{} files: {e}", toc.len()
-        ))
-    })?;
-    let enc_toc_length = u32::try_from(enc_toc.len()).map_err(|e| {
-        SerializationError::ArchiveTooLarge(format!(
-            "the table of contents is {} bytes: {e}", enc_toc.len()
-        ))
-    })?;
-
     let file_header = FileHeader::build_file_header(
-        file_count,
+        toc.len(),
         ALGORITHM_ZSTD,
         hash_type,
         SSMC_UID,
-        enc_toc_length,
+        enc_toc.len(),
     )?;
 
     /*Offsets come from the lengths of the bytes actually written, so the

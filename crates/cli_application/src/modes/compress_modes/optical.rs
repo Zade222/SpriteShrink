@@ -499,11 +499,11 @@ where
     let enc_excep_index = encode(&exception_index);
 
     let file_header = FileHeader::build_file_header(
-        archive_toc.len() as u32,
+        archive_toc.len(),
         ALGORITHM_ZSTD,
         *hash_type_id,
         SSMD_UID,
-        enc_toc.len() as u32
+        enc_toc.len()
     )?;
 
     let format_data = SSMDFormatData::build_format_data(

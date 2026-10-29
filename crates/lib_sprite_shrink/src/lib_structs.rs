@@ -122,26 +122,38 @@ pub struct FileHeader {
 impl FileHeader {
     pub const HEADER_SIZE: u32 = mem::size_of::<FileHeader>() as u32;
 
-    /// Builds the header for an archive whose encoded table of contents is
-    /// `enc_toc_length` bytes. The TOC directly follows the header, and the
-    /// format data directly follows the TOC.
+    /// Builds the header for an archive of `file_count` files whose encoded
+    /// table of contents is `enc_toc_length` bytes. The TOC directly follows
+    /// the header, and the format data directly follows the TOC.
+    ///
+    /// The counts are taken as `usize`, the lengths of the caller's buffers,
+    /// so the checks against the header's 32-bit fields happen here.
     ///
     /// # Errors
     ///
-    /// Returns `SerializationError::ArchiveTooLarge` if the format data
-    /// offset, `HEADER_SIZE + enc_toc_length`, doesn't fit in a `u32`.
+    /// Returns `SerializationError::ArchiveTooLarge` if `file_count` doesn't
+    /// fit in a `u32`, or the format data offset,
+    /// `HEADER_SIZE + enc_toc_length`, doesn't.
     pub fn build_file_header(
-        file_count: u32,
+        file_count: usize,
         algorithm_code: u16,
         hash_type: u8,
         format_id: u16,
-        enc_toc_length: u32,
+        enc_toc_length: usize,
     ) -> Result<FileHeader, SpriteShrinkError> {
+        let file_count = u32::try_from(file_count).ok().ok_or_else(|| {
+            SerializationError::ArchiveTooLarge(format!("{file_count} files"))
+        })?;
+
+        let toc_too_large = || SerializationError::ArchiveTooLarge(format!(
+            "the table of contents is {enc_toc_length} bytes"
+        ));
+        let enc_toc_length = u32::try_from(enc_toc_length)
+            .ok()
+            .ok_or_else(toc_too_large)?;
         let format_data_offset = Self::HEADER_SIZE
             .checked_add(enc_toc_length)
-            .ok_or_else(|| SerializationError::ArchiveTooLarge(format!(
-                "the table of contents is {enc_toc_length} bytes"
-            )))?;
+            .ok_or_else(toc_too_large)?;
 
         Ok(FileHeader {
             magic_num:      MAGIC_NUMBER,

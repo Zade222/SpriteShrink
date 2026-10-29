@@ -789,6 +789,20 @@ impl SSMDFormatData {
         }
     }
 
+    /// Where the archive's metadata ends and the compressed audio begins.
+    /// Every byte before this offset is part of the prefix that
+    /// [`build_ssmd_prefix`] returns.
+    ///
+    /// This is `audio_data.offset`, not `data_offset`: the audio blocks sit
+    /// between the metadata and the data chunks, so reading up to
+    /// `data_offset` would load every audio block to get the metadata.
+    ///
+    /// [`build_ssmd_prefix`]: crate::build_ssmd_prefix
+    #[must_use]
+    pub fn metadata_prefix_end(&self) -> u64 {
+        self.audio_data.offset
+    }
+
     /// Returns the format data as it's stored in an archive, with every
     /// integer little-endian whatever the host's byte order.
     #[must_use]

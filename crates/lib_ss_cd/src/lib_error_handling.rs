@@ -1,3 +1,4 @@
+use sprite_shrink::SpriteShrinkError;
 use thiserror::Error;
 
 use crate::{
@@ -39,6 +40,9 @@ pub enum SpriteShrinkCDError {
 
     #[error("Reconstruction error: {0}")]
     Reconstruction(#[from] ReconstructionError),
+
+    #[error("A sprite_shrink error occurred: {0}")]
+    SpriteShrink(#[from] SpriteShrinkError),
 
     #[error("Library utility error: {0}")]
     Util(#[from] UtilError),

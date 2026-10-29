@@ -17,6 +17,9 @@ pub use decode::{
 
 mod ecc;
 
+mod encode;
+pub use encode::{SSMDPrefix, build_ssmd_prefix};
+
 mod flac;
 pub use flac::{
     compress_audio_block, compress_audio_blocks, decompress_flac_block

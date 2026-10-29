@@ -168,7 +168,7 @@ fn build_ssmc_prefix_u128_sections_sit_at_recorded_offsets() {
 
 #[test]
 fn build_file_header_format_data_offset_overflow_returns_error() {
-    let largest = u32::MAX - FileHeader::HEADER_SIZE;
+    let largest = usize::try_from(u32::MAX - FileHeader::HEADER_SIZE).unwrap();
 
     let header = FileHeader::build_file_header(1, ALGORITHM_ZSTD, 1, SSMC_UID, largest)
         .unwrap();
@@ -181,4 +181,22 @@ fn build_file_header_format_data_offset_overflow_returns_error() {
         matches!(result, Err(SpriteShrinkError::Serialization(_))),
         "{result:?}"
     );
+}
+
+// Lengths past `u32::MAX` only exist where `usize` is wider than 32 bits.
+#[cfg(target_pointer_width = "64")]
+#[test]
+fn build_file_header_counts_past_u32_max_return_error() {
+    let too_many = usize::try_from(u32::MAX).unwrap() + 1;
+
+    for (file_count, toc_length) in [(too_many, 40), (1, too_many)] {
+        let result = FileHeader::build_file_header(
+            file_count, ALGORITHM_ZSTD, 1, SSMC_UID, toc_length,
+        );
+
+        assert!(
+            matches!(result, Err(SpriteShrinkError::Serialization(_))),
+            "{file_count} files, {toc_length}-byte TOC: {result:?}"
+        );
+    }
 }
