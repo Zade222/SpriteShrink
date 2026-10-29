@@ -1,5 +1,5 @@
 //! Pins the on-disk layout of the fixed-size archive structures to
-//! `SSMC_File_Specification/SPECIFICATION.md`.
+//! `File_Specification/SPECIFICATION.md`.
 //!
 //! Every existing archive depends on these sizes, offsets and constants. If
 //! one of these tests fails, the change breaks compatibility with archives

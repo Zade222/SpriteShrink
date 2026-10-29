@@ -43,7 +43,7 @@ By using content-defined chunking and deduplication, the `.ssmc` and `.ssmd` for
 
 A complete technical document detailing the binary layout, data structures, and design principles of the format is available for developers and enthusiasts.
 
-[**Read the full .ssmc File Specification**](./SSMC_File_Specification/SPECIFICATION.md)
+[**Read the full archive file specification**](./File_Specification/SPECIFICATION.md)
 
 ---
 
