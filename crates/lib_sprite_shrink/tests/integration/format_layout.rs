@@ -11,7 +11,6 @@ use sprite_shrink::{
     FileHeader, FileRegion, MAGIC_NUMBER, SS_SEED, SSMC_UID, SSMCFormatData,
     SUPPORTED_VERSION, parse_file_header, parse_format_data,
 };
-use zerocopy::IntoBytes;
 
 /// Header from `build_file_header(3, 98, 1, SSMC_UID, 40)`, written out by
 /// hand from the table in SPECIFICATION.md §2.1. Multi-byte fields are little
@@ -29,12 +28,6 @@ const GOLDEN_HEADER: [u8; 36] = [
     0x28, 0x00, 0x00, 0x00,                         // enc_toc_length 40
     0x4c, 0x00, 0x00, 0x00,                         // format_data_offset 76
 ];
-
-/// Keeps a byte buffer 8-byte aligned. The parsers currently reject
-/// misaligned input, so golden data has to be aligned for the read-side
-/// tests to be deterministic.
-#[repr(C, align(8))]
-struct Aligned<const N: usize>([u8; N]);
 
 #[test]
 fn file_header_size_and_alignment_match_spec() {
@@ -107,14 +100,12 @@ fn build_file_header_places_toc_after_header_and_format_data_after_toc() {
 fn build_file_header_serializes_to_golden_bytes() {
     let header = FileHeader::build_file_header(3, 98, 1, SSMC_UID, 40);
 
-    assert_eq!(header.as_bytes(), GOLDEN_HEADER.as_slice());
+    assert_eq!(header.to_le_bytes(), GOLDEN_HEADER);
 }
 
 #[test]
 fn parse_file_header_reads_golden_bytes() {
-    let golden = Aligned(GOLDEN_HEADER);
-
-    let header = parse_file_header(&golden.0).unwrap();
+    let header = parse_file_header(&GOLDEN_HEADER).unwrap();
 
     assert_eq!(header.file_count, 3);
     assert_eq!(header.algorithm, 98);
@@ -158,14 +149,9 @@ fn ssmc_format_data_round_trips_through_bytes() {
         .iter()
         .flat_map(|v| v.to_le_bytes())
         .collect();
-    assert_eq!(format_data.as_bytes(), expected.as_slice());
+    assert_eq!(format_data.to_le_bytes().as_slice(), expected.as_slice());
 
-    let mut buf = Aligned([0_u8; 56]);
-    buf.0.copy_from_slice(format_data.as_bytes());
-    let parsed = parse_format_data(&buf.0).unwrap();
+    let parsed = parse_format_data(&format_data.to_le_bytes()).unwrap();
 
-    assert_eq!(parsed.enc_manifest, format_data.enc_manifest);
-    assert_eq!(parsed.data_dictionary, format_data.data_dictionary);
-    assert_eq!(parsed.enc_chunk_index, format_data.enc_chunk_index);
-    assert_eq!(parsed.data_offset, format_data.data_offset);
+    assert_eq!(parsed, format_data);
 }

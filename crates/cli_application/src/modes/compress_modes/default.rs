@@ -35,7 +35,6 @@ use tracing::{
     debug,
     info,
 };
-use zerocopy::IntoBytes;
 
 use crate::{
     arg_handling::Args,
@@ -635,9 +634,9 @@ where
             comp_data.dictionary.len() + comp_data.enc_chunk_index.len()
     );
 
-    final_data.extend_from_slice(file_header.as_bytes());
+    final_data.extend_from_slice(&file_header.to_le_bytes());
     final_data.extend_from_slice(&enc_toc);
-    final_data.extend_from_slice(format_data.as_bytes());
+    final_data.extend_from_slice(&format_data.to_le_bytes());
     final_data.extend_from_slice(&enc_file_manifest);
     final_data.extend_from_slice(&comp_data.dictionary);
     final_data.extend_from_slice(&comp_data.enc_chunk_index);

@@ -526,7 +526,7 @@ where
             subheader_table.len()
     );
 
-    final_data.extend_from_slice(file_header.as_bytes());
+    final_data.extend_from_slice(&file_header.to_le_bytes());
     final_data.extend_from_slice(&enc_toc);
     final_data.extend_from_slice(format_data.as_bytes());
     final_data.extend_from_slice(&enc_disc_manifest);

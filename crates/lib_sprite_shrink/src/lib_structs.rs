@@ -80,7 +80,10 @@ pub struct CompressionResult {
 /// * `chunk_index_length`: The total length of the chunk index.
 /// * `data_offset`: The starting offset of the compressed file data.
 #[repr(C)]
-#[derive(FromBytes, IntoBytes, Immutable, Debug, Copy, Clone, Pod, Zeroable)]
+#[derive(
+    Clone, Copy, Debug, Eq, FromBytes, Immutable, IntoBytes, PartialEq, Pod,
+    Zeroable
+)]
 pub struct FileHeader {
     pub magic_num:          [u8; 8],
     pub file_version:       u32,
@@ -117,6 +120,52 @@ impl FileHeader {
             enc_toc_offset:     Self::HEADER_SIZE,
             enc_toc_length,
             format_data_offset: Self::HEADER_SIZE + enc_toc_length
+        }
+    }
+
+    /// Returns the header as it's stored in an archive: the fields in
+    /// declaration order, with every multi-byte integer little-endian
+    /// whatever the host's byte order. The padding bytes are always written
+    /// as zero.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; size_of::<Self>()] {
+        bytemuck::cast(FileHeader {
+            magic_num:          self.magic_num,
+            file_version:       self.file_version.to_le(),
+            file_count:         self.file_count.to_le(),
+            algorithm:          self.algorithm.to_le(),
+            hash_type:          self.hash_type,
+            _pad1:              0,
+            format_id:          self.format_id.to_le(),
+            _pad2:              [0; 2],
+            enc_toc_offset:     self.enc_toc_offset.to_le(),
+            enc_toc_length:     self.enc_toc_length.to_le(),
+            format_data_offset: self.format_data_offset.to_le(),
+        })
+    }
+
+    /// Reads a header written by [`FileHeader::to_le_bytes`]. The bytes are
+    /// copied, so `bytes` needs no particular alignment.
+    ///
+    /// This only converts the bytes, and ignores the padding.
+    /// [`parse_file_header`] also checks the magic number and version.
+    ///
+    /// [`parse_file_header`]: crate::parse_file_header
+    #[must_use]
+    pub fn from_le_bytes(bytes: &[u8; size_of::<Self>()]) -> Self {
+        let raw: FileHeader = bytemuck::cast(*bytes);
+        FileHeader {
+            magic_num:          raw.magic_num,
+            file_version:       u32::from_le(raw.file_version),
+            file_count:         u32::from_le(raw.file_count),
+            algorithm:          u16::from_le(raw.algorithm),
+            hash_type:          raw.hash_type,
+            _pad1:              0,
+            format_id:          u16::from_le(raw.format_id),
+            _pad2:              [0; 2],
+            enc_toc_offset:     u32::from_le(raw.enc_toc_offset),
+            enc_toc_length:     u32::from_le(raw.enc_toc_length),
+            format_data_offset: u32::from_le(raw.format_data_offset),
         }
     }
 }
@@ -167,6 +216,26 @@ pub struct FileManifestParent<H> {
 pub struct FileRegion {
     pub offset: u64,
     pub length: u64,
+}
+
+impl FileRegion {
+    /// Converts both fields from native to little-endian byte order, like
+    /// `u64::to_le`.
+    fn to_le(region: Self) -> Self {
+        FileRegion {
+            offset: region.offset.to_le(),
+            length: region.length.to_le(),
+        }
+    }
+
+    /// Converts both fields from little-endian to native byte order, like
+    /// `u64::from_le`.
+    fn from_le(region: Self) -> Self {
+        FileRegion {
+            offset: u64::from_le(region.offset),
+            length: u64::from_le(region.length),
+        }
+    }
 }
 
 /// Holds the results of the initial file processing stage.
@@ -350,7 +419,10 @@ pub struct SSAChunkMeta<H>{
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, FromBytes, Immutable, IntoBytes, Pod, Zeroable)]
+#[derive(
+    Clone, Copy, Debug, Eq, FromBytes, Immutable, IntoBytes, PartialEq, Pod,
+    Zeroable
+)]
 pub struct SSMCFormatData {
     pub enc_manifest:       FileRegion,
     pub data_dictionary:    FileRegion,
@@ -388,6 +460,31 @@ impl SSMCFormatData {
                 length: enc_chunk_idx_length
             },
             data_offset,
+        }
+    }
+
+    /// Returns the format data as it's stored in an archive, with every
+    /// integer little-endian whatever the host's byte order.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; size_of::<Self>()] {
+        bytemuck::cast(SSMCFormatData {
+            enc_manifest:    FileRegion::to_le(self.enc_manifest),
+            data_dictionary: FileRegion::to_le(self.data_dictionary),
+            enc_chunk_index: FileRegion::to_le(self.enc_chunk_index),
+            data_offset:     self.data_offset.to_le(),
+        })
+    }
+
+    /// Reads format data written by [`SSMCFormatData::to_le_bytes`]. The
+    /// bytes are copied, so `bytes` needs no particular alignment.
+    #[must_use]
+    pub fn from_le_bytes(bytes: &[u8; size_of::<Self>()]) -> Self {
+        let raw: SSMCFormatData = bytemuck::cast(*bytes);
+        SSMCFormatData {
+            enc_manifest:    FileRegion::from_le(raw.enc_manifest),
+            data_dictionary: FileRegion::from_le(raw.data_dictionary),
+            enc_chunk_index: FileRegion::from_le(raw.enc_chunk_index),
+            data_offset:     u64::from_le(raw.data_offset),
         }
     }
 }

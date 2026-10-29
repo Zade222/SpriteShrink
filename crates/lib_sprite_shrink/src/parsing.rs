@@ -85,10 +85,14 @@ pub static SS_SEED: u64 = 0x4202803010192019;
 pub fn parse_file_header(
     header_data: &[u8]
 ) -> Result<FileHeader, SpriteShrinkError> {
-    //Attempt to cast the byte slice to a FileHeader.
-    let file_header =
-        bytemuck::try_from_bytes::<FileHeader>(header_data)
-        .map_err(|e| ParsingError::InvalidHeader(e.to_string()))?;
+    let Ok(header_bytes) = header_data.try_into() else {
+        return Err(ParsingError::InvalidHeader(format!(
+            "Header must be {} bytes, got {}.",
+            FileHeader::HEADER_SIZE,
+            header_data.len()
+        )).into());
+    };
+    let file_header = FileHeader::from_le_bytes(header_bytes);
 
     //Verify the magic number to ensure it's the correct file type.
     if file_header.magic_num != MAGIC_NUMBER {
@@ -102,7 +106,7 @@ pub fn parse_file_header(
         return Err(ParsingError::InvalidFileVersion().into());
     };
 
-    Ok(*file_header)
+    Ok(file_header)
 }
 
 /// Deserializes the file manifest from a raw byte slice.
@@ -180,10 +184,15 @@ pub fn parse_file_toc(
 pub fn parse_format_data(
     format_data: &[u8]
 ) -> Result<SSMCFormatData, SpriteShrinkError> {
-    let parsed_format_data = bytemuck::try_from_bytes::<SSMCFormatData>(format_data)
-        .map_err(|e| ParsingError::InvalidFormatData(e.to_string()))?;
+    let Ok(format_bytes) = format_data.try_into() else {
+        return Err(ParsingError::InvalidFormatData(format!(
+            "Format data must be {} bytes, got {}.",
+            SSMCFormatData::SIZE,
+            format_data.len()
+        )).into());
+    };
 
-    Ok(*parsed_format_data)
+    Ok(SSMCFormatData::from_le_bytes(format_bytes))
 }
 
 #[cfg(test)]
@@ -193,17 +202,10 @@ mod tests {
     use super::*;
     use crate::lib_structs::{SSAChunkMeta, SSMC_UID};
 
-    /// Keeps test buffers 8-byte aligned so a test controls alignment
-    /// explicitly instead of depending on where the compiler or allocator
-    /// put the bytes.
+    /// An 8-byte aligned buffer, so a test can place bytes at an offset
+    /// that is known to be misaligned.
     #[repr(C, align(8))]
     struct Aligned<const N: usize>([u8; N]);
-
-    fn header_bytes(header: &FileHeader) -> Aligned<36> {
-        let mut buf = Aligned([0_u8; 36]);
-        buf.0.copy_from_slice(bytemuck::bytes_of(header));
-        buf
-    }
 
     fn sample_header() -> FileHeader {
         FileHeader::build_file_header(3, 98, 1, SSMC_UID, 40)
@@ -246,20 +248,18 @@ mod tests {
     #[test]
     fn parse_file_header_valid_bytes_round_trips() {
         let header = sample_header();
-        let buf = header_bytes(&header);
 
-        let parsed = parse_file_header(&buf.0).unwrap();
+        let parsed = parse_file_header(&header.to_le_bytes()).unwrap();
 
-        assert_eq!(bytemuck::bytes_of(&parsed), bytemuck::bytes_of(&header));
+        assert_eq!(parsed, header);
     }
 
     #[test]
     fn parse_file_header_wrong_magic_returns_invalid_header() {
         let mut header = sample_header();
         header.magic_num = *b"SSARCHV0";
-        let buf = header_bytes(&header);
 
-        let err = parse_file_header(&buf.0).unwrap_err();
+        let err = parse_file_header(&header.to_le_bytes()).unwrap_err();
 
         assert!(
             matches!(err, SpriteShrinkError::Parsing(
@@ -273,9 +273,8 @@ mod tests {
     fn parse_file_header_newer_version_returns_invalid_file_version() {
         let mut header = sample_header();
         header.file_version = SUPPORTED_VERSION + 1;
-        let buf = header_bytes(&header);
 
-        let err = parse_file_header(&buf.0).unwrap_err();
+        let err = parse_file_header(&header.to_le_bytes()).unwrap_err();
 
         assert!(
             matches!(err, SpriteShrinkError::Parsing(
@@ -290,9 +289,8 @@ mod tests {
         for version in [SUPPORTED_VERSION, 0x0001_0000, 0] {
             let mut header = sample_header();
             header.file_version = version;
-            let buf = header_bytes(&header);
 
-            let parsed = parse_file_header(&buf.0).unwrap();
+            let parsed = parse_file_header(&header.to_le_bytes()).unwrap();
 
             assert_eq!(parsed.file_version, version);
         }
@@ -300,11 +298,11 @@ mod tests {
 
     #[test]
     fn parse_file_header_wrong_length_returns_invalid_header() {
-        let mut buf = Aligned([0_u8; 40]);
-        buf.0[..36].copy_from_slice(bytemuck::bytes_of(&sample_header()));
+        let mut buf = [0_u8; 40];
+        buf[..36].copy_from_slice(&sample_header().to_le_bytes());
 
         for len in [0, 35, 37] {
-            let err = parse_file_header(&buf.0[..len]).unwrap_err();
+            let err = parse_file_header(&buf[..len]).unwrap_err();
 
             assert!(
                 matches!(err, SpriteShrinkError::Parsing(
@@ -315,28 +313,25 @@ mod tests {
         }
     }
 
-    // `bytemuck::try_from_bytes` requires the slice to be aligned for
-    // `FileHeader`, so valid bytes at an odd offset are rejected. The CLI
-    // only avoids this because it reads the header into a fresh Vec, which
-    // the allocator happens to align.
+    // A host can hand over the header from anywhere in a larger buffer, so
+    // the parser can't assume the slice is aligned for `FileHeader`.
     #[test]
-    #[ignore = "parse_file_header rejects misaligned input"]
     fn parse_file_header_misaligned_slice_is_accepted() {
         let header = sample_header();
         let mut buf = Aligned([0_u8; 40]);
-        buf.0[1..37].copy_from_slice(bytemuck::bytes_of(&header));
+        buf.0[1..37].copy_from_slice(&header.to_le_bytes());
 
         let parsed = parse_file_header(&buf.0[1..37]).unwrap();
 
-        assert_eq!(bytemuck::bytes_of(&parsed), bytemuck::bytes_of(&header));
+        assert_eq!(parsed, header);
     }
 
     #[test]
     fn parse_format_data_wrong_length_returns_invalid_format_data() {
-        let buf = Aligned([0_u8; 64]);
+        let buf = [0_u8; 64];
 
         for len in [0, 55, 57] {
-            let result = parse_format_data(&buf.0[..len]);
+            let result = parse_format_data(&buf[..len]);
 
             assert!(
                 matches!(
@@ -349,15 +344,14 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "parse_format_data rejects misaligned input"]
     fn parse_format_data_misaligned_slice_is_accepted() {
         let format_data = SSMCFormatData::build_format_data(76, 100, 2000, 300);
         let mut buf = Aligned([0_u8; 64]);
-        buf.0[4..60].copy_from_slice(bytemuck::bytes_of(&format_data));
+        buf.0[4..60].copy_from_slice(&format_data.to_le_bytes());
 
         let parsed = parse_format_data(&buf.0[4..60]).unwrap();
 
-        assert_eq!(parsed.data_offset, format_data.data_offset);
+        assert_eq!(parsed, format_data);
     }
 
     #[test]
