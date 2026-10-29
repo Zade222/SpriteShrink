@@ -1,6 +1,6 @@
 //! Checks that `build_ssmd_prefix` lays out an archive's metadata where the
 //! header and format data inside the prefix say it is, and that
-//! `parse_ssmd_prefix` and the older `decode_ssmd_meta_data` read it back.
+//! `parse_ssmd_prefix` reads it back.
 
 use bitcode::{Encode, encode};
 use sprite_shrink::{
@@ -13,8 +13,7 @@ use sprite_shrink_cd::{
     ContentBlock, DataChunkLayout, DiscManifest, RleSectorMap,
     SSMDFormatData, SSMDPrefix, SSMDTocEntry, SectorType, SpriteShrinkCDError,
     SubHeaderEntry, 
-    build_ssmd_prefix, decode_ssmd_format_data,
-    decode_ssmd_meta_data, parse_ssmd_prefix,
+    build_ssmd_prefix, decode_ssmd_format_data, parse_ssmd_prefix,
 };
 
 /// The inputs for a two-disc archive. Owned here so a test can borrow them
@@ -238,35 +237,6 @@ fn build_ssmd_prefix_u64_sections_sit_at_recorded_offsets() {
 #[test]
 fn build_ssmd_prefix_u128_sections_sit_at_recorded_offsets() {
     assert_sections_at_recorded_offsets([1_u128, u128::MAX, 7], 2);
-}
-
-#[test]
-fn build_ssmd_prefix_decodes_with_decode_ssmd_meta_data() {
-    let inputs = inputs_with_audio([1_u64, 2, 3]);
-
-    let prefix = build_ssmd_prefix(&inputs.parts(1)).unwrap();
-    let (_, fd) = read_layout(&prefix);
-
-    // decode_ssmd_meta_data reads the subheader table to the end of the
-    // slice it's given, so the slice stops where the exception data starts,
-    // as it does in the CLI's extractor.
-    let metadata = section(
-        &prefix,
-        fd.enc_disc_manifest.offset,
-        fd.exception_data.offset - fd.enc_disc_manifest.offset,
-    );
-    let decoded = decode_ssmd_meta_data::<u64>(&fd, metadata).unwrap();
-
-    assert_eq!(decoded.disc_manifests, inputs.disc_manifests);
-    assert_eq!(decoded.data_dictionary, inputs.comp.dictionary);
-    assert_eq!(decoded.subheader_table, inputs.subheader_table);
-    assert_eq!(decoded.exception_index, Some(inputs.exception_index.clone()));
-
-    // The reader turns stored offsets into absolute file positions.
-    assert_eq!(decoded.chunk_index[&2].offset, fd.data_offset + 40);
-    let audio_index = decoded.audio_block_index.unwrap();
-    assert_eq!(audio_index[&3].offset, fd.audio_data.offset);
-    assert_eq!(audio_index[&3].compressed_length, 3000);
 }
 
 /// Returns `prefix` with its header rewritten by `edit`.

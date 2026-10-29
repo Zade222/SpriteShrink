@@ -12,7 +12,7 @@ mod cue_parser;
 
 mod decode;
 pub use decode::{
-    decode_ssmd_format_data, decode_ssmd_meta_data, parse_ssmd_prefix
+    decode_ssmd_format_data, parse_ssmd_prefix
 };
 
 mod ecc;
@@ -31,7 +31,7 @@ pub use lib_error_handling::SpriteShrinkCDError;
 mod lib_structs;
 pub use lib_structs::{
     SSMD_UID,
-    CueSheet, ContentBlock, DataChunkLayout, DecodedSSMDMetadata, DiscManifest,
+    CueSheet, ContentBlock, DataChunkLayout, DiscManifest,
     ExceptionInfo, ExceptionRegistry, ExceptionType, DiscReconstructor,
     ParsedSSMD, RleSectorMap, SectorMap, SectorType, SSMDFormatData,
     SSMDIndices, SSMDTocEntry, SubHeaderEntry, SubheaderRegistry

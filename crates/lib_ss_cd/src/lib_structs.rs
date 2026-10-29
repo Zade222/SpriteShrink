@@ -109,16 +109,6 @@ pub struct DecodedSectorInfo {
 }
 
 
-pub struct DecodedSSMDMetadata<H> {
-    pub disc_manifests:     Vec<DiscManifest<H>>,
-    pub data_dictionary:    Vec<u8>,
-    pub chunk_index:        HashMap<H, ChunkLocation>,
-    pub audio_block_index:  Option<HashMap<H, ChunkLocation>>,
-    pub exception_index:    Option<Vec<u64>>,
-    pub subheader_table:    Vec<[u8; 8]>,
-}
-
-
 /// The metadata of an SSMD archive, read from its prefix by
 /// [`parse_ssmd_prefix`].
 ///

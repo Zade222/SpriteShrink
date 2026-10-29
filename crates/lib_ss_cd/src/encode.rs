@@ -1,8 +1,8 @@
 //! Builds the metadata prefix of an SSMD archive.
 //!
 //! This is the counterpart of `decode.rs`: it writes the sections that
-//! `decode_ssmd_format_data` and `decode_ssmd_meta_data` read back, in the
-//! order the specification lays them out.
+//! `parse_ssmd_prefix` reads back, in the order the specification lays
+//! them out.
 
 use bitcode::{Encode, encode};
 use sprite_shrink::{
