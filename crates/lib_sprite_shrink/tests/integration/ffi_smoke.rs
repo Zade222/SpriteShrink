@@ -551,9 +551,9 @@ fn serialize_reports_chunk_callback_error() {
 
 #[test]
 fn free_serialized_output_accepts_null() {
-    // SAFETY: both free functions return early on null.
+    // SAFETY: `free_serialized_output_u64` returns early on null.
     unsafe { free_serialized_output_u64(ptr::null_mut()) };
-    // SAFETY: as above.
+    // SAFETY: `free_serialized_output_u128` returns early on null.
     unsafe { free_serialized_output_u128(ptr::null_mut()) };
 }
 
@@ -596,7 +596,8 @@ fn parse_file_header_rejects_null_arguments() {
     assert_eq!(status_code(status), status_code(FFIStatus::NullArgument));
     assert!(out.is_null());
 
-    // SAFETY: as above.
+    // SAFETY: the function returns before writing through the null
+    // `out_ptr`, and `bytes` is `bytes.len()` readable bytes.
     let status = unsafe {
         parse_file_header_ffi(bytes.as_ptr(), bytes.len(), ptr::null_mut())
     };

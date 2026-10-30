@@ -675,7 +675,8 @@ unsafe fn read_comp_data(
             comp.dictionary_data_len
         )
     }.to_vec();
-    // SAFETY: as above, for `enc_chunk_index_data_len` bytes.
+    // SAFETY: the pointer isn't null, and the caller guarantees it holds
+    // `enc_chunk_index_data_len` bytes.
     let enc_chunk_index = unsafe {
         slice::from_raw_parts(
             comp.enc_chunk_index_data_ptr,
