@@ -1,9 +1,8 @@
-//! Test input shared by the workspace's test suites.
+//! Test input and assertions shared by the workspace's test suites.
 //!
-//! Everything here is generated from fixed seeds, so every run, on every
-//! machine, produces the same bytes. The CLI's baseline archives are built
-//! from this input, so changing what any of it generates changes those
-//! archives too.
+//! The input is generated from fixed seeds, so every run, on every machine,
+//! produces the same bytes. The CLI's baseline archives are built from this
+//! input, so changing what any of it generates changes those archives too.
 
 /// Fixed-seed xorshift, so every run generates the same input.
 #[derive(Debug)]
@@ -73,4 +72,93 @@ pub fn rom_set() -> Vec<(String, Vec<u8>)> {
         ("game (Rev 1).bin".to_string(), patched),
         ("other game.bin".to_string(), other),
     ]
+}
+
+/// Describes where `actual` first differs from `expected`, or returns
+/// `None` if they're equal.
+///
+/// For buffers too large to print, such as whole files or archives: the
+/// first differing offset and byte usually say whether a header, a section
+/// or the length is wrong.
+#[must_use]
+pub fn first_difference(actual: &[u8], expected: &[u8]) -> Option<String> {
+    let mismatch = actual
+        .iter()
+        .zip(expected)
+        .enumerate()
+        .find(|(_, (got, want))| got != want);
+    if let Some((offset, (got, want))) = mismatch {
+        return Some(format!(
+            "first difference at byte {offset:#x}: got {got:#04x}, expected \
+             {want:#04x} ({} bytes, expected {})",
+            actual.len(),
+            expected.len()
+        ));
+    }
+
+    (actual.len() != expected.len()).then(|| {
+        format!(
+            "{} bytes, expected {}; the first {} match",
+            actual.len(),
+            expected.len(),
+            actual.len().min(expected.len())
+        )
+    })
+}
+
+/// Asserts that `actual` equals `expected`, naming the first difference
+/// instead of printing both buffers the way `assert_eq!` would.
+///
+/// # Panics
+///
+/// Panics if the buffers differ, with `what` and the difference in the
+/// message.
+#[track_caller]
+pub fn assert_bytes_eq(actual: &[u8], expected: &[u8], what: &str) {
+    let difference = first_difference(actual, expected);
+    assert!(
+        difference.is_none(),
+        "{what}: {}",
+        difference.unwrap_or_default()
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equal_buffers_have_no_difference() {
+        assert_eq!(first_difference(b"same", b"same"), None);
+        assert_eq!(first_difference(b"", b""), None);
+    }
+
+    #[test]
+    fn first_differing_byte_is_named() {
+        assert_eq!(
+            first_difference(b"abXd", b"abcd").as_deref(),
+            Some(
+                "first difference at byte 0x2: got 0x58, expected 0x63 \
+                 (4 bytes, expected 4)"
+            )
+        );
+    }
+
+    #[test]
+    fn length_difference_is_named_when_the_prefix_matches() {
+        assert_eq!(
+            first_difference(b"abc", b"abcde").as_deref(),
+            Some("3 bytes, expected 5; the first 3 match")
+        );
+        assert_eq!(
+            first_difference(b"", b"a").as_deref(),
+            Some("0 bytes, expected 1; the first 0 match")
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "rom.bin: first difference at byte 0x1")]
+    fn assert_bytes_eq_reports_what_and_where() {
+        assert_bytes_eq(b"aXc", b"abc", "rom.bin");
+    }
 }

@@ -67,6 +67,7 @@ pub struct ChunkLocation {
 /// # Fields
 ///
 /// * `dictionary`: The zstd dictionary the chunks were compressed with.
+///   Empty when no dictionary could be trained from the input.
 /// * `dictionary_size`: The length of `dictionary` in bytes.
 /// * `enc_chunk_index`: The bitcode-encoded chunk index, mapping each chunk
 ///   hash to its location in the compressed data.

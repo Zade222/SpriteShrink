@@ -36,6 +36,7 @@ cbindgen = "0.29"
 [dev-dependencies]
 # The integration tests serialize headers the same way the CLI writes them.
 zerocopy = { version = "~0.8", default-features = false }
+proptest = { version = "~1.12", default-features = false, features = ["std"] }
 sprite_shrink_test_support = { path = "../test_support" }
 
 [lints]

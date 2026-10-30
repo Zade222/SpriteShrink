@@ -593,6 +593,7 @@ where
     //Start the build process using the progress callback.
     let comp_data = builder.with_progress(progress_callback)
         .build()?;
+    super::note_if_no_dictionary(&comp_data);
 
     if let Some(bar) = progress_bar.lock().unwrap().take()
         && !args.quiet

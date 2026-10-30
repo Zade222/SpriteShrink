@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
+use sprite_shrink::CompressionResult;
+use tracing::info;
+
 use crate::arg_handling::Args;
 use crate::error_handling::CliError;
 
@@ -9,6 +12,19 @@ use optical::compress_optical_mode;
 
 mod default;
 mod optical;
+
+/// Tells the user when the archive was built without a compression
+/// dictionary. The library skips the dictionary when it can't train one,
+/// which happens when the input has too little distinct data, such as a
+/// single small ROM.
+fn note_if_no_dictionary(comp_data: &CompressionResult) {
+    if comp_data.dictionary.is_empty() {
+        info!(
+            "Note: the input has too little distinct data to train a \
+            compression dictionary, so the archive was built without one."
+        );
+    }
+}
 
 
 pub fn run_default_compression(

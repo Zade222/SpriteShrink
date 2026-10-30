@@ -572,6 +572,10 @@ where
     /// compressing data chunks in parallel, serializing all metadata,
     /// and combining everything into a single, contiguous byte vector.
     ///
+    /// If no dictionary can be trained, as happens when the input has too
+    /// little distinct data, the chunks are compressed without one and the
+    /// returned dictionary is empty. Such archives extract like any other.
+    ///
     /// # Returns
     ///
     /// A `Result` which is:
@@ -644,23 +648,28 @@ where
             get_chunk_data_arc.as_ref()
         )?;
 
-        //Make dictionary from sorted data.
-        let mut _dictionary: Vec<u8> = Vec::new();
-
-        if opt_dict{
-            _dictionary = gen_zstd_opt_dict(
-            &samples_for_dict,
-            &sample_sizes,
-            dictionary_size as usize,
-            worker_threads,
-            compression_level)?;
+        /*Make dictionary from sorted data. Training fails when there's too
+        little distinct data, such as an archive of one small file: zstd's
+        trainers need at least seven unique chunks. A dictionary only makes
+        the output smaller, and on that little data it costs more bytes
+        than it saves, so the archive is built without one instead. An
+        empty dictionary is stored with length 0, and zstd treats it as no
+        dictionary when compressing and decompressing.*/
+        let _dictionary = if opt_dict {
+            gen_zstd_opt_dict(
+                &samples_for_dict,
+                &sample_sizes,
+                dictionary_size as usize,
+                worker_threads,
+                compression_level
+            ).ok()
         } else {
-            _dictionary = zstd::dict::from_continuous(
-            &samples_for_dict,
-            &sample_sizes,
-            dictionary_size as usize, //Dictionary size in bytes
-            ).map_err(|e| ArchiveError::ZstdError(e.to_string()))?;
-        }
+            zstd::dict::from_continuous(
+                &samples_for_dict,
+                &sample_sizes,
+                dictionary_size as usize, //Dictionary size in bytes
+            ).ok()
+        }.unwrap_or_default();
 
         //Samples are no longer needed.
         drop(samples_for_dict);

@@ -5,6 +5,9 @@
 mod baseline_archives;
 
 #[cfg(test)]
+mod cli_e2e;
+
+#[cfg(test)]
 mod common;
 
 #[cfg(test)]

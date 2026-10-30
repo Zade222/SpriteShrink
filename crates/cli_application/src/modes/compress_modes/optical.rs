@@ -477,6 +477,7 @@ where
         .worker_threads(args.threads.unwrap_or(0));
 
     let comp_data = comp_data_builder.build()?;
+    super::note_if_no_dictionary(&comp_data);
 
     writer.lock().unwrap().flush()?;
     let blob_size = _tmp_guard.size();

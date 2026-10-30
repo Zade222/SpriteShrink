@@ -19,7 +19,9 @@ use std::{
 };
 
 use sprite_shrink_cd::{SectorType, rebuild_sector_bitwise};
-use sprite_shrink_test_support::{rom_set, tiled_bytes};
+use sprite_shrink_test_support::{
+    assert_bytes_eq, first_difference, rom_set, tiled_bytes,
+};
 use tempfile::TempDir;
 
 use crate::common::run_cli;
@@ -47,13 +49,13 @@ fn check_against_fixture(archive: &Path, fixture_name: &str) {
     let expected = fs::read(&fixture).unwrap_or_else(|e| {
         panic!("can't read {}: {e}", fixture.display())
     });
+    let difference = first_difference(&actual, &expected);
     assert!(
-        actual == expected,
-        "{fixture_name} no longer matches the baseline ({} bytes, baseline \
-         {} bytes). If the change is meant to alter the archive format, \
-         rerun with {BLESS_VAR}=1 and commit the new fixture.",
-        actual.len(),
-        expected.len()
+        difference.is_none(),
+        "{fixture_name} no longer matches the baseline: {}. If the change \
+         is meant to alter the archive format, rerun with {BLESS_VAR}=1 and \
+         commit the new fixture.",
+        difference.unwrap_or_default()
     );
 }
 
@@ -98,7 +100,7 @@ fn default_mode_archive_matches_baseline() {
     ]);
     for (name, data) in &files {
         let extracted = fs::read(out_dir.join(name)).unwrap();
-        assert!(extracted == *data, "{name} differs after extraction");
+        assert_bytes_eq(&extracted, data, name);
     }
 }
 
@@ -185,5 +187,5 @@ fn optical_mode_archive_matches_baseline() {
         "-e", "1",
     ]);
     let extracted = fs::read(out_dir.join("disc.bin")).unwrap();
-    assert!(extracted == image, "disc.bin differs after extraction");
+    assert_bytes_eq(&extracted, &image, "disc.bin");
 }

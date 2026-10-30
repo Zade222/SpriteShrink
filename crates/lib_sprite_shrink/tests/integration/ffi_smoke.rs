@@ -19,6 +19,7 @@ use std::{
 
 use bitcode::{Encode, encode};
 use dashmap::DashMap;
+use sprite_shrink_test_support::assert_bytes_eq;
 use sprite_shrink::{
     HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID, SUPPORTED_VERSION,
     ArchiveBuilder, ChunkLocation, CompressionResult, FileData, FileHeader,
@@ -1633,9 +1634,10 @@ fn ffi_extract(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
 fn ffi_round_trip_archive_matches_rust_api() {
     let files = round_trip_files();
 
-    assert_eq!(
-        ffi_round_trip_archive(&files),
-        rust_round_trip_archive(&files)
+    assert_bytes_eq(
+        &ffi_round_trip_archive(&files),
+        &rust_round_trip_archive(&files),
+        "archive built through the C exports",
     );
 }
 
@@ -1647,5 +1649,12 @@ fn ffi_round_trip_extracts_original_files() {
 
     // The table of contents is sorted by name.
     files.sort_by(|a, b| a.0.cmp(&b.0));
-    assert_eq!(ffi_extract(&archive), files);
+    let extracted = ffi_extract(&archive);
+    let names = |set: &[(String, Vec<u8>)]| -> Vec<String> {
+        set.iter().map(|(name, _)| name.clone()).collect()
+    };
+    assert_eq!(names(&extracted), names(&files));
+    for ((name, data), (_, original)) in extracted.iter().zip(&files) {
+        assert_bytes_eq(data, original, name);
+    }
 }
