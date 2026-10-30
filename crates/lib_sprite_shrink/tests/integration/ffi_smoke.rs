@@ -17,14 +17,17 @@ use std::{
 use bitcode::{Encode, encode};
 use dashmap::DashMap;
 use sprite_shrink::{
-    ChunkLocation, FileManifestParent, SSAChunkMeta, SSMCTocEntry,
-    SerializedData, SpriteShrinkError, serialize_uncompressed_data,
+    SSMC_UID, SUPPORTED_VERSION,
+    ChunkLocation, FileHeader, FileManifestParent, SSAChunkMeta,
+    SSMCTocEntry, SerializedData, SpriteShrinkError,
+    parse_file_header, serialize_uncompressed_data,
     ffi::{
         FFICallbackStatus, FFIChunkDataArray, FFIFileManifestParent,
         FFIKeyArray, FFISSAChunkMeta, FFISerializedOutput, FFIStatus,
         FFIVecBytes, SerializeUncompressedDataArgsU64,
         SerializeUncompressedDataArgsU128, U128Bytes,
-        free_serialized_output_u64, free_serialized_output_u128,
+        free_file_header, free_serialized_output_u64,
+        free_serialized_output_u128, parse_file_header_ffi,
         serialize_uncompressed_data_u64, serialize_uncompressed_data_u128,
     },
 };
@@ -513,4 +516,98 @@ fn free_serialized_output_accepts_null() {
     unsafe { free_serialized_output_u64(ptr::null_mut()) };
     // SAFETY: as above.
     unsafe { free_serialized_output_u128(ptr::null_mut()) };
+}
+
+fn header_bytes() -> [u8; 36] {
+    FileHeader::build_file_header(3, 98, 1, SSMC_UID, 40)
+        .unwrap()
+        .to_le_bytes()
+}
+
+fn ffi_parse_header(bytes: &[u8]) -> (FFIStatus, *mut FileHeader) {
+    let mut out = ptr::null_mut();
+    // SAFETY: `bytes` is `bytes.len()` readable bytes and `out` is a local.
+    let status = unsafe {
+        parse_file_header_ffi(bytes.as_ptr(), bytes.len(), &raw mut out)
+    };
+    (status, out)
+}
+
+#[test]
+fn parse_file_header_matches_rust_api() {
+    let bytes = header_bytes();
+    let (status, out) = ffi_parse_header(&bytes);
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    // SAFETY: on success `out` points to a header from `Box::into_raw`.
+    let header = unsafe { *out };
+    assert_eq!(header, parse_file_header(&bytes).unwrap());
+    // SAFETY: `out` came from `parse_file_header_ffi` and is freed once.
+    unsafe { free_file_header(out) };
+}
+
+#[test]
+fn parse_file_header_rejects_null_arguments() {
+    let bytes = header_bytes();
+    let mut out = ptr::null_mut();
+    // SAFETY: the function returns before reading through a null pointer.
+    let status = unsafe {
+        parse_file_header_ffi(ptr::null(), bytes.len(), &raw mut out)
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::NullArgument));
+    assert!(out.is_null());
+
+    // SAFETY: as above.
+    let status = unsafe {
+        parse_file_header_ffi(bytes.as_ptr(), bytes.len(), ptr::null_mut())
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::NullArgument));
+}
+
+#[test]
+fn parse_file_header_rejects_wrong_length() {
+    let bytes = header_bytes();
+    let mut longer = bytes.to_vec();
+    longer.push(0);
+
+    for input in [&bytes[..bytes.len() - 1], &longer[..]] {
+        let (status, out) = ffi_parse_header(input);
+        assert_eq!(
+            status_code(status),
+            status_code(FFIStatus::InvalidHeader),
+            "length {}",
+            input.len()
+        );
+        assert!(out.is_null());
+    }
+}
+
+#[test]
+fn parse_file_header_rejects_wrong_magic_number() {
+    let mut bytes = header_bytes();
+    bytes[0] ^= 0xff;
+
+    let (status, out) = ffi_parse_header(&bytes);
+    assert_eq!(status_code(status), status_code(FFIStatus::InvalidHeader));
+    assert!(out.is_null());
+}
+
+#[test]
+fn parse_file_header_rejects_newer_version() {
+    let mut header = FileHeader::build_file_header(3, 98, 1, SSMC_UID, 40)
+        .unwrap();
+    header.file_version = SUPPORTED_VERSION + 1;
+
+    let (status, out) = ffi_parse_header(&header.to_le_bytes());
+    assert_eq!(
+        status_code(status),
+        status_code(FFIStatus::UnsupportedVersion)
+    );
+    assert!(out.is_null());
+}
+
+#[test]
+fn free_file_header_accepts_null() {
+    // SAFETY: `free_file_header` returns early on null.
+    unsafe { free_file_header(ptr::null_mut()) };
 }

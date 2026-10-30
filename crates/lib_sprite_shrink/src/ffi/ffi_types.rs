@@ -676,10 +676,10 @@ impl<H> From<(
 /// # Safety
 ///
 /// When this struct is created by Rust and passed to C, the C caller takes
-/// ownership of the memory pointed to by `filename` and `chunk_metadata`.
-/// This memory must be deallocated by calling the appropriate free function
-/// (e.g., `free_parsed_manifest_*` or
-/// `free_file_manifest_and_chunks_*`) to prevent memory leaks.
+/// ownership of the memory pointed to by `chunk_metadata`. This memory must
+/// be deallocated by calling the appropriate free function (e.g.,
+/// `free_serialized_output_*` or `free_file_manifest_and_chunks_*`) to
+/// prevent memory leaks.
 #[repr(C)]
 pub struct FFIFileManifestParent<H> {
     pub chunk_metadata: *const FFISSAChunkMeta<H>,
@@ -920,127 +920,6 @@ impl<H> From<(H, *mut u8, usize, usize)> for FFIHashedChunkData<H> {
             chunk_data,
             chunk_data_len,
             chunk_data_cap
-        }
-    }
-}
-
-/// Holds the result of parsing a serialized chunk index from an archive.
-///
-/// This struct is returned by the `parse_file_chunk_index_*` functions.
-/// It provides a C-compatible representation of the entire chunk index, which
-/// maps every unique chunk hash to its location within the archive's data
-/// section.
-///
-/// # Type Parameters
-///
-/// * `H`: The generic hash type (e.g., `u64`, `u128`) used in the chunk
-///   index.
-///
-/// # Fields
-///
-/// * `entries`: A pointer to the beginning of a contiguous array of
-///   [`FFIChunkIndexEntry`] structs.
-/// * `entries_len`: The total number of entries in the `entries` array.
-///
-/// # Safety
-///
-/// The C caller takes full ownership of the memory for this struct and the
-/// `entries` array it points to. To prevent a memory leak, the top-level
-/// pointer to this struct **must** be passed to the corresponding
-/// `free_parsed_chunk_index_*` function once it is no longer needed.
-#[repr(C)]
-pub struct FFIParsedChunkIndexArray<H> {
-    pub entries: *mut FFIChunkIndexEntry<H>,
-    pub entries_len: usize,
-    pub entries_cap: usize,
-}
-
-/// An `FFIParsedChunkIndexArray` specialized for `u64` hashes.
-///
-/// This type is returned by [`parse_file_chunk_index_u64`] and is the
-/// expected input for [`free_parsed_chunk_index_u64`]. It represents a
-/// complete chunk index where each chunk is identified by a 64-bit hash.
-pub type FFIParsedChunkIndexArrayU64 = FFIParsedChunkIndexArray<u64>;
-
-/// An `FFIParsedChunkIndexArray` specialized for `u128` hashes.
-///
-/// This type is returned by [`parse_file_chunk_index_u128`] and is the
-/// expected input for [`free_parsed_chunk_index_u128`]. It represents a
-/// complete chunk index where each chunk is identified by a 128-bit hash,
-/// represented on the FFI boundary as a [u8; 16] byte array in a U128Bytes
-/// struct.
-pub type FFIParsedChunkIndexArrayU128 = FFIParsedChunkIndexArray<U128Bytes>;
-
-// Converts a tuple containing a raw pointer to the entries and their length
-// into the FFI-safe `FFIParsedChunkIndexArray` struct.
-impl<H> From<(*mut FFIChunkIndexEntry<H>, usize, usize)> for
-FFIParsedChunkIndexArray<H> {
-    fn from(parts: (*mut FFIChunkIndexEntry<H>, usize, usize)) -> Self {
-        Self {
-            entries: parts.0,
-            entries_len: parts.1,
-            entries_cap: parts.2,
-        }
-    }
-}
-
-/// Holds the result of parsing a serialized file manifest from an archive.
-///
-/// This struct is returned by the `parse_file_metadata_*` functions and
-/// provides a C-compatible representation of the entire file manifest. It
-/// contains an array of [`FFIFileManifestParent`] structs, each describing a
-/// single file within the archive.
-///
-/// # Type Parameters
-///
-/// * `H`: The generic hash type (e.g., `u64`, `u128`) used in the chunk
-///   metadata within each manifest.
-///
-/// # Fields
-///
-/// * `manifests`: A pointer to the beginning of a contiguous array of
-///   [`FFIFileManifestParent`] structs.
-/// * `manifests_len`: The total number of manifest entries in the `manifests`
-///   array.
-///
-/// # Safety
-///
-/// The C caller takes full ownership of the memory for this struct and all the
-/// nested data it points to (the `manifests` array, and the internal pointers
-/// for filenames and chunk metadata within each manifest). To prevent
-/// significant memory leaks, the top-level pointer to this struct **must** be
-/// passed to the corresponding `free_parsed_manifest_*` function once it
-/// is no longer needed.
-#[repr(C)]
-pub struct FFIParsedManifestArray<H> {
-    pub manifests: *mut FFIFileManifestParent<H>,
-    pub manifests_len: usize,
-    pub manifests_cap: usize,
-}
-
-/// An `FFIParsedManifestArray` specialized for `u64` hashes.
-///
-/// This type is returned by [`parse_file_metadata_u64`] and is the
-/// expected input for [`free_parsed_manifest_u64`]. It represents a
-/// complete file manifest where each chunk is identified by a 64-bit hash.
-pub type FFIParsedManifestArrayU64 = FFIParsedManifestArray<u64>;
-
-/// An `FFIParsedManifestArray` specialized for `u128` hashes.
-///
-/// This type is returned by [`parse_file_metadata_u128`] and is the
-/// expected input for [`free_parsed_manifest_u128`]. It represents a
-/// complete file manifest where each chunk is identified by a 128-bit hash.
-pub type FFIParsedManifestArrayU128 = FFIParsedManifestArray<U128Bytes>;
-
-// Converts a tuple containing a raw pointer to the manifests and their
-// length into the FFI-safe `FFIParsedManifestArray` struct.
-impl<H> From<(*mut FFIFileManifestParent<H>, usize, usize)> for
-FFIParsedManifestArray<H> {
-    fn from(parts: (*mut FFIFileManifestParent<H>, usize, usize)) -> Self {
-        Self {
-            manifests: parts.0,
-            manifests_len: parts.1,
-            manifests_cap: parts.2,
         }
     }
 }
