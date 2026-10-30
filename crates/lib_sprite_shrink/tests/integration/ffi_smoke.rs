@@ -17,17 +17,19 @@ use std::{
 use bitcode::{Encode, encode};
 use dashmap::DashMap;
 use sprite_shrink::{
-    SSMC_UID, SUPPORTED_VERSION,
-    ChunkLocation, FileHeader, FileManifestParent, SSAChunkMeta,
-    SSMCTocEntry, SerializedData, SpriteShrinkError,
-    parse_file_header, serialize_uncompressed_data,
+    HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID, SUPPORTED_VERSION,
+    ChunkLocation, CompressionResult, FileHeader, FileManifestParent,
+    SSAChunkMeta, SSMCTocEntry, SerializedData, SpriteShrinkError,
+    build_ssmc_prefix, parse_file_header, serialize_uncompressed_data,
     ffi::{
-        FFICallbackStatus, FFIChunkDataArray, FFIFileManifestParent,
-        FFIKeyArray, FFISSAChunkMeta, FFISerializedOutput, FFIStatus,
-        FFIVecBytes, SerializeUncompressedDataArgsU64,
-        SerializeUncompressedDataArgsU128, U128Bytes,
-        free_file_header, free_serialized_output_u64,
-        free_serialized_output_u128, parse_file_header_ffi,
+        FFICallbackStatus, FFIChunkDataArray, FFICompData,
+        FFIFileManifestParent, FFIKeyArray, FFISSAChunkMeta,
+        FFISerializedOutput, FFIStatus, FFITocEntry, FFIVecBytes,
+        SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
+        U128Bytes,
+        build_ssmc_prefix_u64, build_ssmc_prefix_u128, free_file_header,
+        free_serialized_output_u64, free_serialized_output_u128,
+        free_ssmc_prefix, parse_file_header_ffi,
         serialize_uncompressed_data_u64, serialize_uncompressed_data_u128,
     },
 };
@@ -610,4 +612,270 @@ fn parse_file_header_rejects_newer_version() {
 fn free_file_header_accepts_null() {
     // SAFETY: `free_file_header` returns early on null.
     unsafe { free_file_header(ptr::null_mut()) };
+}
+
+/// The signature shared by `build_ssmc_prefix_u64` and
+/// `build_ssmc_prefix_u128`.
+type BuildPrefixFn<F> = unsafe extern "C" fn(
+    *const FFITocEntry,
+    *const FFIFileManifestParent<F>,
+    usize,
+    *const FFICompData,
+    *mut *mut FFIVecBytes,
+) -> FFIStatus;
+
+/// Stands in for what `archive_builder_build_*` returns. The prefix builder
+/// only copies these bytes, so they don't have to decode.
+fn comp_result() -> CompressionResult {
+    let dictionary = b"dictionary bytes".to_vec();
+    let enc_chunk_index = b"encoded chunk index".to_vec();
+
+    CompressionResult {
+        dictionary_size: dictionary.len() as u64,
+        dictionary,
+        enc_chunk_index_size: enc_chunk_index.len() as u64,
+        enc_chunk_index,
+    }
+}
+
+/// Points an `FFICompData` at `comp`'s buffers, which the library only
+/// reads.
+fn ffi_comp_data(comp: &mut CompressionResult) -> FFICompData {
+    FFICompData {
+        dictionary_data_ptr: comp.dictionary.as_mut_ptr(),
+        dictionary_data_len: comp.dictionary.len(),
+        dictionary_data_cap: comp.dictionary.capacity(),
+        enc_chunk_index_data_ptr: comp.enc_chunk_index.as_mut_ptr(),
+        enc_chunk_index_data_len: comp.enc_chunk_index.len(),
+        enc_chunk_index_data_cap: comp.enc_chunk_index.capacity(),
+    }
+}
+
+/// A table of contents a C host builds itself, naming `input`'s files.
+fn host_toc<F>(input: &HostInput<F>) -> Vec<FFITocEntry> {
+    input
+        .name_ptrs
+        .iter()
+        .map(|&name| FFITocEntry {
+            filename: name.cast_mut(),
+            uncompressed_size: 0,
+        })
+        .collect()
+}
+
+/// Copies the prefix out and frees it.
+///
+/// # Safety
+///
+/// `prefix` must come from a successful `build_ssmc_prefix_*` call and not
+/// have been freed.
+unsafe fn take_prefix(prefix: *mut FFIVecBytes) -> Vec<u8> {
+    // SAFETY: the caller guarantees `prefix` is valid.
+    let parts = unsafe { &*prefix };
+    // SAFETY: the library wrote `len` bytes at `ptr`.
+    let bytes = unsafe { slice::from_raw_parts(parts.ptr, parts.len) }.to_vec();
+    // SAFETY: `prefix` is freed once, here.
+    unsafe { free_ssmc_prefix(prefix) };
+    bytes
+}
+
+/// Feeds a serializer result back in the way a host would. Returns that
+/// prefix and what `build_ssmc_prefix` gives with `hash_type` for the same
+/// files.
+///
+/// # Safety
+///
+/// `ser` must come from a successful `serialize_uncompressed_data_*` call
+/// and not have been freed.
+unsafe fn ffi_and_rust_prefixes<F, H>(
+    build: BuildPrefixFn<F>,
+    ser: *const FFISerializedOutput<F>,
+    hashes: [H; 3],
+    hash_type: u8,
+) -> (Vec<u8>, Vec<u8>)
+where
+    H: Copy + Ord + Hash + Display + Encode + Send + Sync + 'static,
+{
+    let mut comp = comp_result();
+    let ffi_comp = ffi_comp_data(&mut comp);
+    let mut out = ptr::null_mut();
+
+    // SAFETY: the caller guarantees `ser` is valid.
+    let ser = unsafe { &*ser };
+    // SAFETY: the TOC and manifests both hold `toc_len` elements.
+    let status = unsafe {
+        build(
+            ser.toc_ptr,
+            ser.ser_manifest_ptr,
+            ser.toc_len,
+            &raw const ffi_comp,
+            &raw mut out,
+        )
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    let rust = rust_serialize(hashes);
+    let expected = build_ssmc_prefix(
+        &rust.archive_toc,
+        &rust.ser_file_manifest,
+        &comp,
+        hash_type,
+    )
+    .unwrap();
+
+    // SAFETY: `out` came from the successful call above.
+    (unsafe { take_prefix(out) }, expected)
+}
+
+#[test]
+fn build_ssmc_prefix_u64_matches_rust_api() {
+    let hashes = [1_u64, u64::MAX, 7];
+    let input = host_input::<u64, u64>(hashes);
+    let mut store = chunk_store(hashes);
+    let (status, ser) = ffi_serialize_u64(&input, &mut store, |_| {});
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    // SAFETY: `ser` came from the successful call above.
+    let (ffi, rust) = unsafe {
+        ffi_and_rust_prefixes(
+            build_ssmc_prefix_u64,
+            ser,
+            hashes,
+            HASH_TYPE_XXH3_64,
+        )
+    };
+    assert_eq!(ffi, rust);
+    // SAFETY: `ser` is freed once, here.
+    unsafe { free_serialized_output_u64(ser) };
+}
+
+#[test]
+fn build_ssmc_prefix_u128_matches_rust_api() {
+    let hashes = [1_u128, u128::MAX, 1 << 120];
+    let input = host_input::<u128, U128Bytes>(hashes);
+    let mut store = chunk_store(hashes);
+    let (status, ser) = ffi_serialize_u128(&input, &mut store, |_| {});
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    // SAFETY: `ser` came from the successful call above.
+    let (ffi, rust) = unsafe {
+        ffi_and_rust_prefixes(
+            build_ssmc_prefix_u128,
+            ser,
+            hashes,
+            HASH_TYPE_XXH3_128,
+        )
+    };
+    assert_eq!(ffi, rust);
+    // SAFETY: `ser` is freed once, here.
+    unsafe { free_serialized_output_u128(ser) };
+}
+
+/// Changes the TOC or build result before a prefix call.
+type PrefixEdit = fn(&mut Vec<FFITocEntry>, &mut FFICompData);
+
+/// Calls `build` on a host-built TOC, `input`'s manifests and `comp`, after
+/// `edit` has changed the TOC and build result.
+fn ffi_build_prefix<F>(
+    build: BuildPrefixFn<F>,
+    input: &HostInput<F>,
+    edit: impl FnOnce(&mut Vec<FFITocEntry>, &mut FFICompData),
+) -> (FFIStatus, *mut FFIVecBytes) {
+    let mut comp = comp_result();
+    let mut ffi_comp = ffi_comp_data(&mut comp);
+    let mut toc = host_toc(input);
+    edit(&mut toc, &mut ffi_comp);
+    let mut out = ptr::null_mut();
+
+    // SAFETY: every pointer points into a live local or `input`, each array
+    // holds `input.manifests.len()` elements.
+    let status = unsafe {
+        build(
+            toc.as_ptr(),
+            input.manifests.as_ptr(),
+            input.manifests.len(),
+            &raw const ffi_comp,
+            &raw mut out,
+        )
+    };
+    (status, out)
+}
+
+fn assert_rejects_null_arguments<F>(
+    build: BuildPrefixFn<F>,
+    input: &HostInput<F>,
+) {
+    let cases: [(&str, PrefixEdit); 3] = [
+        ("TOC filename", |toc, _| toc[1].filename = ptr::null_mut()),
+        ("dictionary", |_, comp| comp.dictionary_data_ptr = ptr::null_mut()),
+        ("chunk index", |_, comp| {
+            comp.enc_chunk_index_data_ptr = ptr::null_mut();
+        }),
+    ];
+    for (what, edit) in cases {
+        let (status, out) = ffi_build_prefix(build, input, edit);
+        assert_eq!(
+            status_code(status),
+            status_code(FFIStatus::NullArgument),
+            "null {what}"
+        );
+        assert!(out.is_null(), "null {what}");
+    }
+
+    let mut comp = comp_result();
+    let ffi_comp = ffi_comp_data(&mut comp);
+    let host_toc = host_toc(input);
+    let mut out_slot = ptr::null_mut();
+
+    let toc = host_toc.as_ptr();
+    let manifests = input.manifests.as_ptr();
+    let comp_data = &raw const ffi_comp;
+    let out = &raw mut out_slot;
+    let calls = [
+        ("toc", ptr::null(), manifests, comp_data, out),
+        ("manifests", toc, ptr::null(), comp_data, out),
+        ("comp_data", toc, manifests, ptr::null(), out),
+        ("out_ptr", toc, manifests, comp_data, ptr::null_mut()),
+    ];
+    for (what, toc, manifests, comp_data, out) in calls {
+        // SAFETY: one pointer is null, which the function checks before
+        // reading anything; the others point into live locals or `input`.
+        let status = unsafe {
+            build(toc, manifests, input.manifests.len(), comp_data, out)
+        };
+        assert_eq!(
+            status_code(status),
+            status_code(FFIStatus::NullArgument),
+            "null {what}"
+        );
+    }
+    assert!(out_slot.is_null());
+}
+
+#[test]
+fn build_ssmc_prefix_rejects_null_arguments() {
+    let hashes = [1_u64, 2, 3];
+    assert_rejects_null_arguments(build_ssmc_prefix_u64, &host_input(hashes));
+
+    let hashes = [1_u128, 2, 3];
+    assert_rejects_null_arguments(build_ssmc_prefix_u128, &host_input(hashes));
+}
+
+#[test]
+fn build_ssmc_prefix_rejects_filename_that_is_not_utf8() {
+    let input = host_input::<u64, u64>([1, 2, 3]);
+    let bad_name = CString::new([0xff, 0xfe]).unwrap();
+
+    let (status, out) =
+        ffi_build_prefix(build_ssmc_prefix_u64, &input, |toc, _| {
+            toc[0].filename = bad_name.as_ptr().cast_mut();
+        });
+    assert_eq!(status_code(status), status_code(FFIStatus::InvalidString));
+    assert!(out.is_null());
+}
+
+#[test]
+fn free_ssmc_prefix_accepts_null() {
+    // SAFETY: `free_ssmc_prefix` returns early on null.
+    unsafe { free_ssmc_prefix(ptr::null_mut()) };
 }

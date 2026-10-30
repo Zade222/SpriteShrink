@@ -32,6 +32,14 @@ pub const SSMC_UID: u16 = 0x0000;
 /// compressed with zstd.
 pub const ALGORITHM_ZSTD: u16 = 98;
 
+/// The `hash_type` value in [`FileHeader`] for archives whose chunks are
+/// identified by 64-bit xxHash3 hashes (`u64`).
+pub const HASH_TYPE_XXH3_64: u8 = 1;
+
+/// The `hash_type` value in [`FileHeader`] for archives whose chunks are
+/// identified by 128-bit xxHash3 hashes (`u128`).
+pub const HASH_TYPE_XXH3_128: u8 = 2;
+
 /// Represents the location of a data chunk within the archive.
 ///
 /// This struct is used to pinpoint the exact position and size of a

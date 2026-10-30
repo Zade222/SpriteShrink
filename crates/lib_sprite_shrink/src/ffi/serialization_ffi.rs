@@ -10,6 +10,7 @@ use std::{
     slice
 };
 
+use bitcode::Encode;
 use dashmap::DashMap;
 use libc::c_char;
 
@@ -17,18 +18,20 @@ use crate::ffi::ffi_error_handling::{
     FFIResult
 };
 use crate::ffi::ffi_types::{
-    FFIChunkDataArray, FFIChunkIndexEntry,
-    FFIFileManifestParent,
+    FFIChunkDataArray, FFIChunkIndexEntry, FFICompData,
+    FFIFileManifestParent, FFIFileManifestParentU64,
+    FFIFileManifestParentU128,
     FFIKeyArray, FFISerializedOutput,
     FFISerializedOutputU64, FFISerializedOutputU128,
     SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
-    FFISSAChunkMeta, FFITocEntry, U128Bytes
+    FFISSAChunkMeta, FFITocEntry, FFIVecBytes, U128Bytes
 };
 use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{
-    FileManifestParent, SerializedData
+    HASH_TYPE_XXH3_64,HASH_TYPE_XXH3_128,
+    CompressionResult, FileManifestParent, SerializedData, SSMCTocEntry,
 };
-use crate::serialization::{serialize_uncompressed_data};
+use crate::serialization::{build_ssmc_prefix, serialize_uncompressed_data};
 
 /// Splits a `Vec` into the pointer, length and capacity handed to C. The
 /// matching free function rebuilds it with `Vec::from_raw_parts`.
@@ -661,4 +664,297 @@ pub unsafe extern "C" fn free_serialized_output_u128(
     unsafe {free_serialized_output_internal::<U128Bytes>(
         ptr,
     )}
+}
+
+/// Copies the table of contents from C.
+///
+/// # Errors
+///
+/// * `NullArgument` if a filename pointer is null.
+/// * `InvalidString` if a filename isn't valid UTF-8.
+///
+/// # Safety
+///
+/// `toc` must point to `len` elements, and every non-null filename must be
+/// a null-terminated string.
+unsafe fn read_toc(
+    toc: *const FFITocEntry,
+    len: usize,
+) -> Result<Vec<SSMCTocEntry>, FFIResult> {
+    // SAFETY: the caller guarantees `toc` holds `len` elements.
+    let entries = unsafe { slice::from_raw_parts(toc, len) };
+
+    entries
+        .iter()
+        .map(|entry| {
+            if entry.filename.is_null() {
+                return Err(FFIResult::NullArgument);
+            }
+
+            // SAFETY: `filename` isn't null, and the caller guarantees it's
+            // null-terminated.
+            let Ok(filename) = unsafe { CStr::from_ptr(entry.filename) }
+                .to_str()
+            else {
+                return Err(FFIResult::InvalidString);
+            };
+
+            Ok(SSMCTocEntry {
+                filename: filename.to_owned(),
+                uncompressed_size: entry.uncompressed_size,
+            })
+        })
+        .collect()
+}
+
+/// Copies the dictionary and encoded chunk index out of a build result.
+///
+/// # Errors
+///
+/// Returns `NullArgument` if either buffer pointer is null.
+///
+/// # Safety
+///
+/// Each non-null buffer in `comp` must hold its recorded number of bytes.
+unsafe fn read_comp_data(
+    comp: &FFICompData
+) -> Result<CompressionResult, FFIResult> {
+    if comp.dictionary_data_ptr.is_null() ||
+        comp.enc_chunk_index_data_ptr.is_null()
+    {
+        return Err(FFIResult::NullArgument);
+    }
+
+    // SAFETY: the pointer isn't null, and the caller guarantees it holds
+    // `dictionary_data_len` bytes.
+    let dictionary = unsafe {
+        slice::from_raw_parts(
+            comp.dictionary_data_ptr,
+            comp.dictionary_data_len
+        )
+    }.to_vec();
+    // SAFETY: as above, for `enc_chunk_index_data_len` bytes.
+    let enc_chunk_index = unsafe {
+        slice::from_raw_parts(
+            comp.enc_chunk_index_data_ptr,
+            comp.enc_chunk_index_data_len
+        )
+    }.to_vec();
+
+    Ok(CompressionResult {
+        dictionary_size: dictionary.len() as u64,
+        dictionary,
+        enc_chunk_index_size: enc_chunk_index.len() as u64,
+        enc_chunk_index,
+    })
+}
+
+/// Shared body of `build_ssmc_prefix_u64` and `build_ssmc_prefix_u128`,
+/// converting each manifest's hashes from their FFI form `F` to `H`.
+///
+/// # Safety
+///
+/// Every non-null pointer must meet the contract of the public functions.
+unsafe fn build_ssmc_prefix_internal<F, H>(
+    toc: *const FFITocEntry,
+    manifests: *const FFIFileManifestParent<F>,
+    file_count: usize,
+    comp_data: *const FFICompData,
+    hash_type: u8,
+) -> Result<FFIVecBytes, FFIResult>
+where
+    for<'a> FileManifestParent<H>: From<&'a FFIFileManifestParent<F>>,
+    H: Encode,
+{
+    if toc.is_null() || manifests.is_null() || comp_data.is_null() {
+        return Err(FFIResult::NullArgument);
+    }
+
+    // SAFETY: `toc` isn't null, and the caller guarantees it holds
+    // `file_count` entries with null-terminated names.
+    let toc = unsafe { read_toc(toc, file_count) }?;
+
+    // SAFETY: `manifests` isn't null, and the caller guarantees it holds
+    // `file_count` elements.
+    let manifests: Vec<FileManifestParent<H>> = unsafe {
+        slice::from_raw_parts(manifests, file_count)
+    }
+        .iter()
+        .map(FileManifestParent::from)
+        .collect();
+
+    // SAFETY: `comp_data` isn't null, and the caller guarantees it points to
+    // a valid `FFICompData`.
+    let comp_data = unsafe { &*comp_data };
+    // SAFETY: the caller guarantees each buffer holds its recorded length.
+    let comp = unsafe { read_comp_data(comp_data) }?;
+
+    let prefix = build_ssmc_prefix(&toc, &manifests, &comp, hash_type)?;
+    let (ptr, len, cap) = vec_into_raw_parts(prefix);
+
+    Ok(FFIVecBytes { ptr, len, cap })
+}
+
+/// Builds every byte of an SSMC archive that comes before the compressed
+/// data, for archives whose chunks are identified by `u64` hashes.
+///
+/// The host writes the returned bytes and then appends the compressed chunk
+/// data that `archive_builder_build_u64` passed to its write callback.
+///
+/// # Arguments
+///
+/// * `toc`: One entry per file, in the order the files are numbered. The
+///   `toc_ptr` array from `serialize_uncompressed_data_u64` can be passed
+///   as is.
+/// * `manifests`: One manifest per file, in the same order as `toc`.
+/// * `file_count`: The number of elements in both `toc` and `manifests`.
+/// * `comp_data`: The result of `archive_builder_build_u64`.
+/// * `out_ptr`: Receives the prefix on success.
+///
+/// # Returns
+///
+/// * `FFIResult::StatusOk` on success.
+/// * `FFIResult::NullArgument` if any pointer argument, a filename in
+///   `toc`, or a buffer in `comp_data` is null.
+/// * `FFIResult::InvalidString` if a filename isn't valid UTF-8.
+/// * `FFIResult::InternalError` if the archive is too large for the
+///   header's 32-bit fields.
+///
+/// # Safety
+///
+/// - `toc` and `manifests` must each point to `file_count` elements, and
+///   every filename must be a null-terminated string. Nothing passed in is
+///   freed or kept; the caller still owns it.
+/// - `comp_data` must point to a valid `FFICompData`.
+/// - On success, the pointer written to `out_ptr` must be freed with
+///   `free_ssmc_prefix`.
+#[unsafe(no_mangle)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks only #[must_use] functions SPRITE_SHRINK_MUST_USE"
+)]
+#[must_use]
+pub unsafe extern "C" fn build_ssmc_prefix_u64(
+    toc: *const FFITocEntry,
+    manifests: *const FFIFileManifestParentU64,
+    file_count: usize,
+    comp_data: *const FFICompData,
+    out_ptr: *mut *mut FFIVecBytes,
+) -> FFIResult {
+    if out_ptr.is_null() {
+        return FFIResult::NullArgument;
+    }
+
+    // SAFETY: the caller upholds this function's contract, which is the
+    // helper's.
+    match unsafe {
+        build_ssmc_prefix_internal::<_, u64>(
+            toc,
+            manifests,
+            file_count,
+            comp_data,
+            HASH_TYPE_XXH3_64,
+        )
+    } {
+        Ok(prefix) => {
+            // SAFETY: `out_ptr` was checked for null above and the caller
+            // guarantees it is valid for writes.
+            unsafe { *out_ptr = Box::into_raw(Box::new(prefix)) };
+            FFIResult::StatusOk
+        }
+        Err(status) => status,
+    }
+}
+
+/// Builds every byte of an SSMC archive that comes before the compressed
+/// data, for archives whose chunks are identified by `u128` hashes.
+///
+/// The host writes the returned bytes and then appends the compressed chunk
+/// data that `archive_builder_build_u128` passed to its write callback.
+///
+/// # Arguments
+///
+/// * `toc`: One entry per file, in the order the files are numbered. The
+///   `toc_ptr` array from `serialize_uncompressed_data_u128` can be passed
+///   as is.
+/// * `manifests`: One manifest per file, in the same order as `toc`.
+/// * `file_count`: The number of elements in both `toc` and `manifests`.
+/// * `comp_data`: The result of `archive_builder_build_u128`.
+/// * `out_ptr`: Receives the prefix on success.
+///
+/// # Returns
+///
+/// * `FFIResult::StatusOk` on success.
+/// * `FFIResult::NullArgument` if any pointer argument, a filename in
+///   `toc`, or a buffer in `comp_data` is null.
+/// * `FFIResult::InvalidString` if a filename isn't valid UTF-8.
+/// * `FFIResult::InternalError` if the archive is too large for the
+///   header's 32-bit fields.
+///
+/// # Safety
+///
+/// - `toc` and `manifests` must each point to `file_count` elements, and
+///   every filename must be a null-terminated string. Nothing passed in is
+///   freed or kept; the caller still owns it.
+/// - `comp_data` must point to a valid `FFICompData`.
+/// - On success, the pointer written to `out_ptr` must be freed with
+///   `free_ssmc_prefix`.
+#[unsafe(no_mangle)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks only #[must_use] functions SPRITE_SHRINK_MUST_USE"
+)]
+#[must_use]
+pub unsafe extern "C" fn build_ssmc_prefix_u128(
+    toc: *const FFITocEntry,
+    manifests: *const FFIFileManifestParentU128,
+    file_count: usize,
+    comp_data: *const FFICompData,
+    out_ptr: *mut *mut FFIVecBytes,
+) -> FFIResult {
+    if out_ptr.is_null() {
+        return FFIResult::NullArgument;
+    }
+
+    // SAFETY: the caller upholds this function's contract, which is the
+    // helper's.
+    match unsafe {
+        build_ssmc_prefix_internal::<_, u128>(
+            toc,
+            manifests,
+            file_count,
+            comp_data,
+            HASH_TYPE_XXH3_128,
+        )
+    } {
+        Ok(prefix) => {
+            // SAFETY: `out_ptr` was checked for null above and the caller
+            // guarantees it is valid for writes.
+            unsafe { *out_ptr = Box::into_raw(Box::new(prefix)) };
+            FFIResult::StatusOk
+        }
+        Err(status) => status,
+    }
+}
+
+/// Frees a prefix returned by `build_ssmc_prefix_u64` or
+/// `build_ssmc_prefix_u128`.
+///
+/// Passing a null pointer does nothing.
+///
+/// # Safety
+///
+/// `ptr` must be null or a pointer written by one of those functions that
+/// has not already been freed.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn free_ssmc_prefix(ptr: *mut FFIVecBytes) {
+    if ptr.is_null() {
+        return;
+    }
+
+    // SAFETY: `ptr` is non-null and, per the caller's guarantee, came from
+    // `Box::into_raw` in a `build_ssmc_prefix_*` function.
+    let prefix = unsafe { Box::from_raw(ptr) };
+    // SAFETY: the parts came from `vec_into_raw_parts` and are unchanged.
+    drop(unsafe { Vec::from_raw_parts(prefix.ptr, prefix.len, prefix.cap) });
 }

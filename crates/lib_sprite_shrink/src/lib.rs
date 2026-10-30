@@ -12,7 +12,7 @@ pub use lib_error_handling::{
 
 mod lib_structs;
 pub use lib_structs::{
-    ALGORITHM_ZSTD, SSMC_UID,
+    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID,
     ChunkLocation, CompressionResult, FileData, FileHeader, FileManifestParent, FileRegion,
     ParsedSSMC, ProcessedFileData, Progress, SeekMetadata, SerializedData, SSAChunkMeta,
     SSMCFormatData, SSMCTocEntry

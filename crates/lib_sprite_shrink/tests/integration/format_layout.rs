@@ -8,8 +8,10 @@
 use std::mem::offset_of;
 
 use sprite_shrink::{
-    ALGORITHM_ZSTD, FileHeader, FileRegion, MAGIC_NUMBER, SS_SEED, SSMC_UID, SSMCFormatData,
-    SUPPORTED_VERSION, parse_file_header, parse_format_data,
+    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, MAGIC_NUMBER,
+    SS_SEED, SSMC_UID, SUPPORTED_VERSION,
+    FileHeader, FileRegion, SSMCFormatData,
+    parse_file_header, parse_format_data,
 };
 
 /// Header from `build_file_header(3, 98, 1, SSMC_UID, 40)`, written out by
@@ -78,6 +80,8 @@ fn format_constants_are_unchanged() {
     assert_eq!(SS_SEED, 0x4202_8030_1019_2019);
     assert_eq!(SSMC_UID, 0x0000);
     assert_eq!(ALGORITHM_ZSTD, 98);
+    assert_eq!(HASH_TYPE_XXH3_64, 1);
+    assert_eq!(HASH_TYPE_XXH3_128, 2);
 }
 
 #[test]

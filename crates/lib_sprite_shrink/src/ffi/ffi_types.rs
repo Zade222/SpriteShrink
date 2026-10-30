@@ -1427,6 +1427,9 @@ impl<H: Copy> From<SSAChunkMeta<H>> for FFISSAChunkMeta<H> {
 /// When Rust returns these to C, Rust owns `filename`. It's freed by the
 /// free function for the struct that holds the entries, such as
 /// `free_serialized_output_*`, and must not be freed by the caller.
+///
+/// When C passes these to Rust, as with `build_ssmc_prefix_*`, Rust only
+/// reads `filename` and the caller keeps ownership.
 #[repr(C)]
 #[derive(Debug)]
 pub struct FFITocEntry {
