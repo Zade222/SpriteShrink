@@ -28,6 +28,7 @@ pub enum FFIStatus {
     BufferTooSmall = -17,
     HashNotFound = -18,
     DuplicateFilename = -19,
+    SectionOutOfBounds = -20,
 }
 
 
@@ -47,6 +48,9 @@ impl From<SpriteShrinkError> for FFIStatus {
             SpriteShrinkError::Parsing(
                 ParsingError::ManifestDecodeError(_)
             ) => FFIStatus::ManifestDecodeError,
+            SpriteShrinkError::Parsing(
+                ParsingError::SectionOutOfBounds(_)
+            ) => FFIStatus::SectionOutOfBounds,
 
             //Archive errors
             SpriteShrinkError::Archive(

@@ -19,17 +19,21 @@ use dashmap::DashMap;
 use sprite_shrink::{
     HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID, SUPPORTED_VERSION,
     ChunkLocation, CompressionResult, FileHeader, FileManifestParent,
-    SSAChunkMeta, SSMCTocEntry, SerializedData, SpriteShrinkError,
-    build_ssmc_prefix, parse_file_header, serialize_uncompressed_data,
+    ParsedSSMC, SSAChunkMeta, SSMCFormatData, SSMCTocEntry, SerializedData,
+    SpriteShrinkError, build_ssmc_prefix, parse_file_header,
+    parse_ssmc_prefix, serialize_uncompressed_data,
     ffi::{
-        FFICallbackStatus, FFIChunkDataArray, FFICompData,
-        FFIFileManifestParent, FFIKeyArray, FFISSAChunkMeta,
+        FFICallbackStatus, FFIChunkDataArray, FFIChunkLocation, FFICompData,
+        FFIFileManifestParent, FFIKeyArray, FFIParsedSSMC, FFISSAChunkMeta,
         FFISerializedOutput, FFIStatus, FFITocEntry, FFIVecBytes,
         SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
         U128Bytes,
         build_ssmc_prefix_u64, build_ssmc_prefix_u128, free_file_header,
+        free_parsed_ssmc_u64, free_parsed_ssmc_u128,
         free_serialized_output_u64, free_serialized_output_u128,
-        free_ssmc_prefix, parse_file_header_ffi,
+        free_ssmc_prefix, lookup_chunk_location_u64,
+        lookup_chunk_location_u128, parse_file_header_ffi,
+        parse_format_data_ffi, parse_ssmc_prefix_u64, parse_ssmc_prefix_u128,
         serialize_uncompressed_data_u64, serialize_uncompressed_data_u128,
     },
 };
@@ -296,6 +300,69 @@ fn ffi_serialize_u128(
     (status, out)
 }
 
+/// Copies a table of contents the library wrote back into Rust types.
+///
+/// # Safety
+///
+/// `ptr` must point to `len` entries the library wrote, not yet freed.
+unsafe fn read_toc(ptr: *const FFITocEntry, len: usize) -> Vec<SSMCTocEntry> {
+    // SAFETY: the caller guarantees `ptr` holds `len` entries.
+    let toc = unsafe { slice::from_raw_parts(ptr, len) };
+
+    toc.iter()
+        .map(|entry| SSMCTocEntry {
+            // SAFETY: the library writes null-terminated filenames.
+            filename: unsafe { CStr::from_ptr(entry.filename) }
+                .to_str()
+                .unwrap()
+                .to_string(),
+            uncompressed_size: entry.uncompressed_size,
+        })
+        .collect()
+}
+
+/// Copies manifests the library wrote back into Rust types, converting
+/// each hash with `H::from`.
+///
+/// # Safety
+///
+/// `ptr` must point to `len` manifests the library wrote, not yet freed.
+unsafe fn read_manifests<F, H>(
+    ptr: *const FFIFileManifestParent<F>,
+    len: usize,
+) -> Vec<FileManifestParent<H>>
+where
+    F: Copy,
+    H: From<F>,
+{
+    // SAFETY: the caller guarantees `ptr` holds `len` manifests.
+    let manifests = unsafe { slice::from_raw_parts(ptr, len) };
+
+    manifests
+        .iter()
+        .map(|fmp| {
+            // SAFETY: each manifest holds `chunk_metadata_len` entries.
+            let metadata = unsafe {
+                slice::from_raw_parts(
+                    fmp.chunk_metadata,
+                    fmp.chunk_metadata_len,
+                )
+            };
+            FileManifestParent {
+                chunk_count: metadata.len() as u64,
+                chunk_metadata: metadata
+                    .iter()
+                    .map(|meta| SSAChunkMeta {
+                        hash: meta.hash.into(),
+                        offset: meta.offset,
+                        length: meta.length,
+                    })
+                    .collect(),
+            }
+        })
+        .collect()
+}
+
 /// Copies what `out` points to back into Rust types, converting each hash
 /// with `H::from`.
 ///
@@ -311,56 +378,26 @@ where
 {
     // SAFETY: the caller guarantees `out` is valid.
     let out = unsafe { &*out };
-    // SAFETY: each array holds `len` elements, as written by the library.
-    let toc = unsafe { slice::from_raw_parts(out.toc_ptr, out.toc_len) };
-    // SAFETY: as above.
-    let manifests = unsafe {
-        slice::from_raw_parts(out.ser_manifest_ptr, out.ser_manifest_len)
-    };
-    // SAFETY: as above.
+    // SAFETY: the library wrote `ser_chunk_index_len` entries at
+    // `ser_chunk_index_ptr`, and `out` hasn't been freed.
     let chunk_index = unsafe {
         slice::from_raw_parts(out.ser_chunk_index_ptr, out.ser_chunk_index_len)
     };
-    // SAFETY: as above.
+    // SAFETY: the library wrote `sorted_hashes_len` hashes at
+    // `sorted_hashes_ptr`, and `out` hasn't been freed.
     let sorted_hashes = unsafe {
         slice::from_raw_parts(out.sorted_hashes_ptr, out.sorted_hashes_len)
     };
 
     SerializedData {
-        archive_toc: toc
-            .iter()
-            .map(|entry| SSMCTocEntry {
-                // SAFETY: the library writes null-terminated filenames.
-                filename: unsafe { CStr::from_ptr(entry.filename) }
-                    .to_str()
-                    .unwrap()
-                    .to_string(),
-                uncompressed_size: entry.uncompressed_size,
-            })
-            .collect(),
-        ser_file_manifest: manifests
-            .iter()
-            .map(|fmp| {
-                // SAFETY: as above.
-                let metadata = unsafe {
-                    slice::from_raw_parts(
-                        fmp.chunk_metadata,
-                        fmp.chunk_metadata_len,
-                    )
-                };
-                FileManifestParent {
-                    chunk_count: metadata.len() as u64,
-                    chunk_metadata: metadata
-                        .iter()
-                        .map(|meta| SSAChunkMeta {
-                            hash: meta.hash.into(),
-                            offset: meta.offset,
-                            length: meta.length,
-                        })
-                        .collect(),
-                }
-            })
-            .collect(),
+        // SAFETY: the library wrote `toc_len` entries with null-terminated
+        // names at `toc_ptr`, and `out` hasn't been freed.
+        archive_toc: unsafe { read_toc(out.toc_ptr, out.toc_len) },
+        // SAFETY: the library wrote `ser_manifest_len` manifests at
+        // `ser_manifest_ptr`, and `out` hasn't been freed.
+        ser_file_manifest: unsafe {
+            read_manifests(out.ser_manifest_ptr, out.ser_manifest_len)
+        },
         chunk_index: chunk_index
             .iter()
             .map(|entry| {
@@ -878,4 +915,286 @@ fn build_ssmc_prefix_rejects_filename_that_is_not_utf8() {
 fn free_ssmc_prefix_accepts_null() {
     // SAFETY: `free_ssmc_prefix` returns early on null.
     unsafe { free_ssmc_prefix(ptr::null_mut()) };
+}
+
+/// Stands in for the compressed data after the prefix. The parser has to
+/// ignore it.
+const DATA_AFTER_PREFIX: &[u8] = b"compressed chunks";
+
+/// An archive for `FILES` built with the Rust API: the prefix, with a chunk
+/// index that decodes, then `DATA_AFTER_PREFIX`.
+fn rust_archive<H>(hashes: [H; 3], hash_type: u8) -> Vec<u8>
+where
+    H: Copy + Ord + Hash + Display + Encode + Send + Sync + 'static,
+{
+    let ser = rust_serialize(hashes);
+    // Encoded as pairs, which decode as the map the parser reads.
+    let chunk_index: Vec<(H, ChunkLocation)> =
+        ser.chunk_index.into_iter().collect();
+    let enc_chunk_index = encode(&chunk_index);
+    let comp = CompressionResult {
+        enc_chunk_index_size: enc_chunk_index.len() as u64,
+        enc_chunk_index,
+        ..comp_result()
+    };
+
+    let mut archive = build_ssmc_prefix(
+        &ser.archive_toc,
+        &ser.ser_file_manifest,
+        &comp,
+        hash_type,
+    )
+    .unwrap();
+    archive.extend_from_slice(DATA_AFTER_PREFIX);
+    archive
+}
+
+/// Finds where `archive`'s metadata ends the way a C host would: parse the
+/// header, then the format data it points to.
+fn ffi_prefix_len(archive: &[u8]) -> usize {
+    let (status, header) = ffi_parse_header(&archive[..36]);
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+    // SAFETY: `header` came from the successful call above.
+    let start = unsafe { (*header).format_data_offset } as usize;
+    // SAFETY: `header` is freed once, here.
+    unsafe { free_file_header(header) };
+
+    let bytes = &archive[start..start + size_of::<SSMCFormatData>()];
+    let mut format_data = SSMCFormatData::from_le_bytes(&[0; 56]);
+    // SAFETY: `bytes` is `bytes.len()` readable bytes and `format_data` is
+    // a local.
+    let status = unsafe {
+        parse_format_data_ffi(bytes.as_ptr(), bytes.len(), &raw mut format_data)
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    usize::try_from(format_data.data_offset).unwrap()
+}
+
+/// Checks a parse result against `parse_ssmc_prefix` for the same bytes.
+/// `lookup` looks a hash up in the result's `chunk_index`, and `absent` is
+/// a hash that isn't in it.
+///
+/// # Safety
+///
+/// `parsed` must come from a successful `parse_ssmc_prefix_*` call and not
+/// have been freed.
+unsafe fn assert_parsed_matches_rust<F, H>(
+    parsed: *const FFIParsedSSMC<F>,
+    rust: &ParsedSSMC<H>,
+    lookup: impl Fn(*const c_void, H) -> (FFIStatus, FFIChunkLocation),
+    absent: H,
+) where
+    F: Copy,
+    H: Copy + From<F> + Encode,
+{
+    // SAFETY: the caller guarantees `parsed` is valid.
+    let parsed = unsafe { &*parsed };
+    assert_eq!(parsed.header, rust.header);
+    assert_eq!(parsed.format_data, rust.format_data);
+
+    // SAFETY: the library wrote `toc_len` entries with null-terminated
+    // names at `toc_ptr`, and `parsed` hasn't been freed.
+    let toc = unsafe { read_toc(parsed.toc_ptr, parsed.toc_len) };
+    assert_eq!(toc, rust.toc);
+    // SAFETY: the library wrote `manifests_len` manifests at
+    // `manifests_ptr`, and `parsed` hasn't been freed.
+    let manifests: Vec<FileManifestParent<H>> = unsafe {
+        read_manifests(parsed.manifests_ptr, parsed.manifests_len)
+    };
+    assert_eq!(encode(&manifests), encode(&rust.manifests));
+    // SAFETY: the library wrote `dictionary_len` bytes at `dictionary_ptr`,
+    // and `parsed` hasn't been freed.
+    let dictionary = unsafe {
+        slice::from_raw_parts(parsed.dictionary_ptr, parsed.dictionary_len)
+    };
+    assert_eq!(dictionary, rust.dictionary);
+
+    assert_eq!(rust.chunk_index.len(), CHUNKS.len());
+    for (&hash, location) in &rust.chunk_index {
+        let (status, found) = lookup(parsed.chunk_index, hash);
+        assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+        assert_eq!(found.offset, location.offset);
+        assert_eq!(found.length, location.compressed_length);
+    }
+    let (status, _) = lookup(parsed.chunk_index, absent);
+    assert_eq!(status_code(status), status_code(FFIStatus::HashNotFound));
+}
+
+fn lookup_u64(map: *const c_void, hash: u64) -> (FFIStatus, FFIChunkLocation) {
+    let mut location = FFIChunkLocation { offset: 0, length: 0 };
+    // SAFETY: `map` is a live `chunk_index` handle for `u64` hashes and
+    // `location` is a local.
+    let status = unsafe {
+        lookup_chunk_location_u64(map, hash, &raw mut location)
+    };
+    (status, location)
+}
+
+fn lookup_u128(map: *const c_void, hash: u128)
+    -> (FFIStatus, FFIChunkLocation)
+{
+    let key = hash.to_le_bytes();
+    let mut location = FFIChunkLocation { offset: 0, length: 0 };
+    // SAFETY: `map` is a live `chunk_index` handle for `u128` hashes, `key`
+    // is 16 bytes and `location` is a local.
+    let status = unsafe {
+        lookup_chunk_location_u128(map, key.as_ptr(), &raw mut location)
+    };
+    (status, location)
+}
+
+#[test]
+fn parse_ssmc_prefix_u64_matches_rust_api() {
+    let archive = rust_archive([1_u64, u64::MAX, 7], HASH_TYPE_XXH3_64);
+    let prefix = &archive[..ffi_prefix_len(&archive)];
+    assert_eq!(prefix.len(), archive.len() - DATA_AFTER_PREFIX.len());
+
+    let mut out = ptr::null_mut();
+    // SAFETY: `archive` is `archive.len()` readable bytes and `out` is a
+    // local. The whole archive is passed, so the parser has to stop at the
+    // prefix.
+    let status = unsafe {
+        parse_ssmc_prefix_u64(archive.as_ptr(), archive.len(), &raw mut out)
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    let rust = parse_ssmc_prefix::<u64>(prefix).unwrap();
+    // SAFETY: `out` came from the successful call above.
+    unsafe { assert_parsed_matches_rust(out, &rust, lookup_u64, 2) };
+    // SAFETY: `out` is freed once, here.
+    unsafe { free_parsed_ssmc_u64(out) };
+}
+
+#[test]
+fn parse_ssmc_prefix_u128_matches_rust_api() {
+    let hashes = [1_u128, u128::MAX, 1 << 120];
+    let archive = rust_archive(hashes, HASH_TYPE_XXH3_128);
+    let prefix = &archive[..ffi_prefix_len(&archive)];
+
+    let mut out = ptr::null_mut();
+    // SAFETY: `prefix` is `prefix.len()` readable bytes and `out` is a
+    // local.
+    let status = unsafe {
+        parse_ssmc_prefix_u128(prefix.as_ptr(), prefix.len(), &raw mut out)
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    let rust = parse_ssmc_prefix::<u128>(prefix).unwrap();
+    // SAFETY: `out` came from the successful call above.
+    unsafe { assert_parsed_matches_rust(out, &rust, lookup_u128, 2) };
+    // SAFETY: `out` is freed once, here.
+    unsafe { free_parsed_ssmc_u128(out) };
+}
+
+fn ffi_parse_prefix_u64(prefix: &[u8]) -> (FFIStatus, *mut FFIParsedSSMC<u64>) {
+    let mut out = ptr::null_mut();
+    // SAFETY: `prefix` is `prefix.len()` readable bytes and `out` is a
+    // local.
+    let status = unsafe {
+        parse_ssmc_prefix_u64(prefix.as_ptr(), prefix.len(), &raw mut out)
+    };
+    (status, out)
+}
+
+#[test]
+fn parse_ssmc_prefix_rejects_truncated_prefix() {
+    let archive = rust_archive([1_u64, 2, 3], HASH_TYPE_XXH3_64);
+    let prefix = &archive[..ffi_prefix_len(&archive)];
+
+    let (status, out) = ffi_parse_prefix_u64(&prefix[..prefix.len() - 1]);
+    assert_eq!(
+        status_code(status),
+        status_code(FFIStatus::SectionOutOfBounds)
+    );
+    assert!(out.is_null());
+}
+
+#[test]
+fn parse_ssmc_prefix_rejects_other_format() {
+    let mut archive = rust_archive([1_u64, 2, 3], HASH_TYPE_XXH3_64);
+    // `format_id` is the little-endian u16 at bytes 20..22.
+    archive[20] = 1;
+
+    let (status, out) = ffi_parse_prefix_u64(&archive);
+    assert_eq!(status_code(status), status_code(FFIStatus::InvalidHeader));
+    assert!(out.is_null());
+}
+
+#[test]
+fn parse_ssmc_prefix_rejects_null_arguments() {
+    let archive = rust_archive([1_u64, 2, 3], HASH_TYPE_XXH3_64);
+    let mut out_u64 = ptr::null_mut();
+    let mut out_u128 = ptr::null_mut();
+
+    let (bytes, len) = (archive.as_ptr(), archive.len());
+
+    for (prefix, out) in
+        [(ptr::null(), &raw mut out_u64), (bytes, ptr::null_mut())]
+    {
+        // SAFETY: one pointer is null, which the function checks before
+        // reading anything; the other points into a live local.
+        let status = unsafe { parse_ssmc_prefix_u64(prefix, len, out) };
+        assert_eq!(status_code(status), status_code(FFIStatus::NullArgument));
+    }
+    for (prefix, out) in
+        [(ptr::null(), &raw mut out_u128), (bytes, ptr::null_mut())]
+    {
+        // SAFETY: one pointer is null, which the function checks before
+        // reading anything; the other points into a live local.
+        let status = unsafe { parse_ssmc_prefix_u128(prefix, len, out) };
+        assert_eq!(status_code(status), status_code(FFIStatus::NullArgument));
+    }
+    assert!(out_u64.is_null());
+    assert!(out_u128.is_null());
+}
+
+#[test]
+fn parse_format_data_rejects_null_arguments() {
+    let bytes = [0_u8; 56];
+    let mut format_data = SSMCFormatData::from_le_bytes(&bytes);
+
+    let calls = [
+        (ptr::null(), &raw mut format_data),
+        (bytes.as_ptr(), ptr::null_mut()),
+    ];
+
+    for (data, out) in calls {
+        // SAFETY: one pointer is null, which the function checks before
+        // reading or writing anything.
+        let status = unsafe { parse_format_data_ffi(data, bytes.len(), out) };
+        assert_eq!(status_code(status), status_code(FFIStatus::NullArgument));
+    }
+}
+
+#[test]
+fn lookup_chunk_location_u128_rejects_null_hash() {
+    let archive = rust_archive([1_u128, 2, 3], HASH_TYPE_XXH3_128);
+    let mut parsed = ptr::null_mut();
+    // SAFETY: `archive` is `archive.len()` readable bytes and `parsed` is a
+    // local.
+    let status = unsafe {
+        parse_ssmc_prefix_u128(archive.as_ptr(), archive.len(), &raw mut parsed)
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    // SAFETY: `parsed` came from the successful call above.
+    let chunk_index = unsafe { (*parsed).chunk_index };
+    let mut location = FFIChunkLocation { offset: 0, length: 0 };
+    // SAFETY: `chunk_index` is live and the null hash is checked before
+    // it's read.
+    let status = unsafe {
+        lookup_chunk_location_u128(chunk_index, ptr::null(), &raw mut location)
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::NullArgument));
+    // SAFETY: `parsed` is freed once, here.
+    unsafe { free_parsed_ssmc_u128(parsed) };
+}
+
+#[test]
+fn free_parsed_ssmc_accepts_null() {
+    // SAFETY: `free_parsed_ssmc_u64` returns early on null.
+    unsafe { free_parsed_ssmc_u64(ptr::null_mut()) };
+    // SAFETY: `free_parsed_ssmc_u128` returns early on null.
+    unsafe { free_parsed_ssmc_u128(ptr::null_mut()) };
 }

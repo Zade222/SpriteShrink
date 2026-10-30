@@ -4,8 +4,7 @@
 //! complex conversion of data structures and memory management.
 
 use std::{
-    ffi::{CStr, CString},
-    mem::ManuallyDrop,
+    ffi::CStr,
     os::raw::c_void,
     slice
 };
@@ -24,7 +23,11 @@ use crate::ffi::ffi_types::{
     FFIKeyArray, FFISerializedOutput,
     FFISerializedOutputU64, FFISerializedOutputU128,
     SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
-    FFISSAChunkMeta, FFITocEntry, FFIVecBytes, U128Bytes
+    FFITocEntry, FFIVecBytes, U128Bytes
+};
+use crate::ffi::ffi_ownership::{
+    free_manifests, free_toc, manifests_into_ffi, toc_into_ffi,
+    vec_into_raw_parts
 };
 use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{
@@ -32,13 +35,6 @@ use crate::lib_structs::{
     CompressionResult, FileManifestParent, SerializedData, SSMCTocEntry,
 };
 use crate::serialization::{build_ssmc_prefix, serialize_uncompressed_data};
-
-/// Splits a `Vec` into the pointer, length and capacity handed to C. The
-/// matching free function rebuilds it with `Vec::from_raw_parts`.
-fn vec_into_raw_parts<T>(vec: Vec<T>) -> (*mut T, usize, usize) {
-    let mut vec = ManuallyDrop::new(vec);
-    (vec.as_mut_ptr(), vec.len(), vec.capacity())
-}
 
 /// Pairs each manifest from C with its filename, keyed the way
 /// `serialize_uncompressed_data` expects.
@@ -106,43 +102,9 @@ where
 {
     /*The only fallible step comes first, so nothing has been handed out
     yet if it fails.*/
-    let Ok(filenames) = data.archive_toc
-        .iter()
-        .map(|entry| CString::new(entry.filename.as_str()))
-        .collect::<Result<Vec<_>, _>>()
-    else {
-        return Err(FFIResult::InvalidString);
-    };
-
-    let toc: Vec<FFITocEntry> = filenames
-        .into_iter()
-        .zip(&data.archive_toc)
-        .map(|(filename, entry)| FFITocEntry {
-            filename: filename.into_raw(),
-            uncompressed_size: entry.uncompressed_size,
-        })
-        .collect();
-
-    let manifests: Vec<FFIFileManifestParent<F>> = data.ser_file_manifest
-        .into_iter()
-        .map(|fmp| {
-            let chunk_metadata: Vec<FFISSAChunkMeta<F>> = fmp.chunk_metadata
-                .into_iter()
-                .map(|meta| FFISSAChunkMeta {
-                    hash: meta.hash.into(),
-                    offset: meta.offset,
-                    length: meta.length,
-                })
-                .collect();
-            let (ptr, len, cap) = vec_into_raw_parts(chunk_metadata);
-
-            FFIFileManifestParent {
-                chunk_metadata: ptr,
-                chunk_metadata_len: len,
-                chunk_metadata_cap: cap,
-            }
-        })
-        .collect();
+    let toc = toc_into_ffi(&data.archive_toc)?;
+    let manifests: Vec<FFIFileManifestParent<F>> =
+        manifests_into_ffi(data.ser_file_manifest);
 
     let chunk_index: Vec<FFIChunkIndexEntry<F>> = data.chunk_index
         .into_iter()
@@ -579,32 +541,12 @@ unsafe fn free_serialized_output_internal<H>(
     unsafe {
         let output = Box::from_raw(ptr);
         //Deallocate all the vectors whose memory was passed to C
-        let toc = Vec::from_raw_parts(
-            output.toc_ptr,
-            output.toc_len,
-            output.toc_cap,
-        );
-
-        for entry in toc {
-            //Deallocate the CString for the filename.
-            let _ = CString::from_raw(entry.filename);
-        }
-
-        let ffi_manifests = Vec::from_raw_parts(
+        free_toc(output.toc_ptr, output.toc_len, output.toc_cap);
+        free_manifests(
             output.ser_manifest_ptr,
             output.ser_manifest_len,
             output.ser_manifest_cap,
         );
-
-        for fmp in ffi_manifests {
-            /*Reconstruct and deallocate the Vec for the chunk
-            metadata.*/
-            let _ = Vec::from_raw_parts(
-                fmp.chunk_metadata as *mut FFISSAChunkMeta<H>,
-                fmp.chunk_metadata_len,
-                fmp.chunk_metadata_cap,
-            );
-        }
 
         let _ = Vec::from_raw_parts(
             output.ser_chunk_index_ptr,

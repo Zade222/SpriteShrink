@@ -1,6 +1,8 @@
 pub mod archive_ffi;
 pub use archive_ffi::*;
 
+mod ffi_ownership;
+
 pub mod ffi_types;
 pub use ffi_types::*;
 

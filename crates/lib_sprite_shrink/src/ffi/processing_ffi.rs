@@ -1231,9 +1231,10 @@ pub unsafe extern "C" fn free_seek_chunks_u128(
 
 /// Looks up the location of a data chunk in the chunk index using a u64 hash.
 ///
-/// This function uses an opaque handle to the `HashMap` (created by
-/// `prepare_chunk_index_u64`) to find the `FFIChunkLocation` corresponding
-/// to the provided hash.
+/// This function uses an opaque handle to the `HashMap` (the `chunk_index`
+/// field of a `parse_ssmc_prefix_u64` result) to find the
+/// `FFIChunkLocation` corresponding to the provided hash. Its `offset` is a
+/// position in the archive file.
 ///
 /// On success (`FFIResult::StatusOk`), the `chunk_location` out-parameter is
 /// populated with the result. If the hash is not found, the function returns
@@ -1241,8 +1242,8 @@ pub unsafe extern "C" fn free_seek_chunks_u128(
 ///
 /// # Arguments
 ///
-/// * `map_ptr`: An opaque handle to the chunk index `HashMap`, originally
-///   obtained from `prepare_chunk_index_u64`.
+/// * `map_ptr`: An opaque handle to the chunk index `HashMap`, from the
+///   `chunk_index` field of a `parse_ssmc_prefix_u64` result.
 /// * `key_hash`: The `u64` hash of the chunk to look up.
 /// * `chunk_location`: An out-parameter; a pointer to an `FFIChunkLocation`
 ///   struct where the result will be written.
@@ -1283,9 +1284,10 @@ pub unsafe extern "C" fn lookup_chunk_location_u64(
 
 /// Looks up the location of a data chunk in the chunk index using a u128 hash.
 ///
-/// This function uses an opaque handle to the `HashMap` (created by
-/// `prepare_chunk_index_u128`) to find the `FFIChunkLocation` corresponding
-/// to the provided hash.
+/// This function uses an opaque handle to the `HashMap` (the `chunk_index`
+/// field of a `parse_ssmc_prefix_u128` result) to find the
+/// `FFIChunkLocation` corresponding to the provided hash. Its `offset` is a
+/// position in the archive file.
 ///
 /// On success (`FFIResult::StatusOk`), the `chunk_location` out-parameter is
 /// populated with the result. If the hash is not found, the function returns
@@ -1293,10 +1295,10 @@ pub unsafe extern "C" fn lookup_chunk_location_u64(
 ///
 /// # Arguments
 ///
-/// * `map_ptr`: An opaque handle to the chunk index `HashMap`, originally
-///   obtained from `prepare_chunk_index_u128`.
-/// * `key_hash`: A 16-byte array representing the `u128` hash of the chunk
-///   to look up.
+/// * `map_ptr`: An opaque handle to the chunk index `HashMap`, from the
+///   `chunk_index` field of a `parse_ssmc_prefix_u128` result.
+/// * `key_hash_ptr`: A pointer to the 16 bytes of the `u128` hash of the
+///   chunk to look up, little-endian as in `U128Bytes`.
 /// * `chunk_location`: An out-parameter; a pointer to an `FFIChunkLocation`
 ///   struct where the result will be written.
 ///
@@ -1313,7 +1315,9 @@ pub unsafe extern "C" fn lookup_chunk_location_u128(
     key_hash_ptr: *const u8,
     chunk_location: *mut FFIChunkLocation
 ) -> FFIResult {
-    if map_ptr.is_null() ||chunk_location.is_null() {
+    if map_ptr.is_null() || key_hash_ptr.is_null() ||
+        chunk_location.is_null()
+    {
         return FFIResult::NullArgument
     }
 

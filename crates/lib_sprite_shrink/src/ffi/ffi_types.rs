@@ -29,7 +29,8 @@ use crate::lib_error_handling::{
 };
 
 use crate::lib_structs::{
-    ChunkLocation, FileManifestParent, SeekMetadata, SSAChunkMeta
+    ChunkLocation, FileHeader, FileManifestParent, SeekMetadata, SSAChunkMeta,
+    SSMCFormatData
 };
 
 use crate::processing::Hashable;
@@ -1436,6 +1437,54 @@ pub struct FFITocEntry {
     pub filename: *mut c_char,
     pub uncompressed_size: u64,
 }
+
+/// An SSMC archive's metadata, returned by `parse_ssmc_prefix_u64` and
+/// `parse_ssmc_prefix_u128`.
+///
+/// # Fields
+///
+/// * `header`, `format_data`: As stored in the archive, in the host's byte
+///   order.
+/// * `toc_ptr`, `toc_len`, `toc_cap`: The table of contents, one entry per
+///   file in the order the files are numbered.
+/// * `manifests_ptr`, `manifests_len`, `manifests_cap`: One manifest per
+///   file, in the same order as the table of contents.
+/// * `dictionary_ptr`, `dictionary_len`, `dictionary_cap`: The zstd
+///   dictionary the chunks were compressed with.
+/// * `chunk_index`: A handle for `lookup_chunk_location_u64` or
+///   `lookup_chunk_location_u128`, matching the parse function's suffix.
+///   The offsets it gives are positions in the archive file, so a host can
+///   seek straight to a chunk.
+///
+/// # Safety
+///
+/// Rust owns everything this struct points to, including `chunk_index`.
+/// Pass the struct to the matching `free_parsed_ssmc_*` function to free
+/// it, and don't use `chunk_index` after that.
+#[repr(C)]
+#[derive(Debug)]
+pub struct FFIParsedSSMC<H> {
+    pub header: FileHeader,
+    pub format_data: SSMCFormatData,
+    pub toc_ptr: *mut FFITocEntry,
+    pub toc_len: usize,
+    pub toc_cap: usize,
+    pub manifests_ptr: *mut FFIFileManifestParent<H>,
+    pub manifests_len: usize,
+    pub manifests_cap: usize,
+    pub dictionary_ptr: *mut u8,
+    pub dictionary_len: usize,
+    pub dictionary_cap: usize,
+    pub chunk_index: *mut c_void,
+}
+
+/// An `FFIParsedSSMC` for archives with `u64` chunk hashes, returned by
+/// `parse_ssmc_prefix_u64`.
+pub type FFIParsedSSMCU64 = FFIParsedSSMC<u64>;
+
+/// An `FFIParsedSSMC` for archives with `u128` chunk hashes, returned by
+/// `parse_ssmc_prefix_u128`. Each hash is a little-endian `U128Bytes`.
+pub type FFIParsedSSMCU128 = FFIParsedSSMC<U128Bytes>;
 
 
 /// A wrapper for a mutable C `void` pointer, used to pass user-defined
