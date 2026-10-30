@@ -27,6 +27,7 @@ pub enum FFIStatus {
     NoDataToProcess = -16,
     BufferTooSmall = -17,
     HashNotFound = -18,
+    DuplicateFilename = -19,
 }
 
 

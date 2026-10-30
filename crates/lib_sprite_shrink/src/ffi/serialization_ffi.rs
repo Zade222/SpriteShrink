@@ -4,12 +4,14 @@
 //! complex conversion of data structures and memory management.
 
 use std::{
-    ffi::CString,
+    ffi::{CStr, CString},
+    mem::ManuallyDrop,
     os::raw::c_void,
     slice
 };
 
 use dashmap::DashMap;
+use libc::c_char;
 
 use crate::ffi::ffi_error_handling::{
     FFIResult
@@ -20,20 +22,167 @@ use crate::ffi::ffi_types::{
     FFIKeyArray, FFISerializedOutput,
     FFISerializedOutputU64, FFISerializedOutputU128,
     SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
-    FFISSAChunkMeta, U128Bytes
+    FFISSAChunkMeta, FFITocEntry, U128Bytes
 };
 use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{
-    ChunkLocation, FileManifestParent
+    FileManifestParent, SerializedData
 };
 use crate::serialization::{serialize_uncompressed_data};
 
+/// Splits a `Vec` into the pointer, length and capacity handed to C. The
+/// matching free function rebuilds it with `Vec::from_raw_parts`.
+fn vec_into_raw_parts<T>(vec: Vec<T>) -> (*mut T, usize, usize) {
+    let mut vec = ManuallyDrop::new(vec);
+    (vec.as_mut_ptr(), vec.len(), vec.capacity())
+}
+
+/// Pairs each manifest from C with its filename, keyed the way
+/// `serialize_uncompressed_data` expects.
+///
+/// # Errors
+///
+/// * `NullArgument` if a filename pointer is null.
+/// * `InvalidString` if a filename isn't valid UTF-8.
+/// * `DuplicateFilename` if two manifests have the same name. Keying by
+///   name would otherwise drop one of the files without an error.
+///
+/// # Safety
+///
+/// `manifests` and `filenames` must each point to `len` elements, and every
+/// non-null filename must be a null-terminated string.
+unsafe fn read_file_manifest<F, H>(
+    manifests: *const FFIFileManifestParent<F>,
+    filenames: *const *const c_char,
+    len: usize,
+) -> Result<DashMap<String, FileManifestParent<H>>, FFIResult>
+where
+    for<'a> FileManifestParent<H>: From<&'a FFIFileManifestParent<F>>,
+{
+    // SAFETY: the caller guarantees `manifests` holds `len` elements.
+    let ffi_manifests = unsafe { slice::from_raw_parts(manifests, len) };
+    // SAFETY: the caller guarantees `filenames` holds `len` elements.
+    let name_ptrs = unsafe { slice::from_raw_parts(filenames, len) };
+
+    let file_manifest = DashMap::with_capacity(len);
+
+    for (ffi_fmp, &name_ptr) in ffi_manifests.iter().zip(name_ptrs) {
+        if name_ptr.is_null() {
+            return Err(FFIResult::NullArgument);
+        }
+
+        // SAFETY: `name_ptr` isn't null, and the caller guarantees it's
+        // null-terminated.
+        let Ok(filename) = unsafe { CStr::from_ptr(name_ptr) }.to_str() else {
+            return Err(FFIResult::InvalidString);
+        };
+
+        if file_manifest
+            .insert(filename.to_owned(), FileManifestParent::from(ffi_fmp))
+            .is_some()
+        {
+            return Err(FFIResult::DuplicateFilename);
+        }
+    }
+
+    Ok(file_manifest)
+}
+
+/// Converts the serializer's output into the struct handed to C,
+/// converting each hash to its FFI form `F`.
+///
+/// # Errors
+///
+/// Returns `InvalidString` if a filename contains a null byte. Names read
+/// from C strings can't, but it's checked rather than assumed.
+fn into_ffi_output<H, F>(
+    data: SerializedData<H>
+) -> Result<FFISerializedOutput<F>, FFIResult>
+where
+    F: From<H>,
+{
+    /*The only fallible step comes first, so nothing has been handed out
+    yet if it fails.*/
+    let Ok(filenames) = data.archive_toc
+        .iter()
+        .map(|entry| CString::new(entry.filename.as_str()))
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return Err(FFIResult::InvalidString);
+    };
+
+    let toc: Vec<FFITocEntry> = filenames
+        .into_iter()
+        .zip(&data.archive_toc)
+        .map(|(filename, entry)| FFITocEntry {
+            filename: filename.into_raw(),
+            uncompressed_size: entry.uncompressed_size,
+        })
+        .collect();
+
+    let manifests: Vec<FFIFileManifestParent<F>> = data.ser_file_manifest
+        .into_iter()
+        .map(|fmp| {
+            let chunk_metadata: Vec<FFISSAChunkMeta<F>> = fmp.chunk_metadata
+                .into_iter()
+                .map(|meta| FFISSAChunkMeta {
+                    hash: meta.hash.into(),
+                    offset: meta.offset,
+                    length: meta.length,
+                })
+                .collect();
+            let (ptr, len, cap) = vec_into_raw_parts(chunk_metadata);
+
+            FFIFileManifestParent {
+                chunk_metadata: ptr,
+                chunk_metadata_len: len,
+                chunk_metadata_cap: cap,
+            }
+        })
+        .collect();
+
+    let chunk_index: Vec<FFIChunkIndexEntry<F>> = data.chunk_index
+        .into_iter()
+        .map(|(hash, location)| {
+            FFIChunkIndexEntry::from((hash.into(), location))
+        })
+        .collect();
+
+    let sorted_hashes: Vec<F> = data.sorted_hashes
+        .into_iter()
+        .map(F::from)
+        .collect();
+
+    let (toc_ptr, toc_len, toc_cap) = vec_into_raw_parts(toc);
+    let (ser_manifest_ptr, ser_manifest_len, ser_manifest_cap) =
+        vec_into_raw_parts(manifests);
+    let (ser_chunk_index_ptr, ser_chunk_index_len, ser_chunk_index_cap) =
+        vec_into_raw_parts(chunk_index);
+    let (sorted_hashes_ptr, sorted_hashes_len, sorted_hashes_cap) =
+        vec_into_raw_parts(sorted_hashes);
+
+    Ok(FFISerializedOutput {
+        toc_ptr,
+        toc_len,
+        toc_cap,
+        ser_manifest_ptr,
+        ser_manifest_len,
+        ser_manifest_cap,
+        ser_chunk_index_ptr,
+        ser_chunk_index_len,
+        ser_chunk_index_cap,
+        sorted_hashes_ptr,
+        sorted_hashes_len,
+        sorted_hashes_cap,
+    })
+}
+
 /// Serialises uncompressed sprite data using 64bit hash keys.
 ///
-/// Function for obtaining a `FFISerializedOutputU64` containing a manifest, a
-/// chunk index and a sorted hash list. The function validates its arguments
-/// and then forwards the work to the generic implementation
-/// `serialize_uncompressed_data_internal::<u64>`.
+/// Function for obtaining a `FFISerializedOutputU64` containing a table of
+/// contents, a manifest, a chunk index and a sorted hash list. The function
+/// validates its arguments and then forwards the work to
+/// `serialize_uncompressed_data`.
 ///
 /// # Parameters
 ///
@@ -56,6 +205,8 @@ use crate::serialization::{serialize_uncompressed_data};
 ///   array of `FFIFileManifestParentU64` with `args.manifest_len` elements.
 ///   The caller is responsible for ensuring the array lives for the duration
 ///   of the call.
+/// * `args.filenames` must be a valid, non‑null pointer to an array of
+///   `args.manifest_len` null-terminated strings, one per manifest.
 /// * The callbacks contained in `args` (`get_keys_cb` and `get_chunks_cb`) are
 ///   `unsafe extern "C"` functions; they must obey the contract described in
 ///   `SerializeUncompressedDataArgsU64`.
@@ -66,10 +217,13 @@ use crate::serialization::{serialize_uncompressed_data};
 ///
 /// * `FFIResult::StatusOk` – The operation succeeded and `*out_ptr` now points to a
 ///   valid `FFISerializedOutputU64`.
-/// * `FFIResult::NullArgument` – Either `args` or `out_ptr` (or the manifest
-///   pointer inside `args`) was null.
-/// * Other error variants may be returned by the internal implementation if,
-///   for example, a callback fails or memory allocation aborts.
+/// * `FFIResult::NullArgument` – `args`, `out_ptr`, the manifest or
+///   filename array inside `args`, or one of the filenames was null.
+/// * `FFIResult::InvalidString` – A filename isn't valid UTF-8.
+/// * `FFIResult::DuplicateFilename` – Two manifests have the same filename.
+/// * `FFIResult::SerializationMissingChunk` – The chunk callback didn't
+///   return data for a hash in the manifests.
+/// * Other error variants if, for example, a callback fails.
 #[unsafe(no_mangle)]
 #[allow(clippy::double_must_use)]
 #[must_use]
@@ -84,35 +238,24 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 
     let args_int = unsafe{&*args};
 
-    if args_int.manifest_array_ptr.is_null() {
-        return FFIResult::NullArgument;
+    if args_int.manifest_array_ptr.is_null() ||
+        args_int.filenames.is_null() {
+            return FFIResult::NullArgument;
     }
 
-    let file_manifest = unsafe {
-        //Convert C inputs to Rust types
-
-        /*Prepare file_manifest DashMap, which is the first parameter
-        of the original serialize_uncompressed_data function, from C
-        input.*/
-        let ffi_manifests = slice::from_raw_parts(
+    /*Pair each manifest with its filename in the DashMap the original
+    serialize_uncompressed_data function takes.*/
+    // SAFETY: the caller guarantees both arrays hold `manifest_len`
+    // elements and every filename is null-terminated.
+    let file_manifest = match unsafe {
+        read_file_manifest::<_, u64>(
             args_int.manifest_array_ptr,
+            args_int.filenames,
             args_int.manifest_len
-        );
-
-        /*Since DashMap is not a supported type in C, the following
-        reconstructs it for use by the library.*/
-
-        /*Reconstruct the file_manifest DashMap via the following
-        loop.*/
-        let file_manifest: DashMap<String, FileManifestParent<u64>> = ffi_manifests
-        .iter()
-        .map(|ffi_fmp| {
-            let rust_fmp = FileManifestParent::<u64>::from(ffi_fmp);
-            (rust_fmp.filename.clone(), rust_fmp)
-        })
-        .collect();
-
-        file_manifest
+        )
+    } {
+        Ok(file_manifest) => file_manifest,
+        Err(status) => return status,
     };
 
     //Wrap C function pointers into Rust closures for the core library.
@@ -192,107 +335,28 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
         &get_chunks_closure
     ) {
         Ok(data) => data,
-        Err(_) => return FFIResult::SerializationMissingChunk,
+        Err(e) => return e.into(),
     };
 
-    let mut ffi_manifests_vec: Vec<FFIFileManifestParent<u64>> =
-           Vec::with_capacity(serialized_data.ser_file_manifest.len());
+    let output = match into_ffi_output::<u64, u64>(serialized_data) {
+        Ok(output) => output,
+        Err(status) => return status,
+    };
 
-    for fmp in serialized_data.ser_file_manifest {
-        let mut chunk_meta_vec: Vec<FFISSAChunkMeta<u64>> = fmp
-            .chunk_metadata
-            .iter()
-            .map(|meta| FFISSAChunkMeta::from(*meta))
-            .collect();
-
-        let chunk_meta_ptr = chunk_meta_vec.as_mut_ptr();
-        let chunk_meta_cap = chunk_meta_vec.capacity();
-        std::mem::forget(chunk_meta_vec);
-
-        let c_filename = match CString::new(fmp.filename.clone()) {
-            Ok(s) => s.into_raw(),
-            Err(_) => {
-                unsafe {
-                    let _ = Vec::from_raw_parts(
-                        chunk_meta_ptr,
-                        fmp.chunk_count as usize,
-                        chunk_meta_cap,
-                    );
-                }
-
-                for fmp_to_free in ffi_manifests_vec {
-                    unsafe {
-                        let _ = Vec::from_raw_parts(
-                            fmp_to_free.chunk_metadata as *mut FFISSAChunkMeta<u64>,
-                            fmp_to_free.chunk_metadata_len,
-                            fmp_to_free.chunk_metadata_cap,
-                        );
-                    }
-                }
-
-                return FFIResult::InvalidString;
-            }
-        };
-
-        ffi_manifests_vec.push(FFIFileManifestParent {
-            chunk_metadata: chunk_meta_ptr as *const FFISSAChunkMeta<u64>,
-            chunk_metadata_len: fmp.chunk_count as usize,
-            chunk_metadata_cap: chunk_meta_cap,
-        });
-    }
-
-    let manifests_ptr = ffi_manifests_vec.as_mut_ptr();
-    let manifests_len = ffi_manifests_vec.len();
-    let manifests_cap = ffi_manifests_vec.capacity();
-    //Give up ownership of the outer Vec
-    std::mem::forget(ffi_manifests_vec);
-
-    let mut entries: Vec<FFIChunkIndexEntry<u64>> = serialized_data.chunk_index
-        .into_iter()
-        .map(|(hash, location)| {
-            FFIChunkIndexEntry::from((
-                hash,
-                ChunkLocation {
-                    offset: location.offset,
-                    compressed_length: location.compressed_length,
-                },
-            ))
-        })
-        .collect();
-
-    let entries_ptr = entries.as_mut_ptr();
-    let entries_len = entries.len();
-    let entries_cap = entries.capacity();
-
-    //Give up ownership of the Vec so it doesn't get deallocated.
-    std::mem::forget(entries);
-
-    let output = Box::new(FFISerializedOutput::from((
-        manifests_ptr,
-        manifests_len,
-        manifests_cap,
-        entries_ptr,
-        entries_len,
-        entries_cap,
-        serialized_data.sorted_hashes.as_ptr(),
-        serialized_data.sorted_hashes.len(),
-        serialized_data.sorted_hashes.capacity(),
-    )));
-
-    std::mem::forget(serialized_data.sorted_hashes);
-
+    // SAFETY: `out_ptr` was checked for null above, and the caller
+    // guarantees it's valid for writes.
     unsafe {
-        *out_ptr = Box::into_raw(output);
+        *out_ptr = Box::into_raw(Box::new(output));
     };
     FFIResult::StatusOk
 }
 
 /// Serialises uncompressed sprite data using 128bit hash keys.
 ///
-/// Function for obtaining a `FFISerializedOutputU128` containing a manifest, a
-/// chunk index and a sorted hash list. The function validates its arguments
-/// and then forwards the work to the generic implementation
-/// `serialize_uncompressed_data_internal::<u128>`.
+/// Function for obtaining a `FFISerializedOutputU128` containing a table of
+/// contents, a manifest, a chunk index and a sorted hash list. The function
+/// validates its arguments and then forwards the work to
+/// `serialize_uncompressed_data`.
 ///
 /// # Parameters
 ///
@@ -315,6 +379,8 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 ///   array of `FFIFileManifestParentU128` with `args.manifest_len` elements.
 ///   The caller is responsible for ensuring the array lives for the duration
 ///   of the call.
+/// * `args.filenames` must be a valid, non‑null pointer to an array of
+///   `args.manifest_len` null-terminated strings, one per manifest.
 /// * The callbacks contained in `args` (`get_keys_cb` and `get_chunks_cb`) are
 ///   `unsafe extern "C"` functions; they must obey the contract described in
 ///   `SerializeUncompressedDataArgsU128`.
@@ -325,10 +391,13 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 ///
 /// * `FFIResult::StatusOk` – The operation succeeded and `*out_ptr` now points to a
 ///   valid `FFISerializedOutputU128`.
-/// * `FFIResult::NullArgument` – Either `args` or `out_ptr` (or the manifest
-///   pointer inside `args`) was null.
-/// * Other error variants may be returned by the internal implementation if,
-///   for example, a callback fails or memory allocation aborts.
+/// * `FFIResult::NullArgument` – `args`, `out_ptr`, the manifest or
+///   filename array inside `args`, or one of the filenames was null.
+/// * `FFIResult::InvalidString` – A filename isn't valid UTF-8.
+/// * `FFIResult::DuplicateFilename` – Two manifests have the same filename.
+/// * `FFIResult::SerializationMissingChunk` – The chunk callback didn't
+///   return data for a hash in the manifests.
+/// * Other error variants if, for example, a callback fails.
 #[unsafe(no_mangle)]
 #[allow(clippy::double_must_use)]
 #[must_use]
@@ -343,36 +412,24 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
 
     let args_int = unsafe{&*args};
 
-    if args_int.manifest_array_ptr.is_null() {
-        return FFIResult::NullArgument;
+    if args_int.manifest_array_ptr.is_null() ||
+        args_int.filenames.is_null() {
+            return FFIResult::NullArgument;
     }
 
-    let file_manifest = unsafe {
-        //Convert C inputs to Rust types
-
-        /*Prepare file_manifest DashMap, which is the first parameter
-        of the original serialize_uncompressed_data function, from C
-        input.*/
-        let ffi_manifests = slice::from_raw_parts(
+    /*Pair each manifest with its filename in the DashMap the original
+    serialize_uncompressed_data function takes.*/
+    // SAFETY: the caller guarantees both arrays hold `manifest_len`
+    // elements and every filename is null-terminated.
+    let file_manifest = match unsafe {
+        read_file_manifest::<_, u128>(
             args_int.manifest_array_ptr,
+            args_int.filenames,
             args_int.manifest_len
-        );
-
-        /*Since DashMap is not a supported type in C, the following
-        reconstructs it for use by the library.*/
-
-        /*Reconstruct the file_manifest DashMap via the following
-        loop.*/
-
-        let file_manifest: DashMap<String, FileManifestParent<u128>> =
-            ffi_manifests.iter()
-            .map(|ffi_fmp| {
-                let rust_fmp = FileManifestParent::<u128>::from(ffi_fmp);
-                (rust_fmp.filename.clone(), rust_fmp)
-            })
-            .collect();
-
-        file_manifest
+        )
+    } {
+        Ok(file_manifest) => file_manifest,
+        Err(status) => return status,
     };
 
     //Wrap C function pointers into Rust closures for the core library.
@@ -423,13 +480,14 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
             .flat_map(|h| h.to_le_bytes())
             .collect();
 
-        unsafe {
+        let status = unsafe {
             (get_chunks_cb)(
                 user_data_addr as *mut c_void,
                 ffi_hash_bytes.as_ptr(),
                 hashes.len(),
                 & mut ffi_chunks_array
             )};
+        Result::from(status)?;
 
         let ffi_chunks_slice = unsafe {slice::from_raw_parts(
             ffi_chunks_array.ptr,
@@ -459,123 +517,32 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
         &get_chunks_closure
     ) {
         Ok(data) => data,
-        Err(_) => return FFIResult::SerializationMissingChunk,
+        Err(e) => return e.into(),
     };
 
-    let mut ffi_manifests_vec: Vec<FFIFileManifestParent<U128Bytes>> =
-        Vec::with_capacity(serialized_data.ser_file_manifest.len());
+    let output = match into_ffi_output::<u128, U128Bytes>(serialized_data) {
+        Ok(output) => output,
+        Err(status) => return status,
+    };
 
-    for fmp in serialized_data.ser_file_manifest{
-        let mut chunk_meta_vec: Vec<FFISSAChunkMeta<U128Bytes>> = fmp
-            .chunk_metadata
-            .iter()
-            .map(|meta| FFISSAChunkMeta{
-                hash: meta.hash.into(),
-                offset: meta.offset,
-                length: meta.length,
-            }).collect();
-
-        let chunk_meta_ptr = chunk_meta_vec.as_mut_ptr();
-        let chunk_meta_cap = chunk_meta_vec.capacity();
-        std::mem::forget(chunk_meta_vec);
-
-        let c_filename = match CString::new(fmp.filename.clone()) {
-            Ok(s) => s.into_raw(),
-            Err(_) => {
-                unsafe {
-                    let _ = Vec::from_raw_parts(
-                        chunk_meta_ptr,
-                        fmp.chunk_count as usize,
-                        chunk_meta_cap
-                    );
-                }
-                for fmp_to_free in ffi_manifests_vec {
-                    unsafe {
-                        let _ = CString::from_raw(fmp_to_free.filename);
-                        let _ = Vec::from_raw_parts(
-                            fmp_to_free.chunk_metadata as *mut FFISSAChunkMeta<
-                                U128Bytes
-                            >,
-                            fmp_to_free.chunk_metadata_len,
-                            fmp_to_free.chunk_metadata_cap,
-                        );
-                    }
-                }
-
-                return FFIResult::InvalidString;
-            }
-        };
-
-        ffi_manifests_vec.push(FFIFileManifestParent {
-            filename: c_filename,
-            chunk_metadata: chunk_meta_ptr,
-            chunk_metadata_len: fmp.chunk_count as usize,
-            chunk_metadata_cap: chunk_meta_cap,
-        });
-    }
-
-    let manifests_ptr = ffi_manifests_vec.as_mut_ptr();
-    let manifests_len = ffi_manifests_vec.len();
-    let manifests_cap = ffi_manifests_vec.capacity();
-    //Give up ownership of the outer Vec
-    std::mem::forget(ffi_manifests_vec);
-
-    let mut entries: Vec<FFIChunkIndexEntry<U128Bytes>> = serialized_data
-        .chunk_index
-        .into_iter()
-        .map(|
-            (hash, location)
-        | FFIChunkIndexEntry::from((hash.into(), location)))
-        .collect();
-
-    let entries_ptr = entries.as_mut_ptr();
-    let entries_len = entries.len();
-    let entries_cap = entries.capacity();
-
-    //Give up ownership of the Vec so it doesn't get deallocated.
-    std::mem::forget(entries);
-
-    let sorted_hashes_bytes: Vec<U128Bytes> = serialized_data
-        .sorted_hashes
-        .into_iter()
-        .map(|h| h.into())
-        .collect();
-
-    let sorted_hashes_ptr = sorted_hashes_bytes.as_ptr();
-    let sorted_hashes_len = sorted_hashes_bytes.len();
-    let sorted_hashes_cap = sorted_hashes_bytes.capacity();
-
-    //Give up ownership of the Vec so it doesn't get deallocated.
-    std::mem::forget(sorted_hashes_bytes);
-
-    let output = Box::new(FFISerializedOutput::from((
-        manifests_ptr,
-        manifests_len,
-        manifests_cap,
-        entries_ptr,
-        entries_len,
-        entries_cap,
-        sorted_hashes_ptr,
-        sorted_hashes_len,
-        sorted_hashes_cap,
-    )));
-
+    // SAFETY: `out_ptr` was checked for null above, and the caller
+    // guarantees it's valid for writes.
     unsafe {
-        *out_ptr = Box::into_raw(output);
+        *out_ptr = Box::into_raw(Box::new(output));
     };
     FFIResult::StatusOk
 }
 
 /// Reconstructs each vector that was originally created in
-/// `serialize_uncompressed_data_internal`:
+/// `into_ffi_output`:
 /// * The top‑level `FFISerializedOutput` box is recovered with
 ///   `Box::from_raw(ptr)`.
-/// * The arrays for file manifests, chunk indices and sorted hashes are
-///   reconstructed with `Vec::from_raw_parts` and then dropped, which
-///   releases the underlying memory.
-/// * Each `FFIFileManifestParent` inside the manifest array has its
-///   `filename` (`CString`) and `chunk_metadata` (`Vec<FFISSAChunkMeta>`)
-///   freed as well.
+/// * The arrays for the table of contents, file manifests, chunk indices
+///   and sorted hashes are reconstructed with `Vec::from_raw_parts` and then
+///   dropped, which releases the underlying memory.
+/// * Each `FFITocEntry` has its `filename` (`CString`) freed, and each
+///   `FFIFileManifestParent` has its `chunk_metadata`
+///   (`Vec<FFISSAChunkMeta>`) freed.
 /// * No further action is required by the caller; the function guarantees
 ///   that every allocation performed by the serialization routine is
 ///   returned to Rust’s allocator.
@@ -592,11 +559,12 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
 /// # Safety
 ///
 /// * `ptr` must be a non‑null pointer to a valid `FFISerializedOutput<H>`
-///   that was allocated by `serialize_uncompressed_data_internal`
+///   that was allocated by `serialize_uncompressed_data_*`
 ///   (via `Box::into_raw`).  Passing a null or invalid pointer
 ///   results in undefined behaviour.
-/// * The function assumes that all inner pointers (`ser_manifest_ptr`,
-///   `ser_chunk_index_ptr`, `sorted_hashes_ptr`) and the embedded C
+/// * The function assumes that all inner pointers (`toc_ptr`,
+///   `ser_manifest_ptr`, `ser_chunk_index_ptr`, `sorted_hashes_ptr`) and
+///   the embedded C
 ///   strings and `FFISSAChunkMeta` arrays were allocated by the
 ///   serialization routine and have not yet been freed.
 /// * After the function returns, the caller may no longer use the
@@ -608,6 +576,17 @@ unsafe fn free_serialized_output_internal<H>(
     unsafe {
         let output = Box::from_raw(ptr);
         //Deallocate all the vectors whose memory was passed to C
+        let toc = Vec::from_raw_parts(
+            output.toc_ptr,
+            output.toc_len,
+            output.toc_cap,
+        );
+
+        for entry in toc {
+            //Deallocate the CString for the filename.
+            let _ = CString::from_raw(entry.filename);
+        }
+
         let ffi_manifests = Vec::from_raw_parts(
             output.ser_manifest_ptr,
             output.ser_manifest_len,
@@ -615,8 +594,6 @@ unsafe fn free_serialized_output_internal<H>(
         );
 
         for fmp in ffi_manifests {
-            //Deallocate the CString for the filename.
-            let _ = CString::from_raw(fmp.filename);
             /*Reconstruct and deallocate the Vec for the chunk
             metadata.*/
             let _ = Vec::from_raw_parts(

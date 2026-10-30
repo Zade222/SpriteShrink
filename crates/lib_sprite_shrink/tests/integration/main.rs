@@ -6,3 +6,6 @@ mod format_layout;
 
 #[cfg(test)]
 mod ssmc_prefix;
+
+#[cfg(test)]
+mod ffi_smoke;

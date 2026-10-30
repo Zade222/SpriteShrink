@@ -1266,11 +1266,12 @@ impl From<(*mut FFISeekChunkInfo<U128Bytes>, usize, usize)> for
 
 /// Holds all the serialized data prepared for the archive-building process.
 ///
-/// This struct is the output of the `serialize_uncompressed_data_ffi_*`
-/// functions. It bundles together all the necessary components—the file
-/// manifest, the chunk index, and the sorted list of unique hashes—into a
-/// single, C-compatible structure. This data is then passed to the
-/// `archive_builder_new_*` functions to begin the final archive construction.
+/// This struct is the output of the `serialize_uncompressed_data_*`
+/// functions. It bundles together all the necessary components—the table
+/// of contents, the file manifest, the chunk index, and the sorted list of
+/// unique hashes—into a single, C-compatible structure. This data is then
+/// passed to the `archive_builder_new_*` functions to begin the final
+/// archive construction.
 ///
 /// # Type Parameters
 ///
@@ -1279,8 +1280,12 @@ impl From<(*mut FFISeekChunkInfo<U128Bytes>, usize, usize)> for
 ///
 /// # Fields
 ///
+/// * `toc_ptr`: A pointer to an array of [`FFITocEntry`] structs, one per
+///   file, sorted by filename. This is the order the files are numbered in
+///   the archive.
+/// * `toc_len`: The number of entries in the `toc_ptr` array.
 /// * `ser_manifest_ptr`: A pointer to an array of [`FFIFileManifestParent`]
-///   structs, representing the complete, sorted file manifest.
+///   structs, one per file, in the same order as `toc_ptr`.
 /// * `ser_manifest_len`: The number of entries in the `ser_manifest_ptr`
 ///   array.
 /// * `ser_chunk_index_ptr`: A pointer to an array of [`FFIChunkIndexEntry`]
@@ -1300,6 +1305,9 @@ impl From<(*mut FFISeekChunkInfo<U128Bytes>, usize, usize)> for
 /// `free_serialized_output_*` function once it is no longer needed.
 #[repr(C)]
 pub struct FFISerializedOutput<H> {
+    pub toc_ptr: *mut FFITocEntry,
+    pub toc_len: usize,
+    pub toc_cap: usize,
     pub ser_manifest_ptr: *mut FFIFileManifestParent<H>,
     pub ser_manifest_len: usize,
     pub ser_manifest_cap: usize,
@@ -1313,68 +1321,22 @@ pub struct FFISerializedOutput<H> {
 
 /// An `FFISerializedOutput` struct specialized for `u64` hashes.
 ///
-/// This type is returned by [`serialize_uncompressed_data_ffi_u64`] and is
+/// This type is returned by [`serialize_uncompressed_data_u64`] and is
 /// the expected input for [`free_serialized_output_u64`]. It bundles all the
-/// necessary serialized data (manifest, chunk index, sorted hashes) for
-/// building an archive where chunks are identified by 64-bit hashes.
+/// necessary serialized data (table of contents, manifest, chunk index,
+/// sorted hashes) for building an archive where chunks are identified by
+/// 64-bit hashes.
 pub type FFISerializedOutputU64 = FFISerializedOutput<u64>;
 
 /// An `FFISerializedOutput` struct specialized for `u128` hashes.
 ///
-/// This type is returned by [`serialize_uncompressed_data_ffi_u128`] and is
+/// This type is returned by [`serialize_uncompressed_data_u128`] and is
 /// the expected input for [`free_serialized_output_u128`]. It bundles all the
-/// necessary serialized data (manifest, chunk index, sorted hashes) for
-/// building an archive where chunks are identified by 128-bit hashes,
-/// represented on the FFI boundary as a [u8; 16] byte array in a U128Bytes
-/// struct.
+/// necessary serialized data (table of contents, manifest, chunk index,
+/// sorted hashes) for building an archive where chunks are identified by
+/// 128-bit hashes, represented on the FFI boundary as a [u8; 16] byte array
+/// in a `U128Bytes` struct.
 pub type FFISerializedOutputU128 = FFISerializedOutput<U128Bytes>;
-
-/// Converts a tuple containing all the constituent raw pointers and lengths
-/// into the FFI-safe `FFISerializedOutput` struct.
-impl<H> From<(
-    *mut FFIFileManifestParent<H>,
-    usize,
-    usize,
-    *mut FFIChunkIndexEntry<H>,
-    usize,
-    usize,
-    *const H,
-    usize,
-    usize
-)> for FFISerializedOutput<H>{
-    fn from((
-        ser_manifest_ptr,
-        ser_manifest_len,
-        ser_manifest_cap,
-        ser_chunk_index_ptr,
-        ser_chunk_index_len,
-        ser_chunk_index_cap,
-        sorted_hashes_ptr,
-        sorted_hashes_len,
-        sorted_hashes_cap,
-    ): (
-        *mut FFIFileManifestParent<H>,
-        usize,
-        usize,
-        *mut FFIChunkIndexEntry<H>,
-        usize,
-        usize,
-        *const H,
-        usize,
-        usize)) -> Self {
-        Self {
-            ser_manifest_ptr,
-            ser_manifest_len,
-            ser_manifest_cap,
-            ser_chunk_index_ptr,
-            ser_chunk_index_len,
-            ser_chunk_index_cap,
-            sorted_hashes_ptr,
-            sorted_hashes_len,
-            sorted_hashes_cap,
-        }
-    }
-}
 
 /// Arguments passed to the FFI entry point that serialises uncompressed sprite
 /// data using 64bit hash keys.
@@ -1382,17 +1344,20 @@ impl<H> From<(
 /// This struct is a thin, `#[repr(C)]`‑compatible container that carries
 /// pointers and callbacks required by the native (C) side of the library.
 /// The public function `serialize_uncompressed_data_u64` validates the
-/// pointers, then forwards the data to the generic implementation
-/// `serialize_uncompressed_data_internal::<u64>`.
+/// pointers, then forwards the data to `serialize_uncompressed_data`.
 ///
 /// # Fields
 ///
 /// * `manifest_array_ptr` – Pointer to the first element of an array of
-///   `FFIFileManifestParentU64`. Each entry describes a file (its name and the
-///   list of chunk hashes that make up the file). The caller must guarantee
-///   that the array lives for the duration of the call and that the pointer is
-///   non‑null and properly aligned.
-/// * `manifest_len` – Number of elements in the `manifest_array_ptr` array.
+///   `FFIFileManifestParentU64`. Each entry lists the chunks that make up one
+///   file. The caller must guarantee that the array lives for the duration
+///   of the call and that the pointer is non‑null and properly aligned.
+/// * `filenames` – Pointer to an array of null-terminated UTF-8 strings, one
+///   per manifest: `filenames[i]` names the file `manifest_array_ptr[i]`
+///   describes. Names must be unique. Rust copies the strings and doesn't
+///   take ownership of them.
+/// * `manifest_len` – Number of elements in the `manifest_array_ptr` and
+///   `filenames` arrays.
 /// * `user_data` – Opaque pointer that is forwarded unchanged to the callbacks
 ///   (`get_keys_cb` and `get_chunks_cb`). It can be used by the caller to
 ///   store context such as a handle to a Rust object, a boxed closure, or any
@@ -1417,6 +1382,7 @@ impl<H> From<(
 #[repr(C)]
 pub struct SerializeUncompressedDataArgsU64{
     pub manifest_array_ptr: *const FFIFileManifestParentU64,
+    pub filenames: *const *const c_char,
     pub manifest_len: usize,
     pub user_data: *mut c_void,
     pub get_keys_cb: unsafe extern "C" fn(
@@ -1437,17 +1403,20 @@ pub struct SerializeUncompressedDataArgsU64{
 /// This struct is a thin, `#[repr(C)]`‑compatible container that carries
 /// pointers and callbacks required by the native (C) side of the library.
 /// The public function `serialize_uncompressed_data_u128` validates the
-/// pointers, then forwards the data to the generic implementation
-/// `serialize_uncompressed_data_internal::<u128>`.
+/// pointers, then forwards the data to `serialize_uncompressed_data`.
 ///
 /// # Fields
 ///
 /// * `manifest_array_ptr` – Pointer to the first element of an array of
-///   `FFIFileManifestParentU128`. Each entry describes a file (its name and
-///   the list of chunk hashes that make up the file). The caller must
-///   guarantee that the array lives for the duration of the call and that the
-///   pointer is non‑null and properly aligned.
-/// * `manifest_len` – Number of elements in the `manifest_array_ptr` array.
+///   `FFIFileManifestParentU128`. Each entry lists the chunks that make up one
+///   file. The caller must guarantee that the array lives for the duration
+///   of the call and that the pointer is non‑null and properly aligned.
+/// * `filenames` – Pointer to an array of null-terminated UTF-8 strings, one
+///   per manifest: `filenames[i]` names the file `manifest_array_ptr[i]`
+///   describes. Names must be unique. Rust copies the strings and doesn't
+///   take ownership of them.
+/// * `manifest_len` – Number of elements in the `manifest_array_ptr` and
+///   `filenames` arrays.
 /// * `user_data` – Opaque pointer that is forwarded unchanged to the callbacks
 ///   (`get_keys_cb` and `get_chunks_cb`). It can be used by the caller to
 ///   store context such as a handle to a Rust object, a boxed closure, or any
@@ -1472,6 +1441,7 @@ pub struct SerializeUncompressedDataArgsU64{
 #[repr(C)]
 pub struct SerializeUncompressedDataArgsU128{
     pub manifest_array_ptr: *const FFIFileManifestParentU128,
+    pub filenames: *const *const c_char,
     pub manifest_len: usize,
     pub user_data: *mut c_void,
     pub get_keys_cb: unsafe extern "C" fn(
@@ -1563,6 +1533,26 @@ impl<H: Copy> From<SSAChunkMeta<H>> for FFISSAChunkMeta<H> {
             length: meta.length,
         }
     }
+}
+
+/// FFI-safe equivalent of `SSMCTocEntry`: one file's entry in the archive's
+/// table of contents.
+///
+/// # Fields
+///
+/// * `filename`: A null-terminated C string holding the file's name.
+/// * `uncompressed_size`: The file's size in bytes before compression.
+///
+/// # Safety
+///
+/// When Rust returns these to C, Rust owns `filename`. It's freed by the
+/// free function for the struct that holds the entries, such as
+/// `free_serialized_output_*`, and must not be freed by the caller.
+#[repr(C)]
+#[derive(Debug)]
+pub struct FFITocEntry {
+    pub filename: *mut c_char,
+    pub uncompressed_size: u64,
 }
 
 

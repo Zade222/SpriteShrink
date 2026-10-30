@@ -13,5 +13,5 @@ pub use ffi_error_handling::*;
 pub mod processing_ffi;
 pub use processing_ffi::*;
 
-//pub mod serialization_ffi;
-//pub use serialization_ffi::*;
+pub mod serialization_ffi;
+pub use serialization_ffi::*;
