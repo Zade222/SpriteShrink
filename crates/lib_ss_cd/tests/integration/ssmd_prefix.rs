@@ -4,7 +4,7 @@
 
 use bitcode::{Encode, encode};
 use sprite_shrink::{
-    ALGORITHM_ZSTD, 
+    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128,
     ChunkLocation, CompressionResult, FileHeader,
     parse_file_header,
 };
@@ -136,7 +136,8 @@ fn section(prefix: &[u8], offset: u64, length: u64) -> &[u8] {
 #[test]
 fn build_ssmd_prefix_length_equals_metadata_prefix_end() {
     for inputs in [inputs_with_audio([1_u64, 2, 3]), inputs_without_audio([1_u64, 2, 3])] {
-        let prefix = build_ssmd_prefix(&inputs.parts(1)).unwrap();
+        let prefix =
+            build_ssmd_prefix(&inputs.parts(HASH_TYPE_XXH3_64)).unwrap();
         let (_, format_data) = read_layout(&prefix);
 
         assert_eq!(prefix.len() as u64, format_data.metadata_prefix_end());
@@ -151,7 +152,7 @@ fn build_ssmd_prefix_length_equals_metadata_prefix_end() {
 fn build_ssmd_prefix_with_audio_ends_before_data_offset() {
     let inputs = inputs_with_audio([1_u64, 2, 3]);
 
-    let prefix = build_ssmd_prefix(&inputs.parts(1)).unwrap();
+    let prefix = build_ssmd_prefix(&inputs.parts(HASH_TYPE_XXH3_64)).unwrap();
     let (_, format_data) = read_layout(&prefix);
 
     assert_eq!(format_data.audio_data.length, 3000);
@@ -162,12 +163,12 @@ fn build_ssmd_prefix_with_audio_ends_before_data_offset() {
 fn build_ssmd_prefix_header_describes_the_archive() {
     let inputs = inputs_with_audio([1_u64, 2, 3]);
 
-    let prefix = build_ssmd_prefix(&inputs.parts(1)).unwrap();
+    let prefix = build_ssmd_prefix(&inputs.parts(HASH_TYPE_XXH3_64)).unwrap();
     let (header, _) = read_layout(&prefix);
 
     assert_eq!(header.file_count, 2);
     assert_eq!(header.algorithm, ALGORITHM_ZSTD);
-    assert_eq!(header.hash_type, 1);
+    assert_eq!(header.hash_type, HASH_TYPE_XXH3_64);
     assert_eq!(header.format_id, SSMD_UID);
     assert_eq!(header.enc_toc_offset, 36);
     assert_eq!(header.enc_toc_length as usize, encode(&inputs.toc).len());
@@ -177,7 +178,7 @@ fn build_ssmd_prefix_header_describes_the_archive() {
 fn build_ssmd_prefix_empty_audio_index_is_omitted() {
     let inputs = inputs_without_audio([1_u64, 2, 3]);
 
-    let prefix = build_ssmd_prefix(&inputs.parts(1)).unwrap();
+    let prefix = build_ssmd_prefix(&inputs.parts(HASH_TYPE_XXH3_64)).unwrap();
     let (_, format_data) = read_layout(&prefix);
 
     assert_eq!(format_data.enc_audio_index.length, 0);
@@ -231,12 +232,18 @@ fn assert_sections_at_recorded_offsets<H: Copy + Encode>(
 
 #[test]
 fn build_ssmd_prefix_u64_sections_sit_at_recorded_offsets() {
-    assert_sections_at_recorded_offsets([1_u64, u64::MAX, 7], 1);
+    assert_sections_at_recorded_offsets(
+        [1_u64, u64::MAX, 7],
+        HASH_TYPE_XXH3_64,
+    );
 }
 
 #[test]
 fn build_ssmd_prefix_u128_sections_sit_at_recorded_offsets() {
-    assert_sections_at_recorded_offsets([1_u128, u128::MAX, 7], 2);
+    assert_sections_at_recorded_offsets(
+        [1_u128, u128::MAX, 7],
+        HASH_TYPE_XXH3_128,
+    );
 }
 
 /// Returns `prefix` with its header rewritten by `edit`.
@@ -276,7 +283,8 @@ fn assert_parse_error(prefix: &[u8], context: &str) {
 }
 
 fn sample_prefix() -> Vec<u8> {
-    build_ssmd_prefix(&inputs_with_audio([1_u64, 2, 3]).parts(1)).unwrap()
+    let inputs = inputs_with_audio([1_u64, 2, 3]);
+    build_ssmd_prefix(&inputs.parts(HASH_TYPE_XXH3_64)).unwrap()
 }
 
 fn assert_parse_round_trips<H>(hashes: [H; 3], hash_type: u8)
@@ -318,18 +326,18 @@ where
 
 #[test]
 fn parse_ssmd_prefix_u64_round_trips_build_ssmd_prefix() {
-    assert_parse_round_trips([1_u64, u64::MAX, 7], 1);
+    assert_parse_round_trips([1_u64, u64::MAX, 7], HASH_TYPE_XXH3_64);
 }
 
 #[test]
 fn parse_ssmd_prefix_u128_round_trips_build_ssmd_prefix() {
-    assert_parse_round_trips([1_u128, u128::MAX, 7], 2);
+    assert_parse_round_trips([1_u128, u128::MAX, 7], HASH_TYPE_XXH3_128);
 }
 
 #[test]
 fn parse_ssmd_prefix_without_audio_has_empty_audio_index() {
     let inputs = inputs_without_audio([1_u64, 2, 3]);
-    let prefix = build_ssmd_prefix(&inputs.parts(1)).unwrap();
+    let prefix = build_ssmd_prefix(&inputs.parts(HASH_TYPE_XXH3_64)).unwrap();
 
     let parsed = parse_ssmd_prefix::<u64>(&prefix).unwrap();
 

@@ -23,7 +23,7 @@ use tracing::{
 };
 
 use sprite_shrink::{
-    SSMC_UID,
+    HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID,
     Hashable, FileHeader, ParsedSSMC,
     decompress_chunk
 };
@@ -88,7 +88,7 @@ pub fn run_extraction(
     let header = get_file_header(file_path)?;
 
     match header.hash_type {
-        1 => dispatch_extraction::<u64>(
+        HASH_TYPE_XXH3_64 => dispatch_extraction::<u64>(
             file_path,
             out_dir,
             &header,
@@ -96,7 +96,7 @@ pub fn run_extraction(
             args,
             running
         ),
-        2 =>dispatch_extraction::<u128>(
+        HASH_TYPE_XXH3_128 => dispatch_extraction::<u128>(
             file_path,
             out_dir,
             &header,

@@ -8,9 +8,10 @@
 
 use bitcode::{Encode, encode};
 use sprite_shrink::{
-    ALGORITHM_ZSTD, ChunkLocation, CompressionResult, FileHeader,
-    FileManifestParent, SSAChunkMeta, SSMC_UID, SSMCFormatData, SSMCTocEntry,
-    SpriteShrinkError, build_ssmc_prefix, parse_file_chunk_index,
+    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID,
+    ChunkLocation, CompressionResult, FileHeader, FileManifestParent,
+    SSAChunkMeta, SSMCFormatData, SSMCTocEntry, SpriteShrinkError,
+    build_ssmc_prefix, parse_file_chunk_index,
     parse_file_header, parse_file_metadata, parse_file_toc, parse_format_data,
     parse_ssmc_prefix,
 };
@@ -94,7 +95,9 @@ fn build_ssmc_prefix_length_equals_metadata_prefix_end() {
     ];
 
     for (toc, manifests, comp) in cases {
-        let prefix = build_ssmc_prefix(&toc, &manifests, &comp, 1).unwrap();
+        let prefix =
+            build_ssmc_prefix(&toc, &manifests, &comp, HASH_TYPE_XXH3_64)
+                .unwrap();
         let (_, format_data) = read_layout(&prefix);
 
         assert_eq!(prefix.len() as u64, format_data.metadata_prefix_end());
@@ -107,12 +110,14 @@ fn build_ssmc_prefix_header_describes_the_archive() {
     let manifests = sample_manifests([1_u64, 2, 3]);
     let comp = sample_comp([1_u64, 2, 3]);
 
-    let prefix = build_ssmc_prefix(&toc, &manifests, &comp, 1).unwrap();
+    let prefix =
+        build_ssmc_prefix(&toc, &manifests, &comp, HASH_TYPE_XXH3_64)
+            .unwrap();
     let (header, _) = read_layout(&prefix);
 
     assert_eq!(header.file_count, 2);
     assert_eq!(header.algorithm, ALGORITHM_ZSTD);
-    assert_eq!(header.hash_type, 1);
+    assert_eq!(header.hash_type, HASH_TYPE_XXH3_64);
     assert_eq!(header.format_id, SSMC_UID);
     assert_eq!(header.enc_toc_offset, 36);
     assert_eq!(header.enc_toc_length as usize, encode(&toc).len());
@@ -160,24 +165,31 @@ where
 
 #[test]
 fn build_ssmc_prefix_u64_sections_sit_at_recorded_offsets() {
-    assert_sections_at_recorded_offsets([1_u64, u64::MAX, 7], 1);
+    assert_sections_at_recorded_offsets(
+        [1_u64, u64::MAX, 7],
+        HASH_TYPE_XXH3_64,
+    );
 }
 
 #[test]
 fn build_ssmc_prefix_u128_sections_sit_at_recorded_offsets() {
-    assert_sections_at_recorded_offsets([1_u128, u128::MAX, 7], 2);
+    assert_sections_at_recorded_offsets(
+        [1_u128, u128::MAX, 7],
+        HASH_TYPE_XXH3_128,
+    );
 }
 
 #[test]
 fn build_file_header_format_data_offset_overflow_returns_error() {
     let largest = usize::try_from(u32::MAX - FileHeader::HEADER_SIZE).unwrap();
 
-    let header = FileHeader::build_file_header(1, ALGORITHM_ZSTD, 1, SSMC_UID, largest)
-        .unwrap();
+    let header = FileHeader::build_file_header(
+        1, ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, SSMC_UID, largest,
+    ).unwrap();
     assert_eq!(header.format_data_offset, u32::MAX);
 
     let result = FileHeader::build_file_header(
-        1, ALGORITHM_ZSTD, 1, SSMC_UID, largest + 1,
+        1, ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, SSMC_UID, largest + 1,
     );
     assert!(
         matches!(result, Err(SpriteShrinkError::Serialization(_))),
@@ -193,7 +205,8 @@ fn build_file_header_counts_past_u32_max_return_error() {
 
     for (file_count, toc_length) in [(too_many, 40), (1, too_many)] {
         let result = FileHeader::build_file_header(
-            file_count, ALGORITHM_ZSTD, 1, SSMC_UID, toc_length,
+            file_count, ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, SSMC_UID,
+            toc_length,
         );
 
         assert!(
@@ -266,17 +279,19 @@ where
 
 #[test]
 fn parse_ssmc_prefix_u64_round_trips_build_ssmc_prefix() {
-    assert_parse_round_trips([1_u64, u64::MAX, 7], 1);
+    assert_parse_round_trips([1_u64, u64::MAX, 7], HASH_TYPE_XXH3_64);
 }
 
 #[test]
 fn parse_ssmc_prefix_u128_round_trips_build_ssmc_prefix() {
-    assert_parse_round_trips([1_u128, u128::MAX, 7], 2);
+    assert_parse_round_trips([1_u128, u128::MAX, 7], HASH_TYPE_XXH3_128);
 }
 
 #[test]
 fn parse_ssmc_prefix_empty_archive_round_trips() {
-    let prefix = build_ssmc_prefix::<u64>(&[], &[], &empty_comp(), 1).unwrap();
+    let prefix =
+        build_ssmc_prefix::<u64>(&[], &[], &empty_comp(), HASH_TYPE_XXH3_64)
+            .unwrap();
 
     let parsed = parse_ssmc_prefix::<u64>(&prefix).unwrap();
 
@@ -291,7 +306,10 @@ fn parse_ssmc_prefix_empty_archive_round_trips() {
 fn parse_ssmc_prefix_ignores_bytes_past_the_prefix() {
     let comp = sample_comp([1_u64, 2, 3]);
     let prefix = build_ssmc_prefix(
-        &sample_toc(), &sample_manifests([1_u64, 2, 3]), &comp, 1,
+        &sample_toc(),
+        &sample_manifests([1_u64, 2, 3]),
+        &comp,
+        HASH_TYPE_XXH3_64,
     ).unwrap();
     let mut archive = prefix.clone();
     archive.extend_from_slice(&[0xEE; 980]);
@@ -314,7 +332,7 @@ fn parse_ssmc_prefix_truncated_prefix_returns_error() {
         &sample_toc(),
         &sample_manifests([1_u64, 2, 3]),
         &sample_comp([1_u64, 2, 3]),
-        1,
+        HASH_TYPE_XXH3_64,
     ).unwrap();
 
     for len in 0..prefix.len() {
@@ -328,7 +346,7 @@ fn parse_ssmc_prefix_section_past_the_end_returns_error() {
         &sample_toc(),
         &sample_manifests([1_u64, 2, 3]),
         &sample_comp([1_u64, 2, 3]),
-        1,
+        HASH_TYPE_XXH3_64,
     ).unwrap();
 
     let longer_index = with_format_data(&prefix, |format_data| {
@@ -359,7 +377,7 @@ fn parse_ssmc_prefix_other_format_id_returns_error() {
         &sample_toc(),
         &sample_manifests([1_u64, 2, 3]),
         &sample_comp([1_u64, 2, 3]),
-        1,
+        HASH_TYPE_XXH3_64,
     ).unwrap();
 
     let other_format = with_header(&prefix, |header| {
@@ -375,7 +393,7 @@ fn parse_ssmc_prefix_chunk_offset_overflow_returns_error() {
         &sample_toc(),
         &sample_manifests([1_u64, 2, 3]),
         &sample_comp([1_u64, 2, 3]),
-        1,
+        HASH_TYPE_XXH3_64,
     ).unwrap();
 
     // The chunk stored at offset 940 ends up past u64::MAX.

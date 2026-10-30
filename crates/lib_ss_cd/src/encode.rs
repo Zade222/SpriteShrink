@@ -32,8 +32,11 @@ use crate::{
 /// * `exception_blob`: The stored data of every exception sector.
 /// * `audio_blob_size`: The total size of the compressed audio blocks,
 ///   which the host writes after the prefix and before the data chunks.
-/// * `hash_type`: The hash used for the chunk hashes. 1 = `xxhash3_64`,
-///   2 = `xxhash3_128`.
+/// * `hash_type`: The hash used for the chunk hashes:
+///   [`HASH_TYPE_XXH3_64`] or [`HASH_TYPE_XXH3_128`].
+///
+/// [`HASH_TYPE_XXH3_64`]: sprite_shrink::HASH_TYPE_XXH3_64
+/// [`HASH_TYPE_XXH3_128`]: sprite_shrink::HASH_TYPE_XXH3_128
 #[derive(Debug)]
 pub struct SSMDPrefix<'a, H> {
     pub toc:                &'a [SSMDTocEntry],

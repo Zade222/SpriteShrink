@@ -21,7 +21,8 @@ use bitcode::{Encode, encode};
 use dashmap::DashMap;
 use sprite_shrink_test_support::assert_bytes_eq;
 use sprite_shrink::{
-    HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID, SUPPORTED_VERSION,
+    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID,
+    SUPPORTED_VERSION,
     ArchiveBuilder, ChunkLocation, CompressionResult, FileData, FileHeader,
     FileManifestParent, ParsedSSMC, SSAChunkMeta, SSMCFormatData,
     SSMCTocEntry, SerializedData, SpriteShrinkError, build_ssmc_prefix,
@@ -573,7 +574,9 @@ fn free_serialized_output_accepts_null() {
 }
 
 fn header_bytes() -> [u8; 36] {
-    FileHeader::build_file_header(3, 98, 1, SSMC_UID, 40)
+    FileHeader::build_file_header(
+        3, ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, SSMC_UID, 40,
+    )
         .unwrap()
         .to_le_bytes()
 }
@@ -649,7 +652,9 @@ fn parse_file_header_rejects_wrong_magic_number() {
 
 #[test]
 fn parse_file_header_rejects_newer_version() {
-    let mut header = FileHeader::build_file_header(3, 98, 1, SSMC_UID, 40)
+    let mut header = FileHeader::build_file_header(
+        3, ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, SSMC_UID, 40,
+    )
         .unwrap();
     header.file_version = SUPPORTED_VERSION + 1;
 

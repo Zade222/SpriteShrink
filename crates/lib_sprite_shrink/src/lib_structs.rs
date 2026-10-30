@@ -98,7 +98,7 @@ pub struct CompressionResult {
 /// * `algorithm`: Numerical value representing the compression used on the
 ///   compressed data.
 /// * `hash_type`: Numerical value representing the hash type used when
-///   the data was hashed. 1 = xxhash3_64, 2 = xxhash3_128
+///   the data was hashed: [`HASH_TYPE_XXH3_64`] or [`HASH_TYPE_XXH3_128`].
 /// * `_pad1`: Empty data padding to keep data aligned. Must be zero.
 /// * `pub format_id`: Field for specifying the ID of the format specific
 ///   comrpession that was used for making the archive.

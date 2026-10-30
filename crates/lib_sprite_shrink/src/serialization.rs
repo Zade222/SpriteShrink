@@ -330,8 +330,8 @@ where
 /// * `manifests`: One manifest per file, in the same order as `toc`.
 /// * `comp`: The dictionary and encoded chunk index from
 ///   [`ArchiveBuilder::build`].
-/// * `hash_type`: The hash used for the chunk hashes. 1 = `xxhash3_64`,
-///   2 = `xxhash3_128`.
+/// * `hash_type`: The hash used for the chunk hashes:
+///   [`HASH_TYPE_XXH3_64`] or [`HASH_TYPE_XXH3_128`].
 ///
 /// # Errors
 ///
@@ -340,6 +340,8 @@ where
 /// header's 32-bit offsets.
 ///
 /// [`ArchiveBuilder::build`]: crate::ArchiveBuilder::build
+/// [`HASH_TYPE_XXH3_64`]: crate::HASH_TYPE_XXH3_64
+/// [`HASH_TYPE_XXH3_128`]: crate::HASH_TYPE_XXH3_128
 pub fn build_ssmc_prefix<H>(
     toc: &[SSMCTocEntry],
     manifests: &[FileManifestParent<H>],
