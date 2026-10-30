@@ -25,6 +25,8 @@ Both formats use a common **Header** and **Table of Contents (TOC)** structure, 
 
 ## 2. Common Structures
 
+All multi-byte integers in the fixed-size structures (the File Header, File Region and Format Data blocks) are stored little-endian, and padding bytes are written as zero. The variable-length sections in §4 (TOC, manifests and indexes) are encoded with bitcode 0.6, which also stores integers little-endian. A change of bitcode version therefore counts as a change to the archive format. The dictionary, subheader table, exception data and data blobs are raw bytes.
+
 ### 2.1. File Header (Fixed Size: 36 Bytes)
 
 The header appears at offset 0. It identifies the file type, version, and the format used (SSMC vs. SSMD). It points to the Table of Contents and the Format Data block.
@@ -119,7 +121,7 @@ A serialized vector containing basic metadata for listing archive contents witho
       offset: u64,
       length: u32,
   }
-*   **Chunk Index:** Serialized `HashMap<H, ChunkLocation>`.
+*   **Chunk Index:** Serialized `Vec<(H, ChunkLocation)>`, one entry per unique chunk.
   struct ChunkLocation {
       offset: u64,           // Relative to data_offset
       compressed_length: u32,
@@ -167,3 +169,18 @@ SSMD uses a complex manifest to reconstruct CD sectors.
     *   If Sector is Data: Fetch chunks from `data_offset`.
     *   If Sector is Audio: Fetch block from `audio_data`, decode FLAC.
     *   Apply Exceptions (ECC/EDC) from `exception_data` if needed.
+
+## 6. Reference Implementation
+
+The functions below write and read the layout in this document. They are the reference implementation: a host that writes or reads archives another way must produce and accept the same bytes.
+
+| Format | Writes the prefix | Reads the prefix |
+| :--- | :--- | :--- |
+| SSMC | `sprite_shrink::build_ssmc_prefix` | `sprite_shrink::parse_ssmc_prefix` |
+| SSMD | `sprite_shrink_cd::build_ssmd_prefix` | `sprite_shrink_cd::parse_ssmd_prefix` |
+
+The **prefix** is every byte from offset 0 up to the Format Data's `metadata_prefix_end()`: the header, TOC, Format Data and every section in §4. The writers return it, and the host appends the compressed data after it. For SSMC that is the chunk data blob. For SSMD it is the audio blob, then the data chunk blob. The readers take at least the prefix and check every section's offset and length against its end.
+
+A host that reads the header and Format Data first, to learn how many bytes the prefix needs, can use `sprite_shrink::parse_file_header`, then `sprite_shrink::parse_format_data` (SSMC) or `sprite_shrink_cd::decode_ssmd_format_data` (SSMD). The fixed-size structures convert to and from their on-disk bytes with `to_le_bytes` and `from_le_bytes` on `FileHeader`, `SSMCFormatData` and `SSMDFormatData`.
+
+C hosts use the exports declared in the generated `sprite_shrink.h`: `build_ssmc_prefix_u64`/`_u128`, `parse_file_header_ffi`, `parse_format_data_ffi` and `parse_ssmc_prefix_u64`/`_u128`. The `_u64` and `_u128` suffixes match `hash_type` 1 and 2. SSMD has no C exports yet.
