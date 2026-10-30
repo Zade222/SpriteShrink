@@ -45,6 +45,7 @@ xxhash-rust = { version = "~0.8", default-features = false, features = ["xxh3"] 
 dhat-heap = ["dhat"]
 
 [dev-dependencies]
+sprite_shrink_test_support = { path = "../test_support" }
 tempfile = { version = "~3.27", default-features = false }
 
 [lints]

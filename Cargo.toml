@@ -4,6 +4,7 @@ members = [
     "crates/cli_application",
     "crates/lib_sprite_shrink",
     "crates/lib_ss_cd",
+    "crates/test_support",
 ]
 
 [profile.release]

@@ -1,0 +1,12 @@
+[package]
+name = "sprite_shrink_test_support"
+version = "0.0.0"
+edition = "2024"
+publish = false
+license = "MPL-2.0"
+description = "Test input shared by the SpriteShrink crates' test suites."
+
+[dependencies]
+
+[lints]
+workspace = true

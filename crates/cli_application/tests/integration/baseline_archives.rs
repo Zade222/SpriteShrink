@@ -19,46 +19,12 @@ use std::{
 };
 
 use sprite_shrink_cd::{SectorType, rebuild_sector_bitwise};
+use sprite_shrink_test_support::{rom_set, tiled_bytes};
 use tempfile::TempDir;
 
 use crate::common::run_cli;
 
 const BLESS_VAR: &str = "SPRITE_SHRINK_BLESS";
-
-/// Fixed-seed xorshift, so every run generates the same input.
-struct XorShift(u64);
-
-impl XorShift {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-}
-
-/// Bytes built from a small palette of random 32-byte tiles. Compressible
-/// like real ROM data, so the archives stay small, but not trivially so.
-fn tiled_bytes(seed: u64, len: usize) -> Vec<u8> {
-    let mut rng = XorShift(seed);
-    let palette: Vec<[u8; 32]> = (0..64)
-        .map(|_| {
-            let mut tile = [0_u8; 32];
-            for chunk in tile.as_chunks_mut::<8>().0 {
-                *chunk = rng.next().to_le_bytes();
-            }
-            tile
-        })
-        .collect();
-
-    let mut out = Vec::with_capacity(len + 32);
-    while out.len() < len {
-        let tile = palette[usize::from(rng.next().to_le_bytes()[0] % 64)];
-        out.extend_from_slice(&tile);
-    }
-    out.truncate(len);
-    out
-}
 
 fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -91,23 +57,9 @@ fn check_against_fixture(archive: &Path, fixture_name: &str) {
     );
 }
 
-/// Three ROM-like files: a base image, a patched copy of it, and an
-/// unrelated file. The shared regions exercise deduplication.
+/// Writes the shared ROM set into `dir` and returns it.
 fn write_rom_set(dir: &Path) -> Vec<(String, Vec<u8>)> {
-    let base = tiled_bytes(0x5EED_0001, 96 * 1024);
-
-    let mut patched = base.clone();
-    patched[10_000..10_512].copy_from_slice(&tiled_bytes(0x5EED_0002, 512));
-    patched[60_000..61_024].copy_from_slice(&tiled_bytes(0x5EED_0003, 1024));
-    patched.extend_from_slice(&tiled_bytes(0x5EED_0004, 8 * 1024));
-
-    let other = tiled_bytes(0x5EED_0005, 40 * 1024);
-
-    let files = vec![
-        ("game (Rev 0).bin".to_string(), base),
-        ("game (Rev 1).bin".to_string(), patched),
-        ("other game.bin".to_string(), other),
-    ];
+    let files = rom_set();
     for (name, data) in &files {
         fs::write(dir.join(name), data).unwrap();
     }

@@ -1297,6 +1297,7 @@ dependencies = [
  "rayon",
  "serde",
  "sha2",
+ "sprite_shrink_test_support",
  "thiserror 2.0.12",
  "xxhash-rust",
  "zerocopy",
@@ -1327,6 +1328,7 @@ dependencies = [
  "sha2",
  "sprite_shrink",
  "sprite_shrink_cd",
+ "sprite_shrink_test_support",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.12",
@@ -1360,6 +1362,10 @@ dependencies = [
  "xxhash-rust",
  "zerocopy",
 ]
+
+[[package]]
+name = "sprite_shrink_test_support"
+version = "0.0.0"
 
 [[package]]
 name = "strsim"

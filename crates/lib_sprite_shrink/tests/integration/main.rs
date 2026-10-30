@@ -5,6 +5,9 @@
 mod format_layout;
 
 #[cfg(test)]
+mod ssmc_circuit;
+
+#[cfg(test)]
 mod ssmc_prefix;
 
 #[cfg(test)]
