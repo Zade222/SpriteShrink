@@ -1,9 +1,11 @@
 //! Calls the C exports directly from Rust, the way a C host would, and
 //! checks them against the Rust API.
 //!
-//! The callbacks hand the library buffers from Rust's allocator, as the
-//! callback contract requires: the library takes them back with
-//! `Vec::from_raw_parts`.
+//! The serializer's callbacks hand the library buffers from Rust's
+//! allocator, as its callback contract requires: the library takes them
+//! back with `Vec::from_raw_parts`. The archive builder instead copies the
+//! chunks and hands them back through `free_chunks_cb`, so its callbacks
+//! lend the host's own buffers.
 
 use std::{
     collections::HashMap,
@@ -12,28 +14,40 @@ use std::{
     hash::Hash,
     mem::ManuallyDrop,
     ptr, slice,
+    sync::{Arc, Mutex},
 };
 
 use bitcode::{Encode, encode};
 use dashmap::DashMap;
 use sprite_shrink::{
     HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID, SUPPORTED_VERSION,
-    ChunkLocation, CompressionResult, FileHeader, FileManifestParent,
-    ParsedSSMC, SSAChunkMeta, SSMCFormatData, SSMCTocEntry, SerializedData,
-    SpriteShrinkError, build_ssmc_prefix, parse_file_header,
-    parse_ssmc_prefix, serialize_uncompressed_data,
+    ArchiveBuilder, ChunkLocation, CompressionResult, FileData, FileHeader,
+    FileManifestParent, ParsedSSMC, SSAChunkMeta, SSMCFormatData,
+    SSMCTocEntry, SerializedData, SpriteShrinkError, build_ssmc_prefix,
+    create_file_manifest_and_chunks, parse_file_header, parse_ssmc_prefix,
+    process_file_in_memory, serialize_uncompressed_data,
     ffi::{
+        ArchiveBuilderArgsU64, CreateFileManifestAndChunksArgs,
         FFICallbackStatus, FFIChunkDataArray, FFIChunkLocation, FFICompData,
+        FFIFileData,
         FFIFileManifestParent, FFIKeyArray, FFIParsedSSMC, FFISSAChunkMeta,
         FFISerializedOutput, FFIStatus, FFITocEntry, FFIVecBytes,
         SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
         U128Bytes,
-        build_ssmc_prefix_u64, build_ssmc_prefix_u128, free_file_header,
+        archive_builder_build_u64, archive_builder_new_u64,
+        archive_builder_set_compression_level_u64,
+        archive_builder_set_dictionary_size_u64,
+        archive_builder_set_worker_count_u64, archive_data_free,
+        build_ssmc_prefix_u64, build_ssmc_prefix_u128,
+        create_file_manifest_and_chunks_u64, decompress_chunk_c,
+        free_file_header, free_file_manifest_and_chunks_u64,
+        free_processed_file_data_ffi,
         free_parsed_ssmc_u64, free_parsed_ssmc_u128,
         free_serialized_output_u64, free_serialized_output_u128,
         free_ssmc_prefix, lookup_chunk_location_u64,
         lookup_chunk_location_u128, parse_file_header_ffi,
         parse_format_data_ffi, parse_ssmc_prefix_u64, parse_ssmc_prefix_u128,
+        process_file_in_memory_ffi,
         serialize_uncompressed_data_u64, serialize_uncompressed_data_u128,
     },
 };
@@ -1198,4 +1212,440 @@ fn free_parsed_ssmc_accepts_null() {
     unsafe { free_parsed_ssmc_u64(ptr::null_mut()) };
     // SAFETY: `free_parsed_ssmc_u128` returns early on null.
     unsafe { free_parsed_ssmc_u128(ptr::null_mut()) };
+}
+
+/// Chunk sizes for the round trip: 64 to 1024 bytes, averaging 256, so the
+/// small test files still split into many chunks.
+const WINDOW_SIZE: u64 = 256;
+const DICTIONARY_SIZE: u64 = 1024;
+const COMPRESSION_LEVEL: i32 = 3;
+const WORKER_COUNT: usize = 2;
+
+/// Text-like files for the round trip. `patched.bin` differs from
+/// `base.bin` in ten bytes, so most of its chunks are shared.
+fn round_trip_files() -> Vec<(String, Vec<u8>)> {
+    let lines = |seed: u64, count: u64| -> Vec<u8> {
+        (0..count)
+            .flat_map(|i| {
+                format!("entry {i:04}: value {}\n", (i * 7919 + seed) % 10007)
+                    .into_bytes()
+            })
+            .collect()
+    };
+    let base = lines(0, 600);
+    let mut patched = base.clone();
+    patched[5000..5010].copy_from_slice(b"PATCHED!!!");
+
+    vec![
+        ("base.bin".to_string(), base),
+        ("patched.bin".to_string(), patched),
+        ("other.bin".to_string(), lines(3, 300)),
+    ]
+}
+
+/// Builds the whole archive for `files` with the Rust API: the prefix,
+/// then the compressed data.
+fn rust_round_trip_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let file_manifest = DashMap::new();
+    let mut store: ChunkStore<u64> = HashMap::new();
+
+    for (name, data) in files {
+        let processed = process_file_in_memory(
+            FileData { file_name: name.clone(), file_data: data.clone() },
+            WINDOW_SIZE,
+        )
+        .unwrap();
+        let (fmp, chunks) = create_file_manifest_and_chunks::<u64>(
+            &processed.file_data,
+            &processed.chunks,
+        );
+        file_manifest.insert(name.clone(), fmp);
+        store.extend(chunks);
+    }
+
+    let total_size = store.values().map(|chunk| chunk.len() as u64).sum();
+    let keys: Vec<u64> = store.keys().copied().collect();
+    let store = Arc::new(store);
+    let get_chunks = move |hashes: &[u64]| {
+        Ok::<_, SpriteShrinkError>(
+            hashes.iter().map(|hash| store[hash].clone()).collect()
+        )
+    };
+
+    let ser = serialize_uncompressed_data(
+        &file_manifest,
+        &move || Ok::<_, SpriteShrinkError>(keys.clone()),
+        &get_chunks.clone(),
+    )
+    .unwrap();
+
+    let written = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&written);
+    let mut builder = ArchiveBuilder::new(
+        &ser.sorted_hashes,
+        total_size,
+        get_chunks,
+        move |data: &[u8], _flush: bool| {
+            sink.lock().unwrap().extend_from_slice(data);
+            Ok::<_, SpriteShrinkError>(())
+        },
+    );
+    builder
+        .compression_level(COMPRESSION_LEVEL)
+        .dictionary_size(DICTIONARY_SIZE)
+        .worker_threads(WORKER_COUNT);
+    let comp = builder.build().unwrap();
+
+    let mut archive = build_ssmc_prefix(
+        &ser.archive_toc,
+        &ser.ser_file_manifest,
+        &comp,
+        HASH_TYPE_XXH3_64,
+    )
+    .unwrap();
+    archive.extend_from_slice(&written.lock().unwrap());
+    archive
+}
+
+/// What the test host keeps for the archive builder's callbacks: the chunks
+/// it lends out, and the compressed data written back.
+struct BuildHost {
+    chunks: ChunkStore<u64>,
+    written: Mutex<Vec<u8>>,
+}
+
+unsafe extern "C" fn builder_get_chunks_u64(
+    user_data: *mut c_void,
+    hashes: *const u64,
+    hashes_len: usize,
+    out_chunks: *mut FFIChunkDataArray,
+) -> FFICallbackStatus {
+    // SAFETY: the round trip passes a `BuildHost` as `user_data`.
+    let host = unsafe { &*user_data.cast::<BuildHost>() };
+    // SAFETY: the library passes `hashes_len` hashes.
+    let hashes = unsafe { slice::from_raw_parts(hashes, hashes_len) };
+
+    // The library only reads these and copies them before calling
+    // `builder_free_chunks`, so they point into the host's store.
+    let chunks: Vec<FFIVecBytes> = hashes
+        .iter()
+        .map(|hash| {
+            let chunk = &host.chunks[hash];
+            FFIVecBytes {
+                ptr: chunk.as_ptr().cast_mut(),
+                len: chunk.len(),
+                cap: chunk.len(),
+            }
+        })
+        .collect();
+    let (ptr, len, cap) = into_raw_parts(chunks);
+
+    // SAFETY: the library passes a pointer that's valid for writes.
+    unsafe { out_chunks.write(FFIChunkDataArray { ptr, len, cap }) };
+    FFICallbackStatus::CallbackOk
+}
+
+unsafe extern "C" fn builder_free_chunks(
+    _user_data: *mut c_void,
+    chunks: FFIChunkDataArray,
+) {
+    // SAFETY: `chunks` is the array `builder_get_chunks_u64` split with
+    // `into_raw_parts`. Its entries point into the host's store, so only the
+    // array itself is freed.
+    drop(unsafe { Vec::from_raw_parts(chunks.ptr, chunks.len, chunks.cap) });
+}
+
+unsafe extern "C" fn builder_write(
+    user_data: *mut c_void,
+    data: *const u8,
+    data_len: usize,
+    _is_flush: bool,
+) -> FFICallbackStatus {
+    // SAFETY: the round trip passes a `BuildHost` as `user_data`.
+    let host = unsafe { &*user_data.cast::<BuildHost>() };
+    // SAFETY: the library passes `data_len` readable bytes at `data`.
+    let data = unsafe { slice::from_raw_parts(data, data_len) };
+
+    host.written.lock().unwrap().extend_from_slice(data);
+    FFICallbackStatus::CallbackOk
+}
+
+/// Builds the whole archive for `files` through the C exports, the way a C
+/// host would: process and chunk each file, serialize, compress, then build
+/// the prefix and put it in front of the compressed data.
+#[expect(clippy::too_many_lines, reason = "one step per C call, in order")]
+fn ffi_round_trip_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+    let names: Vec<CString> = files
+        .iter()
+        .map(|(name, _)| CString::new(name.as_str()).unwrap())
+        .collect();
+    let mut host = BuildHost {
+        chunks: HashMap::new(),
+        written: Mutex::new(Vec::new()),
+    };
+    let mut file_chunks = Vec::new();
+
+    for (name, (_, data)) in names.iter().zip(files) {
+        let file = FFIFileData {
+            filename: name.as_ptr(),
+            file_data: data.as_ptr(),
+            file_data_len: data.len(),
+        };
+        let mut processed = ptr::null_mut();
+        // SAFETY: `file` points into `name` and `data`, which outlive the
+        // call, and `processed` is a local.
+        let status = unsafe {
+            process_file_in_memory_ffi(file, WINDOW_SIZE, &raw mut processed)
+        };
+        assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+        // SAFETY: `processed` came from the successful call above.
+        let processed_ref = unsafe { &*processed };
+        let args = CreateFileManifestAndChunksArgs {
+            file_name_ptr: name.as_ptr(),
+            file_data_array_ptr: processed_ref.file_data,
+            file_data_len: processed_ref.file_data_len,
+            chunks_array_ptr: processed_ref.chunks,
+            chunks_len: processed_ref.chunks_len,
+        };
+        let mut manifest_chunks = ptr::null_mut();
+        // SAFETY: `args` points into `name` and `processed`, which are both
+        // still live, and `manifest_chunks` is a local.
+        let status = unsafe {
+            create_file_manifest_and_chunks_u64(
+                &raw const args,
+                &raw mut manifest_chunks,
+            )
+        };
+        assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+        // SAFETY: `processed` came from `process_file_in_memory_ffi` and is
+        // freed once, here.
+        unsafe { free_processed_file_data_ffi(processed) };
+
+        // SAFETY: `manifest_chunks` came from the successful call above.
+        let manifest_chunks_ref = unsafe { &*manifest_chunks };
+        // SAFETY: the library wrote `hashed_chunks_len` chunks at
+        // `hashed_chunks`.
+        let hashed_chunks = unsafe {
+            slice::from_raw_parts(
+                manifest_chunks_ref.hashed_chunks,
+                manifest_chunks_ref.hashed_chunks_len,
+            )
+        };
+        for chunk in hashed_chunks {
+            // SAFETY: the library wrote `chunk_data_len` bytes at
+            // `chunk_data` for each chunk.
+            let bytes = unsafe {
+                slice::from_raw_parts(chunk.chunk_data, chunk.chunk_data_len)
+            };
+            host.chunks.entry(chunk.hash).or_insert_with(|| bytes.to_vec());
+        }
+        file_chunks.push(manifest_chunks);
+    }
+
+    let manifests: Vec<FFIFileManifestParent<u64>> = file_chunks
+        .iter()
+        .map(|&manifest_chunks| {
+            // SAFETY: each pointer came from a successful
+            // `create_file_manifest_and_chunks_u64` call and isn't freed yet.
+            let fmp = unsafe { &(*manifest_chunks).fmp };
+            FFIFileManifestParent {
+                chunk_metadata: fmp.chunk_metadata,
+                chunk_metadata_len: fmp.chunk_metadata_len,
+                chunk_metadata_cap: fmp.chunk_metadata_cap,
+            }
+        })
+        .collect();
+    let name_ptrs: Vec<*const c_char> =
+        names.iter().map(|name| name.as_ptr()).collect();
+    let ser_args = SerializeUncompressedDataArgsU64 {
+        manifest_array_ptr: manifests.as_ptr(),
+        filenames: name_ptrs.as_ptr(),
+        manifest_len: manifests.len(),
+        user_data: ptr::from_mut(&mut host.chunks).cast(),
+        get_keys_cb: get_keys_u64,
+        get_chunks_cb: get_chunks_u64,
+    };
+    let mut ser = ptr::null_mut();
+    // SAFETY: `ser_args` points into `manifests`, `name_ptrs` and
+    // `host.chunks`, which outlive the call, and `ser` is a local.
+    let status = unsafe {
+        serialize_uncompressed_data_u64(&raw const ser_args, &raw mut ser)
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+    // SAFETY: `ser` came from the successful call above.
+    let ser_ref = unsafe { &*ser };
+
+    let builder_args = ArchiveBuilderArgsU64 {
+        manifest_array_ptr: ser_ref.ser_manifest_ptr,
+        manifest_len: ser_ref.ser_manifest_len,
+        sorted_hashes_array_ptr: ser_ref.sorted_hashes_ptr,
+        sorted_hashes_len: ser_ref.sorted_hashes_len,
+        file_count: u32::try_from(files.len()).unwrap(),
+        total_size: host.chunks.values().map(|chunk| chunk.len() as u64).sum(),
+        user_data: ptr::from_mut(&mut host).cast(),
+        get_chunks_cb: builder_get_chunks_u64,
+        free_chunks_cb: builder_free_chunks,
+        write_comp_data_cb: builder_write,
+    };
+    let mut builder = ptr::null_mut();
+    // SAFETY: `builder_args` points into `ser` and `host`, which outlive the
+    // builder, and `builder` is a local.
+    let status = unsafe {
+        archive_builder_new_u64(&raw const builder_args, &raw mut builder)
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    // SAFETY: `builder` came from `archive_builder_new_u64` and hasn't been
+    // built or freed.
+    let status = unsafe {
+        archive_builder_set_compression_level_u64(builder, COMPRESSION_LEVEL)
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+    // SAFETY: `builder` came from `archive_builder_new_u64` and hasn't been
+    // built or freed.
+    let status = unsafe {
+        archive_builder_set_dictionary_size_u64(builder, DICTIONARY_SIZE)
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+    // SAFETY: `builder` came from `archive_builder_new_u64` and hasn't been
+    // built or freed.
+    let status = unsafe {
+        archive_builder_set_worker_count_u64(builder, WORKER_COUNT)
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    let mut comp = ptr::null_mut();
+    // SAFETY: `builder` came from `archive_builder_new_u64` and hasn't been
+    // built or freed; building consumes it. `comp` is a local.
+    let status = unsafe { archive_builder_build_u64(builder, &raw mut comp) };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    let mut prefix = ptr::null_mut();
+    // SAFETY: the TOC and manifests in `ser` both hold `toc_len` elements,
+    // `comp` came from the successful build above, and `prefix` is a local.
+    let status = unsafe {
+        build_ssmc_prefix_u64(
+            ser_ref.toc_ptr,
+            ser_ref.ser_manifest_ptr,
+            ser_ref.toc_len,
+            comp,
+            &raw mut prefix,
+        )
+    };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+    // SAFETY: `prefix` came from the successful call above.
+    let mut archive = unsafe { take_prefix(prefix) };
+    archive.extend_from_slice(&host.written.lock().unwrap());
+
+    // SAFETY: `comp` came from `archive_builder_build_u64` and is freed
+    // once, here.
+    unsafe { archive_data_free(comp) };
+    // SAFETY: `ser` came from `serialize_uncompressed_data_u64` and is freed
+    // once, here.
+    unsafe { free_serialized_output_u64(ser) };
+    for manifest_chunks in file_chunks {
+        // SAFETY: each pointer came from
+        // `create_file_manifest_and_chunks_u64` and is freed once, here.
+        unsafe { free_file_manifest_and_chunks_u64(manifest_chunks) };
+    }
+    archive
+}
+
+/// Rebuilds every file in `archive` through the C read exports, the way a
+/// C host would, in table of contents order.
+fn ffi_extract(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let (status, parsed) =
+        ffi_parse_prefix_u64(&archive[..ffi_prefix_len(archive)]);
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+    // SAFETY: `parsed` came from the successful call above.
+    let parsed_ref = unsafe { &*parsed };
+
+    // SAFETY: the library wrote `toc_len` entries with null-terminated names
+    // at `toc_ptr`, and `parsed` hasn't been freed.
+    let toc = unsafe { read_toc(parsed_ref.toc_ptr, parsed_ref.toc_len) };
+    // SAFETY: the library wrote `manifests_len` manifests at
+    // `manifests_ptr`, and `parsed` hasn't been freed.
+    let manifests: Vec<FileManifestParent<u64>> = unsafe {
+        read_manifests(parsed_ref.manifests_ptr, parsed_ref.manifests_len)
+    };
+    // SAFETY: the library wrote `dictionary_len` bytes at `dictionary_ptr`,
+    // and `parsed` hasn't been freed.
+    let dictionary = unsafe {
+        slice::from_raw_parts(
+            parsed_ref.dictionary_ptr,
+            parsed_ref.dictionary_len,
+        )
+    };
+
+    let files = toc
+        .into_iter()
+        .zip(manifests)
+        .map(|(entry, manifest)| {
+            let size = usize::try_from(entry.uncompressed_size).unwrap();
+            let mut file = vec![0; size];
+
+            for meta in manifest.chunk_metadata {
+                let (status, location) =
+                    lookup_u64(parsed_ref.chunk_index, meta.hash);
+                assert_eq!(
+                    status_code(status),
+                    status_code(FFIStatus::StatusOk)
+                );
+
+                let start = usize::try_from(location.offset).unwrap();
+                let end = start + usize::try_from(location.length).unwrap();
+                let compressed = &archive[start..end];
+                let out_start = usize::try_from(meta.offset).unwrap();
+                let out_end = out_start + usize::try_from(meta.length).unwrap();
+                let out = &mut file[out_start..out_end];
+
+                // SAFETY: each pointer covers its slice's length, and `out`
+                // is valid for writes.
+                let status = unsafe {
+                    decompress_chunk_c(
+                        compressed.as_ptr(),
+                        compressed.len(),
+                        dictionary.as_ptr(),
+                        dictionary.len(),
+                        out.as_mut_ptr(),
+                        out.len(),
+                    )
+                };
+                assert_eq!(
+                    status_code(status),
+                    status_code(FFIStatus::StatusOk)
+                );
+            }
+            (entry.filename, file)
+        })
+        .collect();
+
+    // SAFETY: `parsed` came from `parse_ssmc_prefix_u64` and is freed once,
+    // here.
+    unsafe { free_parsed_ssmc_u64(parsed) };
+    files
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn ffi_round_trip_archive_matches_rust_api() {
+    let files = round_trip_files();
+
+    assert_eq!(
+        ffi_round_trip_archive(&files),
+        rust_round_trip_archive(&files)
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn ffi_round_trip_extracts_original_files() {
+    let mut files = round_trip_files();
+    let archive = ffi_round_trip_archive(&files);
+
+    // The table of contents is sorted by name.
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(ffi_extract(&archive), files);
 }
