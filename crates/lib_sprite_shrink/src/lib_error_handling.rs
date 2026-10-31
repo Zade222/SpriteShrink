@@ -1,6 +1,6 @@
 //! Declares the error handling types for the sprite-shrink library.
 //!
-//! This module defines the custom `LibError` enum, which encapsulates
+//! This module defines the `SpriteShrinkError` enum, which encapsulates
 //! all possible failure conditions that can occur during the core
 //! archiving and compression processes. By centralizing error
 //! definitions here, the library provides a clear and consistent
@@ -23,21 +23,25 @@ use crate::{
 /// designed to be used by applications that consume this library,
 /// providing clear, specific error variants and surface interior errors
 /// for robust handling.
+///
+/// The variants that wrap a module's error display that error's own
+/// message, so a host that prints a `SpriteShrinkError` shows what went
+/// wrong rather than only which stage failed.
 #[derive(Error, Debug)]
 pub enum SpriteShrinkError {
-    #[error("An error occurred during archive processing")]
+    #[error(transparent)]
     Archive(ArchiveError),
 
-    #[error("An error occurred during file parsing")]
+    #[error(transparent)]
     Parsing(#[from] ParsingError),
 
-    #[error("An error occurred during data processing")]
+    #[error(transparent)]
     Processing(ProcessingError),
 
-    #[error("An error occurred during serialization")]
+    #[error(transparent)]
     Serialization(SerializationError),
 
-    #[error("I/O Error")]
+    #[error(transparent)]
     Io(#[from] io::Error),
 
     #[error("An external error occurred: {0}")]
@@ -132,5 +136,51 @@ pub trait IsCancelled {
 impl IsCancelled for SpriteShrinkError {
     fn is_cancelled(&self) -> bool {
         matches!(self, SpriteShrinkError::Cancelled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrapped_errors_display_their_own_message() {
+        let cases: [(SpriteShrinkError, &str); 6] = [
+            (
+                SpriteShrinkError::Archive(ArchiveError::ZstdError(
+                    "Src size is incorrect".to_string(),
+                )),
+                "Zstd error: Src size is incorrect",
+            ),
+            (
+                SpriteShrinkError::Archive(ArchiveError::Io(io::Error::other(
+                    "disk full",
+                ))),
+                "disk full",
+            ),
+            (
+                ParsingError::InvalidHeader("Bad magic.".to_string()).into(),
+                "File header is malformed. Bad magic.",
+            ),
+            (
+                SpriteShrinkError::Processing(ProcessingError::SeekOutOfBounds(
+                    "past the end".to_string(),
+                )),
+                "Seek request is outside the file bounds: past the end",
+            ),
+            (
+                SpriteShrinkError::Serialization(
+                    SerializationError::ArchiveTooLarge(
+                        "too many files".to_string(),
+                    ),
+                ),
+                "Archive is too large for the format: too many files",
+            ),
+            (io::Error::other("missing.bin").into(), "missing.bin"),
+        ];
+
+        for (error, message) in cases {
+            assert_eq!(error.to_string(), message);
+        }
     }
 }

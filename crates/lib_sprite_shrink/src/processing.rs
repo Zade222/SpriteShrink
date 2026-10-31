@@ -35,7 +35,7 @@ pub enum ProcessingError {
     #[error("Failed to generate dictionary samples")]
     SampleGeneration,
 
-    #[error("Verification failed for file:  {0}")]
+    #[error("Verification failed for file: {0}")]
     HashMismatchError(String),
 
     #[error("An internal logic error occurred: {0}")]

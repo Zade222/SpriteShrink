@@ -41,7 +41,7 @@ use crate::processing::{
 
 #[derive(Error, Debug)]
 pub enum ArchiveError {
-    #[error("I/O Error")]
+    #[error(transparent)]
     Io(#[from] io::Error),
 
     #[error("Compression failed: {0}")]
@@ -56,16 +56,16 @@ pub enum ArchiveError {
     #[error("Failed to encode file manifest: {0}")]
     ManifestEncodeError(String),
 
-    #[error("Worker Error {0}")]
+    #[error("Worker error: {0}")]
     WorkerError(String),
 
-    #[error("Failed to encode file manifest: {0}")]
+    #[error("Failed to encode chunk index: {0}")]
     IndexEncodeError(String),
 
     #[error("A data processing step failed: {0}")]
     ProcessingError(#[from] ProcessingError),
 
-    #[error("A data processing step failed: {0}")]
+    #[error("Zstd error: {0}")]
     ZstdError(String),
 
     #[error("Thread pool creation failed: {0}")]
