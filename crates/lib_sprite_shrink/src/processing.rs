@@ -312,9 +312,9 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 ///
 /// # Type Parameters
 ///
-/// * `F`: The type of the `get_chunk_data` callback, which must be a closure
+/// * `D`: The type of the `get_chunk_data` callback, which must be a closure
 ///   that is `Send`, `Sync`, and has a `'static` lifetime.
-/// * `H`: The generic hash type, which must be `Eq`, `Hash`, `Display`,
+/// * `H`: The generic hash type, which must be `Eq`, `Hash`,
 ///   `Clone`, `Send`, `Sync`, and have a `'static` lifetime.
 pub fn verify_single_file<D, E, H, P>(
     title: String,
@@ -855,7 +855,9 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
 
 #[cfg(test)]
 mod tests {
-    use std::{fmt::Write, io::Cursor};
+    use std::{
+        collections::HashMap, fmt::Write, io::{self, Cursor}, sync::mpsc,
+    };
 
     use fastcdc::v2020::StreamCDC;
     use proptest::{prelude::*, sample::Index};
@@ -1084,6 +1086,220 @@ mod tests {
             prop_assert_eq!(bytes.as_slice(), expected);
         }
         Ok(())
+    }
+
+    type ChunkResult = Result<Vec<Vec<u8>>, SpriteShrinkError>;
+
+    /// A file chunked for verification: its manifest, its SHA-512 and the
+    /// bytes of each chunk by hash.
+    struct StoredFile {
+        manifest: FileManifestParent<u64>,
+        veri_hash: [u8; 64],
+        chunks: HashMap<u64, Vec<u8>>,
+    }
+
+    /// `test_bytes(len)`, chunked with the smallest window so it splits
+    /// into many chunks.
+    fn stored_file(len: usize) -> StoredFile {
+        let processed =
+            process_file_in_memory(file(test_bytes(len)), MIN_WINDOW_SIZE)
+                .unwrap()
+                .unwrap();
+        let (manifest, chunk_list) = create_file_manifest_and_chunks::<u64>(
+            &processed.file_data,
+            &processed.chunks,
+        );
+        StoredFile {
+            manifest,
+            veri_hash: processed.veri_hash,
+            chunks: chunk_list.into_iter().collect(),
+        }
+    }
+
+    /// A chunk callback that reads each requested chunk from `chunks`.
+    fn read_from(
+        chunks: HashMap<u64, Vec<u8>>,
+    ) -> impl Fn(&[u64]) -> ChunkResult + Send + Sync + 'static {
+        move |hashes| {
+            Ok(hashes.iter().map(|hash| chunks[hash].clone()).collect())
+        }
+    }
+
+    /// Verifies `stored` as "rom.bin", reading its chunks through `read`.
+    fn verify_with<D>(
+        stored: &StoredFile,
+        read: D,
+    ) -> Result<(), SpriteShrinkError>
+    where
+        D: Fn(&[u64]) -> ChunkResult + Send + Sync + 'static,
+    {
+        verify_single_file(
+            "rom.bin".to_string(),
+            &stored.manifest,
+            &stored.veri_hash,
+            read,
+            |_| {},
+        )
+    }
+
+    fn is_hash_mismatch(result: &Result<(), SpriteShrinkError>) -> bool {
+        matches!(
+            result,
+            Err(SpriteShrinkError::Processing(
+                ProcessingError::HashMismatchError(title)
+            )) if title == "rom.bin"
+        )
+    }
+
+    #[test]
+    fn verify_accepts_the_original_chunks_and_reports_progress() {
+        let stored = stored_file(64 * 1024);
+        // More than two of the callback's 64-chunk batches.
+        assert!(stored.manifest.chunk_count > 128, "too few chunks");
+
+        let (requested_tx, requested_rx) = mpsc::channel();
+        let read = read_from(stored.chunks.clone());
+        let read = move |hashes: &[u64]| {
+            requested_tx.send(hashes.to_vec()).unwrap();
+            read(hashes)
+        };
+        let (progress_tx, progress_rx) = mpsc::channel();
+        verify_single_file(
+            "rom.bin".to_string(),
+            &stored.manifest,
+            &stored.veri_hash,
+            read,
+            move |bytes| progress_tx.send(bytes).unwrap(),
+        )
+        .unwrap();
+
+        // Every chunk is read once, in file order, and reported as it's
+        // hashed.
+        let requested: Vec<u64> = requested_rx.into_iter().flatten().collect();
+        let progress: Vec<u64> = progress_rx.into_iter().collect();
+        let metadata = &stored.manifest.chunk_metadata;
+        assert_eq!(
+            requested,
+            metadata.iter().map(|meta| meta.hash).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            progress,
+            metadata
+                .iter()
+                .map(|meta| u64::from(meta.length))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(progress.iter().sum::<u64>(), 64 * 1024);
+    }
+
+    #[test]
+    fn verify_reports_a_changed_byte_with_the_file_title() {
+        let stored = stored_file(16 * 1024);
+        let mut chunks = stored.chunks.clone();
+        let middle = stored.manifest.chunk_metadata
+            [stored.manifest.chunk_metadata.len() / 2]
+            .hash;
+        chunks.get_mut(&middle).unwrap()[0] ^= 1;
+
+        let result = verify_with(&stored, read_from(chunks));
+        assert!(is_hash_mismatch(&result), "{result:?}");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Verification failed for file: rom.bin"
+        );
+    }
+
+    // The callback returning the wrong number of chunks changes the bytes
+    // hashed, so it fails verification instead of hanging or panicking.
+    #[test]
+    fn verify_reports_missing_or_extra_chunk_data_as_a_mismatch() {
+        let stored = stored_file(16 * 1024);
+
+        let read = read_from(stored.chunks.clone());
+        let missing = move |hashes: &[u64]| {
+            read(hashes).map(|mut chunks| {
+                chunks.pop();
+                chunks
+            })
+        };
+        let result = verify_with(&stored, missing);
+        assert!(is_hash_mismatch(&result), "{result:?}");
+
+        let read = read_from(stored.chunks.clone());
+        let extra = move |hashes: &[u64]| {
+            read(hashes).map(|mut chunks| {
+                chunks.push(b"extra".to_vec());
+                chunks
+            })
+        };
+        let result = verify_with(&stored, extra);
+        assert!(is_hash_mismatch(&result), "{result:?}");
+    }
+
+    #[test]
+    fn verify_reports_cancellation_from_the_callback() {
+        let stored = stored_file(16 * 1024);
+
+        let result = verify_with(&stored, |_: &[u64]| -> ChunkResult {
+            Err(SpriteShrinkError::Cancelled)
+        });
+        assert!(
+            matches!(result, Err(SpriteShrinkError::Cancelled)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_wraps_other_callback_errors() {
+        let stored = stored_file(16 * 1024);
+
+        let result = verify_with(&stored, |_: &[u64]| -> ChunkResult {
+            Err(io::Error::other("disk read failed").into())
+        });
+        assert!(
+            matches!(result, Err(SpriteShrinkError::External(_))),
+            "{result:?}"
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "An external error occurred: disk read failed"
+        );
+    }
+
+    #[test]
+    fn verify_reports_a_panicking_callback() {
+        let stored = stored_file(16 * 1024);
+
+        let result = verify_with(&stored, |_: &[u64]| -> ChunkResult {
+            panic!("callback panicked on purpose")
+        });
+        assert!(
+            matches!(
+                result,
+                Err(SpriteShrinkError::Processing(
+                    ProcessingError::ThreadPanic(_)
+                ))
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_compares_an_empty_manifest_with_the_hash_of_no_data() {
+        let empty = StoredFile {
+            manifest: manifest_of(&[]),
+            veri_hash: generate_sha_512(b""),
+            chunks: HashMap::new(),
+        };
+        let no_reads = |_: &[u64]| -> ChunkResult {
+            panic!("an empty manifest has no chunks to read")
+        };
+
+        verify_with(&empty, no_reads).unwrap();
+
+        let abc = StoredFile { veri_hash: generate_sha_512(b"abc"), ..empty };
+        let result = verify_with(&abc, no_reads);
+        assert!(is_hash_mismatch(&result), "{result:?}");
     }
 
     /// A manifest of contiguous chunks with the given lengths, each hashed
