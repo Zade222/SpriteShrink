@@ -23,7 +23,8 @@ use tracing::{
 };
 
 use sprite_shrink::{
-    HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID,
+    SSMC_UID,
+    HashType,
     Hashable, FileHeader, ParsedSSMC,
     decompress_chunk
 };
@@ -87,8 +88,11 @@ pub fn run_extraction(
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
 
-    match header.hash_type {
-        HASH_TYPE_XXH3_64 => dispatch_extraction::<u64>(
+    /*The header was already checked when it was parsed, so this only turns
+    the byte into a `HashType`. The match has no catch-all arm, so a new
+    hash type doesn't compile until it's handled here.*/
+    match HashType::try_from(header.hash_type)? {
+        HashType::Xxh3_64 => dispatch_extraction::<u64>(
             file_path,
             out_dir,
             &header,
@@ -96,7 +100,7 @@ pub fn run_extraction(
             args,
             running
         ),
-        HASH_TYPE_XXH3_128 => dispatch_extraction::<u128>(
+        HashType::Xxh3_128 => dispatch_extraction::<u128>(
             file_path,
             out_dir,
             &header,
@@ -104,9 +108,6 @@ pub fn run_extraction(
             args,
             running
         ),
-        _ => Err(CliError::InternalError(
-            "Unsupported hash type in archive header.".to_string()
-        )),
     }
 }
 

@@ -1,7 +1,10 @@
 //! Runs the `sprite-shrink` binary end to end on inputs the baseline
 //! archives don't cover.
 
-use std::{fs, path::Path};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use sprite_shrink_test_support::{assert_bytes_eq, rom_set, tiled_bytes};
 use tempfile::TempDir;
@@ -107,36 +110,71 @@ fn rom_set_is_archived_with_a_dictionary() {
     assert!(!stdout.contains(NO_DICTIONARY_NOTE), "stdout:\n{stdout}");
 }
 
-#[test]
-fn library_errors_are_reported_with_their_detail() {
-    let tmp = TempDir::new().unwrap();
-    let out_dir = tmp.path().join("extract");
-    let archive = tmp.path().join("bad_magic.ssmc");
-    fs::create_dir_all(&out_dir).unwrap();
-
+/// Copies the committed v2 SSMC fixture into `dir` with the byte at
+/// `offset` set to `value`, and returns the copy's path.
+fn patched_fixture(dir: &Path, offset: usize, value: u8) -> PathBuf {
     let mut bytes = fs::read(
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("tests/fixtures/compat/v2/roms.ssmc"),
     )
     .unwrap();
-    bytes[0] = b'X';
-    fs::write(&archive, &bytes).unwrap();
+    bytes[offset] = value;
 
-    let output = cli_output(&[
-        "-i", archive.to_str().unwrap(),
-        "-o", out_dir.to_str().unwrap(),
-        "-e", "1",
-    ]);
+    let path = dir.join("patched.ssmc");
+    fs::write(&path, &bytes).unwrap();
+    path
+}
+
+/// Runs the CLI, expecting it to report an error, and returns everything it
+/// printed.
+fn failure_output(args: &[&str]) -> String {
+    let output = cli_output(args);
     let printed = format!(
         "{}{}",
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
+    assert!(reported_error(&output), "sprite-shrink {args:?}:\n{printed}");
+    printed
+}
+
+#[test]
+fn library_errors_are_reported_with_their_detail() {
+    let tmp = TempDir::new().unwrap();
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+    let archive = patched_fixture(tmp.path(), 0, b'X');
+
+    let printed = failure_output(&[
+        "-i", archive.to_str().unwrap(),
+        "-o", out_dir.to_str().unwrap(),
+        "-e", "1",
+    ]);
 
     // The library's own message, not only the stage that failed.
-    assert!(reported_error(&output), "output:\n{printed}");
     assert!(
         printed.contains("File Magic Number is invalid"),
         "output:\n{printed}"
     );
+}
+
+#[test]
+fn unknown_hash_type_stops_extraction_and_listing() {
+    let tmp = TempDir::new().unwrap();
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+    // `hash_type` is the header byte at offset 18.
+    let archive = patched_fixture(tmp.path(), 18, 3);
+    let archive = archive.to_str().unwrap();
+
+    let extract = ["-i", archive, "-o", out_dir.to_str().unwrap(), "-e", "1"];
+    let list = ["-i", archive, "--list"];
+    for args in [&extract[..], &list[..]] {
+        let printed = failure_output(args);
+        assert!(
+            printed.contains("Unsupported hash type 3 in the archive header"),
+            "sprite-shrink {args:?}:\n{printed}"
+        );
+    }
+    assert!(fs::read_dir(&out_dir).unwrap().next().is_none());
 }

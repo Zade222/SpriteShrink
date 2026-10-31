@@ -30,7 +30,7 @@ use tracing::{
 };
 use sprite_shrink::{
     SS_SEED,
-    ArchiveBuilder, ChunkLocation,
+    ArchiveBuilder, ChunkLocation, HashType,
 };
 use sprite_shrink_cd::{
     ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
@@ -111,7 +111,7 @@ impl<T: Read + Seek + Send> ReadSeekSend for T {}
 pub(super) fn compress_optical_mode<H>(
     file_paths: Vec<PathBuf>,
     args: &Args,
-    hash_type_id: &u8,
+    hash_type: HashType,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
 where
@@ -498,7 +498,7 @@ where
         subheader_table: &subheader_table,
         exception_blob: &exception_blob,
         audio_blob_size: final_audio_blob_size,
-        hash_type: *hash_type_id,
+        hash_type: hash_type.id(),
     })?;
 
     println!("Estimated final data size with blob: {}", final_data.len() + blob_size as usize);

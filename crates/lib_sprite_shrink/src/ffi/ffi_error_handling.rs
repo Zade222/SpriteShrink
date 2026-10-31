@@ -29,6 +29,7 @@ pub enum FFIStatus {
     HashNotFound = -18,
     DuplicateFilename = -19,
     SectionOutOfBounds = -20,
+    UnsupportedHashType = -21,
 }
 
 
@@ -51,6 +52,9 @@ impl From<SpriteShrinkError> for FFIStatus {
             SpriteShrinkError::Parsing(
                 ParsingError::SectionOutOfBounds(_)
             ) => FFIStatus::SectionOutOfBounds,
+            SpriteShrinkError::Parsing(
+                ParsingError::UnsupportedHashType(_)
+            ) => FFIStatus::UnsupportedHashType,
 
             //Archive errors
             SpriteShrinkError::Archive(

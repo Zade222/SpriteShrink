@@ -1,9 +1,7 @@
 use std::path::PathBuf;
 use std::sync::{Arc, atomic::AtomicBool};
 
-use sprite_shrink::{
-    CompressionResult, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128,
-};
+use sprite_shrink::{CompressionResult, HashType};
 use tracing::info;
 
 use crate::arg_handling::Args;
@@ -39,13 +37,13 @@ pub fn run_default_compression(
         64 => default_compression::<u64>(
             file_paths,
             args,
-            &HASH_TYPE_XXH3_64,
+            HashType::Xxh3_64,
             running
         ),
         128 => default_compression::<u128>(
             file_paths,
             args,
-            &HASH_TYPE_XXH3_128,
+            HashType::Xxh3_128,
             running
         ),
         _ => Err(CliError::InvalidHashBitLength(
@@ -65,13 +63,13 @@ pub fn run_optical_compression(
         64 => compress_optical_mode::<u64>(
             file_paths,
             args,
-            &HASH_TYPE_XXH3_64,
+            HashType::Xxh3_64,
             running
         ),
         128 => compress_optical_mode::<u128>(
             file_paths,
             args,
-            &HASH_TYPE_XXH3_128,
+            HashType::Xxh3_128,
             running
         ),
         _ => Err(CliError::InvalidHashBitLength(

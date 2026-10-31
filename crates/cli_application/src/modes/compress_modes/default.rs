@@ -24,7 +24,8 @@ use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::{bounded};
 use sprite_shrink::{
     SS_SEED,
-    ArchiveBuilder, FileManifestParent, Hashable, Progress, SSAChunkMeta,
+    ArchiveBuilder, FileManifestParent, HashType, Hashable, Progress,
+    SSAChunkMeta,
     build_ssmc_prefix, serialize_uncompressed_data, verify_single_file
 };
 use rayon::prelude::*;
@@ -71,8 +72,7 @@ use crate::{
 ///   archive.
 /// * `args`: A reference to the `Args` struct, containing all user-provided
 ///   settings. The `--auto-tune` flag enables parameter optimization.
-/// * `hash_type_id`: A `u8` identifier for the hash type being used
-///   (e.g., 1 for 64-bit, 2 for 128-bit).
+/// * `hash_type`: The hash type `H` is, recorded in the archive header.
 /// * `running`: An `Arc<AtomicBool>` used for graceful cancellation of the
 ///   operation.
 ///
@@ -99,7 +99,7 @@ use crate::{
 pub fn default_compression<H>(
     file_paths: Vec<PathBuf>,
     args: &Args,
-    hash_type_id: &u8,
+    hash_type: HashType,
     running: Arc<AtomicBool>
 ) -> Result<(), CliError>
 where
@@ -615,7 +615,7 @@ where
         &archive_toc,
         &serialized_data.ser_file_manifest,
         &comp_data,
-        *hash_type_id,
+        hash_type.id(),
     )?;
 
     //Write ssmc header to disk and append it with compressed data.

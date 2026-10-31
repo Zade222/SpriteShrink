@@ -216,6 +216,30 @@ fn build_file_header_counts_past_u32_max_return_error() {
     }
 }
 
+#[test]
+fn build_ssmc_prefix_unknown_hash_type_returns_error() {
+    for hash_type in [0, 3, u8::MAX] {
+        let header = FileHeader::build_file_header(
+            1, ALGORITHM_ZSTD, hash_type, SSMC_UID, 40,
+        );
+        let prefix = build_ssmc_prefix(
+            &sample_toc(),
+            &sample_manifests([1_u64, 2, 3]),
+            &sample_comp([1_u64, 2, 3]),
+            hash_type,
+        );
+
+        // No reader would accept the archive, so it isn't written.
+        for err in [header.unwrap_err(), prefix.unwrap_err()] {
+            assert!(
+                err.to_string()
+                    .contains(&format!("Unsupported hash type {hash_type} ")),
+                "hash type {hash_type}: {err}"
+            );
+        }
+    }
+}
+
 /// Returns `prefix` with its header rewritten by `edit`.
 fn with_header(prefix: &[u8], edit: impl FnOnce(&mut FileHeader)) -> Vec<u8> {
     let (mut header, _) = read_layout(prefix);
@@ -385,6 +409,29 @@ fn parse_ssmc_prefix_other_format_id_returns_error() {
     });
 
     assert_parse_error(&other_format, "format ID");
+}
+
+#[test]
+fn parse_ssmc_prefix_unknown_hash_type_returns_error() {
+    let prefix = build_ssmc_prefix(
+        &sample_toc(),
+        &sample_manifests([1_u64, 2, 3]),
+        &sample_comp([1_u64, 2, 3]),
+        HASH_TYPE_XXH3_64,
+    ).unwrap();
+
+    for hash_type in [0, 3, u8::MAX] {
+        let unknown = with_header(&prefix, |header| {
+            header.hash_type = hash_type;
+        });
+
+        let err = parse_ssmc_prefix::<u64>(&unknown).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("Unsupported hash type {hash_type} ")),
+            "hash type {hash_type}: {err}"
+        );
+    }
 }
 
 #[test]

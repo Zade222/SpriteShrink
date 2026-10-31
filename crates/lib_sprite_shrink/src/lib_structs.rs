@@ -40,6 +40,59 @@ pub const HASH_TYPE_XXH3_64: u8 = 1;
 /// identified by 128-bit xxHash3 hashes (`u128`).
 pub const HASH_TYPE_XXH3_128: u8 = 2;
 
+/// A hash type this version can read and write, as recorded in the
+/// [`FileHeader`] `hash_type` byte.
+///
+/// The header keeps the raw `u8`: a corrupt archive or a C host can put any
+/// value there, which an enum field can't hold. Use `HashType::try_from` to
+/// check it. A new variant must also be added to [`HashType::ALL`], which
+/// the checks and error messages are built from.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HashType {
+    /// 64-bit xxHash3, for `u64` chunk hashes.
+    Xxh3_64 = HASH_TYPE_XXH3_64,
+    /// 128-bit xxHash3, for `u128` chunk hashes.
+    Xxh3_128 = HASH_TYPE_XXH3_128,
+}
+
+impl HashType {
+    /// Every supported hash type, in ID order.
+    pub const ALL: [Self; 2] = [Self::Xxh3_64, Self::Xxh3_128];
+
+    /// The value stored in the header's `hash_type` byte.
+    #[must_use]
+    pub const fn id(self) -> u8 {
+        self as u8
+    }
+
+    /// The hash's name, for messages.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Xxh3_64 => "xxh3_64",
+            Self::Xxh3_128 => "xxh3_128",
+        }
+    }
+}
+
+/// Checks a header `hash_type` byte.
+///
+/// # Errors
+///
+/// Returns `ParsingError::UnsupportedHashType` if `id` isn't the ID of any
+/// [`HashType`].
+impl TryFrom<u8> for HashType {
+    type Error = SpriteShrinkError;
+
+    fn try_from(id: u8) -> Result<Self, Self::Error> {
+        Self::ALL
+            .into_iter()
+            .find(|hash_type| hash_type.id() == id)
+            .ok_or_else(|| ParsingError::UnsupportedHashType(id).into())
+    }
+}
+
 /// Represents the location of a data chunk within the archive.
 ///
 /// This struct is used to pinpoint the exact position and size of a
@@ -141,6 +194,9 @@ impl FileHeader {
     ///
     /// # Errors
     ///
+    /// Returns `ParsingError::UnsupportedHashType` if `hash_type` isn't a
+    /// [`HashType`] ID, since no reader would accept the archive.
+    ///
     /// Returns `SerializationError::ArchiveTooLarge` if `file_count` doesn't
     /// fit in a `u32`, or the format data offset,
     /// `HEADER_SIZE + enc_toc_length`, doesn't.
@@ -151,6 +207,8 @@ impl FileHeader {
         format_id: u16,
         enc_toc_length: usize,
     ) -> Result<FileHeader, SpriteShrinkError> {
+        HashType::try_from(hash_type)?;
+
         let file_count = u32::try_from(file_count).ok().ok_or_else(|| {
             SerializationError::ArchiveTooLarge(format!("{file_count} files"))
         })?;

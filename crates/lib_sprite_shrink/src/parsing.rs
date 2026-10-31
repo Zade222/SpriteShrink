@@ -17,6 +17,7 @@ use thiserror::Error;
 use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{
     SSMC_UID,
+    HashType,
     ChunkLocation, FileHeader, FileManifestParent, FileRegion, ParsedSSMC,
     SSMCTocEntry, SSMCFormatData
 };
@@ -42,7 +43,30 @@ pub enum ParsingError {
     SectionOutOfBounds(String),
 
     #[error("Failed to decode table of contents: {0}")]
-    TOCDecodeError(String)
+    TOCDecodeError(String),
+
+    #[error(
+        "Unsupported hash type {0} in the archive header. This version \
+        supports {supported}.",
+        supported = supported_hash_types()
+    )]
+    UnsupportedHashType(u8),
+}
+
+/// Lists every [`HashType`] as "ID (name)", for error messages, for
+/// example `1 (xxh3_64) and 2 (xxh3_128)`.
+fn supported_hash_types() -> String {
+    let entries: Vec<String> = HashType::ALL
+        .iter()
+        .map(|hash_type| format!("{} ({})", hash_type.id(), hash_type.name()))
+        .collect();
+
+    match entries.split_last() {
+        Some((last, rest)) if !rest.is_empty() => {
+            format!("{} and {last}", rest.join(", "))
+        }
+        _ => entries.concat(),
+    }
 }
 
 /// The magic number used to identify a sprite-shrink archive file.
@@ -74,7 +98,7 @@ pub static SS_SEED: u64 = 0x4202803010192019;
 /// This function takes a slice of bytes from the beginning of an archive
 /// and interprets it as a `FileHeader`. It performs critical validation,
 /// such as checking the magic number and ensuring the archive version
-/// is supported by the current library.
+/// and hash type are supported by the current library.
 ///
 /// # Arguments
 ///
@@ -85,7 +109,7 @@ pub static SS_SEED: u64 = 0x4202803010192019;
 /// A `Result` which is:
 /// - `Ok(FileHeader)` containing the parsed and validated header.
 /// - `Err(SpriteShrinkError)` if the data is malformed, the magic number is
-///   incorrect, or the file version is unsupported.
+///   incorrect, or the file version or hash type is unsupported.
 pub fn parse_file_header(
     header_data: &[u8]
 ) -> Result<FileHeader, SpriteShrinkError> {
@@ -109,6 +133,10 @@ pub fn parse_file_header(
     if file_header.file_version > SUPPORTED_VERSION {
         return Err(ParsingError::InvalidFileVersion().into());
     };
+
+    /*Reject hash types this library can't read here, so every reader stops
+    at the header instead of failing later on hashes of an unknown width.*/
+    HashType::try_from(file_header.hash_type)?;
 
     Ok(file_header)
 }
@@ -288,9 +316,7 @@ mod tests {
     use bitcode::encode;
 
     use super::*;
-    use crate::lib_structs::{
-        ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, SSAChunkMeta,
-    };
+    use crate::lib_structs::{ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, SSAChunkMeta};
 
     /// An 8-byte aligned buffer, so a test can place bytes at an offset
     /// that is known to be misaligned.
@@ -386,6 +412,38 @@ mod tests {
 
             assert_eq!(parsed.file_version, version);
         }
+    }
+
+    #[test]
+    fn parse_file_header_accepts_only_known_hash_types() {
+        // Every possible byte, so a check that accepts too wide a range
+        // fails as well as one that rejects a known type.
+        for id in 0..=u8::MAX {
+            let mut header = sample_header();
+            header.hash_type = id;
+
+            let result = parse_file_header(&header.to_le_bytes());
+
+            if HashType::ALL.iter().any(|hash_type| hash_type.id() == id) {
+                assert_eq!(result.unwrap().hash_type, id);
+            } else {
+                assert!(
+                    matches!(result, Err(SpriteShrinkError::Parsing(
+                        ParsingError::UnsupportedHashType(found)
+                    )) if found == id),
+                    "hash type {id}: {result:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_hash_type_message_names_the_value_and_supported_types() {
+        assert_eq!(
+            ParsingError::UnsupportedHashType(3).to_string(),
+            "Unsupported hash type 3 in the archive header. This version \
+             supports 1 (xxh3_64) and 2 (xxh3_128)."
+        );
     }
 
     #[test]

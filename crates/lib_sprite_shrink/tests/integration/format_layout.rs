@@ -10,7 +10,7 @@ use std::mem::offset_of;
 use sprite_shrink::{
     ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, MAGIC_NUMBER,
     SS_SEED, SSMC_UID, SUPPORTED_VERSION,
-    FileHeader, FileRegion, SSMCFormatData,
+    FileHeader, FileRegion, HashType, SSMCFormatData,
     parse_file_header, parse_format_data,
 };
 
@@ -82,6 +82,22 @@ fn format_constants_are_unchanged() {
     assert_eq!(ALGORITHM_ZSTD, 98);
     assert_eq!(HASH_TYPE_XXH3_64, 1);
     assert_eq!(HASH_TYPE_XXH3_128, 2);
+}
+
+#[test]
+fn hash_types_match_the_header_ids() {
+    assert_eq!(
+        HashType::ALL.map(HashType::id),
+        [HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128]
+    );
+    assert_eq!(HashType::ALL.map(HashType::name), ["xxh3_64", "xxh3_128"]);
+
+    for hash_type in HashType::ALL {
+        assert_eq!(HashType::try_from(hash_type.id()).unwrap(), hash_type);
+    }
+    for id in [0, 3, u8::MAX] {
+        assert!(HashType::try_from(id).is_err(), "hash type {id}");
+    }
 }
 
 #[test]

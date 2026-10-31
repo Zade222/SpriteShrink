@@ -667,6 +667,24 @@ fn parse_file_header_rejects_newer_version() {
 }
 
 #[test]
+fn parse_file_header_rejects_unknown_hash_type() {
+    // Which values are rejected is tested in `parsing.rs`. This checks that
+    // the rejection reaches C as its own status, with nothing returned.
+    let mut header = FileHeader::build_file_header(
+        3, ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, SSMC_UID, 40,
+    )
+        .unwrap();
+    header.hash_type = 3;
+
+    let (status, out) = ffi_parse_header(&header.to_le_bytes());
+    assert_eq!(
+        status_code(status),
+        status_code(FFIStatus::UnsupportedHashType)
+    );
+    assert!(out.is_null());
+}
+
+#[test]
 fn free_file_header_accepts_null() {
     // SAFETY: `free_file_header` returns early on null.
     unsafe { free_file_header(ptr::null_mut()) };
@@ -1139,6 +1157,20 @@ fn parse_ssmc_prefix_rejects_other_format() {
 
     let (status, out) = ffi_parse_prefix_u64(&archive);
     assert_eq!(status_code(status), status_code(FFIStatus::InvalidHeader));
+    assert!(out.is_null());
+}
+
+#[test]
+fn parse_ssmc_prefix_rejects_unknown_hash_type() {
+    let mut archive = rust_archive([1_u64, 2, 3], HASH_TYPE_XXH3_64);
+    // `hash_type` is the byte at offset 18.
+    archive[18] = 3;
+
+    let (status, out) = ffi_parse_prefix_u64(&archive);
+    assert_eq!(
+        status_code(status),
+        status_code(FFIStatus::UnsupportedHashType)
+    );
     assert!(out.is_null());
 }
 

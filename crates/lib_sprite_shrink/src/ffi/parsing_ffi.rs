@@ -30,6 +30,8 @@ use crate::parsing::{parse_file_header, parse_format_data, parse_ssmc_prefix};
 ///   of `FileHeader` or the magic number is wrong.
 /// - `FFIResult::UnsupportedVersion` if the archive is newer than this
 ///   library.
+/// - `FFIResult::UnsupportedHashType` if the header names a hash type other
+///   than `HASH_TYPE_XXH3_64` or `HASH_TYPE_XXH3_128`.
 ///
 /// # Safety
 /// - `header_data_array_ptr` must point to valid memory of at least
@@ -203,6 +205,8 @@ where
 ///   isn't SSMC.
 /// - `FFIResult::UnsupportedVersion` if the archive is newer than this
 ///   library.
+/// - `FFIResult::UnsupportedHashType` if the header names a hash type other
+///   than `HASH_TYPE_XXH3_64` or `HASH_TYPE_XXH3_128`.
 /// - `FFIResult::SectionOutOfBounds` if a section lies past the end of the
 ///   prefix.
 /// - `FFIResult::ManifestDecodeError` if the manifest fails to decode.
@@ -258,6 +262,8 @@ pub unsafe extern "C" fn parse_ssmc_prefix_u64(
 ///   isn't SSMC.
 /// - `FFIResult::UnsupportedVersion` if the archive is newer than this
 ///   library.
+/// - `FFIResult::UnsupportedHashType` if the header names a hash type other
+///   than `HASH_TYPE_XXH3_64` or `HASH_TYPE_XXH3_128`.
 /// - `FFIResult::SectionOutOfBounds` if a section lies past the end of the
 ///   prefix.
 /// - `FFIResult::ManifestDecodeError` if the manifest fails to decode.

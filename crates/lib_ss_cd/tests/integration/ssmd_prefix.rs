@@ -421,6 +421,36 @@ fn parse_ssmd_prefix_other_format_id_returns_error() {
 }
 
 #[test]
+fn build_ssmd_prefix_unknown_hash_type_returns_error() {
+    let inputs = inputs_with_audio([1_u64, 2, 3]);
+
+    for hash_type in [0, 3, u8::MAX] {
+        let err = build_ssmd_prefix(&inputs.parts(hash_type)).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("Unsupported hash type {hash_type} ")),
+            "hash type {hash_type}: {err}"
+        );
+    }
+}
+
+#[test]
+fn parse_ssmd_prefix_unknown_hash_type_returns_error() {
+    for hash_type in [0, 3, u8::MAX] {
+        let unknown = with_header(&sample_prefix(), |header| {
+            header.hash_type = hash_type;
+        });
+
+        let err = parse_ssmd_prefix::<u64>(&unknown).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains(&format!("Unsupported hash type {hash_type} ")),
+            "hash type {hash_type}: {err}"
+        );
+    }
+}
+
+#[test]
 fn parse_ssmd_prefix_chunk_offset_overflow_returns_error() {
     // The data chunk stored at offset 40 ends up past u64::MAX.
     let near_max = with_format_data(&sample_prefix(), |fd| {
