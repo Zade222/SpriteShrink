@@ -725,6 +725,14 @@ where
 /// - The `hash` of a required chunk.
 /// - The `start` and `end` byte range to copy from that chunk *after* it has
 ///   been decompressed.
+///
+/// A `seek_length` of 0 returns an empty `Vec`.
+///
+/// # Errors
+///
+/// Returns `ProcessingError::SeekOutOfBounds` if the requested range ends
+/// past the end of the file, including when `seek_offset + seek_length`
+/// overflows a `u64`.
 pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     manifest: &FileManifestParent<H>,
     seek_offset: u64,
@@ -737,19 +745,24 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
         .sum();
 
     /*Using the calculated file size, if the seek request is beyond the file
-    size fail early.*/
-    if seek_offset + seek_length > original_file_size {
-        return Err(ProcessingError::SeekOutOfBounds(
-            "Seek request is outside the bounds of the original file."
-                .to_string(),
-        ).into());
+    size fail early. A request whose end doesn't fit in a u64 is beyond it
+    too.*/
+    let seek_end = seek_offset
+        .checked_add(seek_length)
+        .filter(|&end| end <= original_file_size)
+        .ok_or_else(|| ProcessingError::SeekOutOfBounds(format!(
+            "{seek_length} bytes at offset {seek_offset} in a \
+             {original_file_size}-byte file"
+        )))?;
+
+    /*A zero-length read needs no chunks. Without this, a request inside a
+    chunk would return that chunk with an empty range.*/
+    if seek_length == 0 {
+        return Ok(Vec::new());
     }
 
     //Prepare the return vector
     let mut required_chunks: Vec<SeekMetadata<H>> = Vec::new();
-
-    //Calculate the seek end for checking if each chunk is within that range.
-    let seek_end = seek_offset + seek_length;
 
     for chunk_meta in &manifest.chunk_metadata {
         //Calculate start offset of the chunk within the virtual file.
@@ -797,6 +810,7 @@ mod tests {
     use std::io::Cursor;
 
     use fastcdc::v2020::StreamCDC;
+    use proptest::{prelude::*, sample::Index};
 
     use super::*;
 
@@ -846,5 +860,112 @@ mod tests {
 
         assert!(in_memory.len() > 100, "too few chunks to compare");
         assert_eq!(in_memory, streamed);
+    }
+
+    /// A manifest of contiguous chunks with the given lengths, each hashed
+    /// as its index.
+    fn manifest_of(lengths: &[u32]) -> FileManifestParent<u64> {
+        let mut offset = 0;
+        let chunk_metadata: Vec<SSAChunkMeta<u64>> = lengths
+            .iter()
+            .zip(0..)
+            .map(|(&length, hash)| {
+                let meta = SSAChunkMeta { hash, offset, length };
+                offset += u64::from(length);
+                meta
+            })
+            .collect();
+
+        FileManifestParent {
+            chunk_count: chunk_metadata.len() as u64,
+            chunk_metadata,
+        }
+    }
+
+    fn is_out_of_bounds<T>(result: &Result<T, SpriteShrinkError>) -> bool {
+        matches!(
+            result,
+            Err(SpriteShrinkError::Processing(
+                ProcessingError::SeekOutOfBounds(_)
+            ))
+        )
+    }
+
+    #[test]
+    fn seek_may_end_at_the_end_of_the_file_but_not_past_it() {
+        let manifest = manifest_of(&[10, 20, 30]);
+
+        assert_eq!(get_seek_chunks(&manifest, 0, 60).unwrap().len(), 3);
+        assert_eq!(
+            get_seek_chunks(&manifest, 50, 10).unwrap(),
+            [SeekMetadata::new(2, 20, 30)]
+        );
+        assert!(is_out_of_bounds(&get_seek_chunks(&manifest, 0, 61)));
+        assert!(is_out_of_bounds(&get_seek_chunks(&manifest, 60, 1)));
+        assert!(is_out_of_bounds(&get_seek_chunks(&manifest, 61, 0)));
+    }
+
+    #[test]
+    fn seek_whose_end_overflows_is_out_of_bounds() {
+        let manifest = manifest_of(&[10, 20, 30]);
+
+        let overflowing = [(u64::MAX, 1), (1, u64::MAX), (5, u64::MAX - 2)];
+        for (offset, length) in overflowing {
+            assert!(
+                is_out_of_bounds(&get_seek_chunks(&manifest, offset, length)),
+                "{length} bytes at {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_length_seek_needs_no_chunks() {
+        let manifest = manifest_of(&[10, 20, 30]);
+
+        // Inside a chunk, on a boundary, and at the end of the file.
+        for offset in [0, 5, 10, 59, 60] {
+            assert_eq!(
+                get_seek_chunks(&manifest, offset, 0).unwrap(),
+                [],
+                "offset {offset}"
+            );
+        }
+        assert_eq!(get_seek_chunks(&manifest_of(&[]), 0, 0).unwrap(), []);
+    }
+
+    proptest! {
+        /// Joining the ranges `get_seek_chunks` returns reads exactly the
+        /// requested bytes, and every range it returns is needed.
+        #[test]
+        fn seek_chunks_cover_exactly_the_requested_range(
+            lengths in proptest::collection::vec(1..=64_u32, 0..16),
+            start in any::<Index>(),
+            len in any::<Index>(),
+        ) {
+            let manifest = manifest_of(&lengths);
+            let data = test_bytes(lengths.iter().map(|&l| l as usize).sum());
+            let offset = start.index(data.len() + 1);
+            let length = len.index(data.len() - offset + 1);
+
+            let seeks = get_seek_chunks(
+                &manifest,
+                offset as u64,
+                length as u64,
+            )
+            .unwrap();
+
+            let at = |n: u64| usize::try_from(n).unwrap();
+            let mut read = Vec::new();
+            for seek in &seeks {
+                prop_assert!(seek.start_offset < seek.end_offset, "{seek:?}");
+                let chunk_start =
+                    at(manifest.chunk_metadata[at(seek.hash)].offset);
+                read.extend_from_slice(
+                    &data[chunk_start + at(seek.start_offset)
+                        ..chunk_start + at(seek.end_offset)],
+                );
+            }
+            prop_assert_eq!(read, &data[offset..offset + length]);
+        }
     }
 }
