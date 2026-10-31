@@ -15,7 +15,7 @@ pub use lib_structs::{
     ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID,
     ChunkLocation, CompressionResult, FileData, FileHeader, FileManifestParent,
     FileRegion, HashType,
-    ParsedSSMC, ProcessedFileData, Progress, SeekMetadata, SerializedData, 
+    ParsedSSMC, ProcessedFileData, Progress, SeekMetadata, SerializedData,
     SSAChunkMeta, SSMCFormatData, SSMCTocEntry
 };
 
@@ -28,6 +28,7 @@ pub use parsing::{
 
 mod processing;
 pub use processing::{
+    MAX_WINDOW_SIZE, MIN_WINDOW_SIZE,
     Hashable,
     create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory,
     verify_single_file, test_compression};

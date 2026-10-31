@@ -62,6 +62,7 @@ fn build_archive<H: TestHash>(files: &[FileData], hash_type: u8) -> Built {
 
     for file in files {
         let processed = process_file_in_memory(file.clone(), WINDOW_SIZE)
+            .unwrap()
             .unwrap();
         let (fmp, chunks) = create_file_manifest_and_chunks::<H>(
             &processed.file_data,

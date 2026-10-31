@@ -445,6 +445,9 @@ pub unsafe extern "C" fn free_file_manifest_and_chunks_u128(
 /// Processes a single file from memory via an FFI-safe interface.
 ///
 /// On success, returns `FFIResult::StatusOk` and populates `out_ptr`.
+/// Returns `FFIResult::NoDataToProcess` for an empty file, and
+/// `FFIResult::InvalidWindowSize` if `window_size` is outside 256 to
+/// 4194304 bytes.
 ///
 /// # Safety
 /// - `file_data` must be valid for reads. Its pointers must not be null.
@@ -482,8 +485,9 @@ pub unsafe extern "C" fn process_file_in_memory_ffi(
     let processed_data = match process_file_in_memory(
         native_file_data,
         window_size){
-        Some(data) => data,
-        None => return FFIResult::NoDataToProcess,
+        Ok(Some(data)) => data,
+        Ok(None) => return FFIResult::NoDataToProcess,
+        Err(e) => return e.into(),
     };
 
     /*Convert filename String to *mut c_char to be compatible with return

@@ -30,6 +30,7 @@ pub enum FFIStatus {
     DuplicateFilename = -19,
     SectionOutOfBounds = -20,
     UnsupportedHashType = -21,
+    InvalidWindowSize = -22,
 }
 
 
@@ -77,6 +78,9 @@ impl From<SpriteShrinkError> for FFIStatus {
             SpriteShrinkError::Processing(
                 ProcessingError::VerificationError(_)
             ) => FFIStatus::VerificationMissingChunk,
+            SpriteShrinkError::Processing(
+                ProcessingError::InvalidWindowSize(_)
+            ) => FFIStatus::InvalidWindowSize,
 
             //Serialization errors
             SpriteShrinkError::Serialization(

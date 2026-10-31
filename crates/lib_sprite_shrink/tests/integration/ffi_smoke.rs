@@ -21,8 +21,8 @@ use bitcode::{Encode, encode};
 use dashmap::DashMap;
 use sprite_shrink_test_support::assert_bytes_eq;
 use sprite_shrink::{
-    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID,
-    SUPPORTED_VERSION,
+    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, MAX_WINDOW_SIZE,
+    MIN_WINDOW_SIZE, SSMC_UID, SUPPORTED_VERSION,
     ArchiveBuilder, ChunkLocation, CompressionResult, FileData, FileHeader,
     FileManifestParent, ParsedSSMC, SSAChunkMeta, SSMCFormatData,
     SSMCTocEntry, SerializedData, SpriteShrinkError, build_ssmc_prefix,
@@ -1252,6 +1252,44 @@ fn free_parsed_ssmc_accepts_null() {
     unsafe { free_parsed_ssmc_u128(ptr::null_mut()) };
 }
 
+/// Calls `process_file_in_memory_ffi` on `data` and returns its status. The
+/// call must fail, so nothing is written to the output pointer.
+fn ffi_process_failure(data: &[u8], window_size: u64) -> FFIStatus {
+    let name = CString::new("test.bin").unwrap();
+    let file = FFIFileData {
+        filename: name.as_ptr(),
+        file_data: data.as_ptr(),
+        file_data_len: data.len(),
+    };
+    let mut processed = ptr::null_mut();
+    // SAFETY: `file` points into `name` and `data`, which outlive the call,
+    // and `processed` is a local the call may write to.
+    let status = unsafe {
+        process_file_in_memory_ffi(file, window_size, &raw mut processed)
+    };
+    assert!(processed.is_null(), "a failed call returned data");
+    status
+}
+
+#[test]
+fn process_file_in_memory_rejects_invalid_window_size() {
+    for window_size in [MIN_WINDOW_SIZE - 1, MAX_WINDOW_SIZE + 1] {
+        assert_eq!(
+            status_code(ffi_process_failure(b"data", window_size)),
+            status_code(FFIStatus::InvalidWindowSize),
+            "window size {window_size}"
+        );
+    }
+}
+
+#[test]
+fn process_file_in_memory_reports_empty_file() {
+    assert_eq!(
+        status_code(ffi_process_failure(b"", WINDOW_SIZE)),
+        status_code(FFIStatus::NoDataToProcess)
+    );
+}
+
 /// Chunk sizes for the round trip: 64 to 1024 bytes, averaging 256, so the
 /// small test files still split into many chunks.
 const WINDOW_SIZE: u64 = 256;
@@ -1292,6 +1330,7 @@ fn rust_round_trip_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
             FileData { file_name: name.clone(), file_data: data.clone() },
             WINDOW_SIZE,
         )
+        .unwrap()
         .unwrap();
         let (fmp, chunks) = create_file_manifest_and_chunks::<u64>(
             &processed.file_data,
