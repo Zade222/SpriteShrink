@@ -808,3 +808,149 @@ pub fn decompress_chunk(
 
     Ok(decompressed_chunk_data)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{io::ErrorKind, sync::OnceLock};
+
+    use proptest::{collection::vec, prelude::*};
+    use sprite_shrink_test_support::tiled_bytes;
+
+    use super::*;
+
+    /// A dictionary trained on 64 KiB of ROM-like data cut into 1 KiB
+    /// samples, trained once and shared by every test.
+    fn dictionary() -> &'static [u8] {
+        static DICTIONARY: OnceLock<Vec<u8>> = OnceLock::new();
+        DICTIONARY.get_or_init(|| {
+            let samples = tiled_bytes(0x5EED_0D1C, 64 * 1024);
+            zstd::dict::from_continuous(&samples, &[1024; 64], 4096).unwrap()
+        })
+    }
+
+    /// 2000 bytes of data like the dictionary's, compressed with it at
+    /// level 19.
+    fn compressed_payload() -> (Vec<u8>, Vec<u8>) {
+        let payload = tiled_bytes(0x5EED_0D1C, 2000);
+        let compressed =
+            compress_with_dict(&payload, dictionary(), &19).unwrap();
+        (payload, compressed)
+    }
+
+    /// The `io::Error` inside `result`, or a panic naming what was returned
+    /// instead.
+    fn io_error(result: Result<Vec<u8>, SpriteShrinkError>) -> io::Error {
+        match result {
+            Err(SpriteShrinkError::Io(e)) => e,
+            other => panic!("expected an I/O error, got {other:?}"),
+        }
+    }
+
+    /// Payloads for the round trip: random bytes, which barely compress,
+    /// and ROM-like bytes, which the dictionary helps with.
+    fn payloads() -> impl Strategy<Value = Vec<u8>> {
+        prop_oneof![
+            vec(any::<u8>(), 0..4096),
+            // `tiled_bytes` needs a non-zero seed.
+            (0..4096_usize, 1..=u64::MAX)
+                .prop_map(|(len, seed)| tiled_bytes(seed, len)),
+        ]
+    }
+
+    proptest! {
+        #[test]
+        fn chunks_decompress_to_what_was_compressed(
+            payload in payloads(),
+            level in -7..=22_i32,
+            use_dictionary: bool,
+        ) {
+            // An empty dictionary is what `build` stores when training
+            // fails.
+            let dict = if use_dictionary { dictionary() } else { &[] };
+
+            let compressed = compress_with_dict(&payload, dict, &level)
+                .map_err(|e| TestCaseError::fail(e.to_string()))?;
+            let decompressed = decompress_chunk(&compressed, dict)
+                .map_err(|e| TestCaseError::fail(e.to_string()))?;
+            prop_assert_eq!(decompressed, payload);
+        }
+    }
+
+    #[test]
+    fn an_empty_payload_round_trips() {
+        for dict in [dictionary(), &[]] {
+            let compressed = compress_with_dict(&[], dict, &3).unwrap();
+            assert!(!compressed.is_empty(), "no zstd frame was written");
+            assert_eq!(decompress_chunk(&compressed, dict).unwrap(), []);
+        }
+    }
+
+    #[test]
+    fn levels_outside_zstds_range_are_clamped() {
+        let payload = tiled_bytes(0x5EED_0D1C, 2000);
+        for level in [i32::MIN, 23, i32::MAX] {
+            let compressed =
+                compress_with_dict(&payload, dictionary(), &level).unwrap();
+            assert_eq!(
+                decompress_chunk(&compressed, dictionary()).unwrap(),
+                payload,
+                "level {level}"
+            );
+        }
+    }
+
+    #[test]
+    fn decompressing_without_the_same_dictionary_fails() {
+        let (_, compressed) = compressed_payload();
+        let other = zstd::dict::from_continuous(
+            &tiled_bytes(0x0BAD_D1C7, 64 * 1024),
+            &[1024; 64],
+            4096,
+        )
+        .unwrap();
+
+        // The frame records the dictionary's ID, so zstd notices.
+        for dict in [&other[..], &[]] {
+            let e = io_error(decompress_chunk(&compressed, dict));
+            assert_eq!(e.to_string(), "Dictionary mismatch");
+        }
+    }
+
+    #[test]
+    fn a_truncated_chunk_fails() {
+        let (_, compressed) = compressed_payload();
+        for len in 0..compressed.len() {
+            let e =
+                io_error(decompress_chunk(&compressed[..len], dictionary()));
+            assert_eq!(e.kind(), ErrorKind::UnexpectedEof, "{len} bytes");
+        }
+    }
+
+    #[test]
+    fn bytes_after_the_frame_fail() {
+        let (_, mut compressed) = compressed_payload();
+        compressed.extend_from_slice(b"junk");
+
+        let e = io_error(decompress_chunk(&compressed, dictionary()));
+        assert_eq!(e.to_string(), "Unknown frame descriptor");
+    }
+
+    #[test]
+    fn a_flipped_bit_does_not_panic() {
+        // The frames carry no checksum, so most flips decode to different
+        // bytes without an error. This checks that none of them panic, and
+        // that zstd catches at least some.
+        let (_, compressed) = compressed_payload();
+        let mut failures = 0;
+        for index in 0..compressed.len() {
+            for bit in 0..8 {
+                let mut corrupted = compressed.clone();
+                corrupted[index] ^= 1 << bit;
+                if decompress_chunk(&corrupted, dictionary()).is_err() {
+                    failures += 1;
+                }
+            }
+        }
+        assert!(failures > 0, "no flipped bit was detected");
+    }
+}
