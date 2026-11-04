@@ -31,7 +31,7 @@ pub enum FFIStatus {
     SectionOutOfBounds = -20,
     UnsupportedHashType = -21,
     InvalidWindowSize = -22,
-    Cancelled = -23,
+    StatusCancelled = -23,
 }
 
 
@@ -89,7 +89,7 @@ impl From<SpriteShrinkError> for FFIStatus {
             ) => FFIStatus::SerializationMissingChunk,
 
             //A host callback asked to stop.
-            SpriteShrinkError::Cancelled => FFIStatus::Cancelled,
+            SpriteShrinkError::Cancelled => FFIStatus::StatusCancelled,
 
             //Catch all for any other error.
             _ => FFIStatus::InternalError,
@@ -193,7 +193,7 @@ mod tests {
         let ok: Result<(), SpriteShrinkError> = FFICallbackStatus::CallbackOk.into();
         ok.unwrap();
 
-        // A host that cancels through a callback gets Cancelled back.
+        // A host that cancels through a callback gets StatusCancelled back.
         let cancelled: Result<(), SpriteShrinkError> =
             FFICallbackStatus::Cancelled.into();
         assert_eq!(code(cancelled.unwrap_err()), -23);
