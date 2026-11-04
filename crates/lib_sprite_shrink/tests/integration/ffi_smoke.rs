@@ -32,7 +32,7 @@ use sprite_shrink::{
         ArchiveBuilderArgsU64, CreateFileManifestAndChunksArgs,
         FFICallbackStatus, FFIChunkDataArray, FFIChunkLocation, FFICompData,
         FFIFileData,
-        FFIFileManifestParent, FFIKeyArray, FFIParsedSSMC, FFISSAChunkMeta,
+        FFIFileManifestParent, FFIParsedSSMC, FFISSAChunkMeta,
         FFISerializedOutput, FFIStatus, FFITocEntry, FFIVecBytes,
         SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
         U128Bytes,
@@ -69,10 +69,6 @@ const FILES: [(&str, &[usize]); 3] = [
 /// through `user_data`.
 type ChunkStore<H> = HashMap<H, Vec<u8>>;
 
-fn chunk_store<H: Copy + Eq + Hash>(hashes: [H; 3]) -> ChunkStore<H> {
-    hashes.into_iter().zip(CHUNKS.map(<[u8]>::to_vec)).collect()
-}
-
 fn chunk_metadata<H: Copy>(hashes: [H; 3], chunks: &[usize])
     -> Vec<SSAChunkMeta<H>>
 {
@@ -103,17 +99,7 @@ where
         });
     }
 
-    let store = chunk_store(hashes);
-    let keys: Vec<H> = store.keys().copied().collect();
-
-    serialize_uncompressed_data(
-        &file_manifest,
-        &move || Ok::<_, SpriteShrinkError>(keys.clone()),
-        &move |hashes: &[H]| {
-            Ok(hashes.iter().map(|hash| store[hash].clone()).collect())
-        },
-    )
-    .unwrap()
+    serialize_uncompressed_data(&file_manifest)
 }
 
 /// The names and manifests a C host passes in for `FILES`. The pointers in
@@ -167,123 +153,21 @@ fn into_raw_parts<T>(vec: Vec<T>) -> (*mut T, usize, usize) {
     (vec.as_mut_ptr(), vec.len(), vec.capacity())
 }
 
-fn chunk_data_array(chunks: Vec<Vec<u8>>) -> FFIChunkDataArray {
-    let chunks: Vec<FFIVecBytes> = chunks
-        .into_iter()
-        .map(|chunk| {
-            let (ptr, len, cap) = into_raw_parts(chunk);
-            FFIVecBytes { ptr, len, cap }
-        })
-        .collect();
-    let (ptr, len, cap) = into_raw_parts(chunks);
-
-    FFIChunkDataArray { ptr, len, cap }
-}
-
-unsafe extern "C" fn get_keys_u64(
-    user_data: *mut c_void,
-    out_keys: *mut FFIKeyArray<u64>,
-) -> FFICallbackStatus {
-    // SAFETY: the tests pass a `ChunkStore<u64>` as `user_data`.
-    let store = unsafe { &*user_data.cast::<ChunkStore<u64>>() };
-    let (ptr, len, cap) = into_raw_parts(store.keys().copied().collect());
-
-    // SAFETY: the library passes a pointer that's valid for writes.
-    unsafe { out_keys.write(FFIKeyArray { ptr, len, cap }) };
-    FFICallbackStatus::CallbackOk
-}
-
-unsafe extern "C" fn get_chunks_u64(
-    user_data: *mut c_void,
-    hashes: *const u64,
-    hashes_len: usize,
-    out_chunks: *mut FFIChunkDataArray,
-) -> FFICallbackStatus {
-    // SAFETY: the tests pass a `ChunkStore<u64>` as `user_data`.
-    let store = unsafe { &*user_data.cast::<ChunkStore<u64>>() };
-    // SAFETY: the library passes `hashes_len` hashes.
-    let hashes = unsafe { slice::from_raw_parts(hashes, hashes_len) };
-    let chunks = hashes.iter().map(|hash| store[hash].clone()).collect();
-
-    // SAFETY: the library passes a pointer that's valid for writes.
-    unsafe { out_chunks.write(chunk_data_array(chunks)) };
-    FFICallbackStatus::CallbackOk
-}
-
-unsafe extern "C" fn get_keys_u128(
-    user_data: *mut c_void,
-    out_keys: *mut FFIKeyArray<U128Bytes>,
-) -> FFICallbackStatus {
-    // SAFETY: the tests pass a `ChunkStore<u128>` as `user_data`.
-    let store = unsafe { &*user_data.cast::<ChunkStore<u128>>() };
-    let keys = store.keys().map(|&hash| U128Bytes::from(hash)).collect();
-    let (ptr, len, cap) = into_raw_parts(keys);
-
-    // SAFETY: the library passes a pointer that's valid for writes.
-    unsafe { out_keys.write(FFIKeyArray { ptr, len, cap }) };
-    FFICallbackStatus::CallbackOk
-}
-
-unsafe extern "C" fn get_chunks_u128(
-    user_data: *mut c_void,
-    hashes: *const u8,
-    hashes_len: usize,
-    out_chunks: *mut FFIChunkDataArray,
-) -> FFICallbackStatus {
-    // SAFETY: the tests pass a `ChunkStore<u128>` as `user_data`.
-    let store = unsafe { &*user_data.cast::<ChunkStore<u128>>() };
-    // SAFETY: the library passes `hashes_len` 16-byte hashes.
-    let bytes = unsafe { slice::from_raw_parts(hashes, hashes_len * 16) };
-    let chunks = bytes
-        .as_chunks::<16>()
-        .0
-        .iter()
-        .map(|hash| store[&u128::from_le_bytes(*hash)].clone())
-        .collect();
-
-    // SAFETY: the library passes a pointer that's valid for writes.
-    unsafe { out_chunks.write(chunk_data_array(chunks)) };
-    FFICallbackStatus::CallbackOk
-}
-
-unsafe extern "C" fn fail_chunks_u64(
-    _user_data: *mut c_void,
-    _hashes: *const u64,
-    _hashes_len: usize,
-    _out_chunks: *mut FFIChunkDataArray,
-) -> FFICallbackStatus {
-    FFICallbackStatus::Error
-}
-
-unsafe extern "C" fn fail_chunks_u128(
-    _user_data: *mut c_void,
-    _hashes: *const u8,
-    _hashes_len: usize,
-    _out_chunks: *mut FFIChunkDataArray,
-) -> FFICallbackStatus {
-    FFICallbackStatus::Error
-}
-
 /// Runs `serialize_uncompressed_data_u64` on `input`, after `edit` has
 /// changed the arguments.
 fn ffi_serialize_u64(
     input: &HostInput<u64>,
-    store: &mut ChunkStore<u64>,
     edit: impl FnOnce(&mut SerializeUncompressedDataArgsU64),
 ) -> (FFIStatus, *mut FFISerializedOutput<u64>) {
     let mut args = SerializeUncompressedDataArgsU64 {
         manifest_array_ptr: input.manifests.as_ptr(),
         filenames: input.name_ptrs.as_ptr(),
         manifest_len: input.manifests.len(),
-        user_data: ptr::from_mut(store).cast(),
-        get_keys_cb: get_keys_u64,
-        get_chunks_cb: get_chunks_u64,
     };
     edit(&mut args);
     let mut out = ptr::null_mut();
 
-    // SAFETY: `args` points into `input` and `store`, which outlive the
-    // call.
+    // SAFETY: `args` points into `input`, which outlives the call.
     let status = unsafe {
         serialize_uncompressed_data_u64(&raw const args, &raw mut out)
     };
@@ -294,22 +178,17 @@ fn ffi_serialize_u64(
 /// changed the arguments.
 fn ffi_serialize_u128(
     input: &HostInput<U128Bytes>,
-    store: &mut ChunkStore<u128>,
     edit: impl FnOnce(&mut SerializeUncompressedDataArgsU128),
 ) -> (FFIStatus, *mut FFISerializedOutput<U128Bytes>) {
     let mut args = SerializeUncompressedDataArgsU128 {
         manifest_array_ptr: input.manifests.as_ptr(),
         filenames: input.name_ptrs.as_ptr(),
         manifest_len: input.manifests.len(),
-        user_data: ptr::from_mut(store).cast(),
-        get_keys_cb: get_keys_u128,
-        get_chunks_cb: get_chunks_u128,
     };
     edit(&mut args);
     let mut out = ptr::null_mut();
 
-    // SAFETY: `args` points into `input` and `store`, which outlive the
-    // call.
+    // SAFETY: `args` points into `input`, which outlives the call.
     let status = unsafe {
         serialize_uncompressed_data_u128(&raw const args, &raw mut out)
     };
@@ -394,11 +273,6 @@ where
 {
     // SAFETY: the caller guarantees `out` is valid.
     let out = unsafe { &*out };
-    // SAFETY: the library wrote `ser_chunk_index_len` entries at
-    // `ser_chunk_index_ptr`, and `out` hasn't been freed.
-    let chunk_index = unsafe {
-        slice::from_raw_parts(out.ser_chunk_index_ptr, out.ser_chunk_index_len)
-    };
     // SAFETY: the library wrote `sorted_hashes_len` hashes at
     // `sorted_hashes_ptr`, and `out` hasn't been freed.
     let sorted_hashes = unsafe {
@@ -414,28 +288,8 @@ where
         ser_file_manifest: unsafe {
             read_manifests(out.ser_manifest_ptr, out.ser_manifest_len)
         },
-        chunk_index: chunk_index
-            .iter()
-            .map(|entry| {
-                (entry.hash.into(), ChunkLocation {
-                    offset: entry.data.offset,
-                    compressed_length: entry.data.length,
-                })
-            })
-            .collect(),
         sorted_hashes: sorted_hashes.iter().map(|&hash| hash.into()).collect(),
     }
-}
-
-fn sorted_index<H: Copy + Ord>(index: &HashMap<H, ChunkLocation>)
-    -> Vec<(H, u64, u32)>
-{
-    let mut entries: Vec<_> = index
-        .iter()
-        .map(|(&hash, loc)| (hash, loc.offset, loc.compressed_length))
-        .collect();
-    entries.sort_unstable();
-    entries
 }
 
 fn assert_matches_rust<H>(ffi: &SerializedData<H>, rust: &SerializedData<H>)
@@ -444,7 +298,6 @@ where
 {
     assert_eq!(ffi.archive_toc, rust.archive_toc);
     assert_eq!(encode(&ffi.ser_file_manifest), encode(&rust.ser_file_manifest));
-    assert_eq!(sorted_index(&ffi.chunk_index), sorted_index(&rust.chunk_index));
     assert_eq!(ffi.sorted_hashes, rust.sorted_hashes);
 
     // a.bin is AAAA + CCCCC and b.bin is AAAA + BBB.
@@ -464,9 +317,8 @@ fn status_code(status: FFIStatus) -> i32 {
 fn serialize_u64_matches_rust_api() {
     let hashes = [1_u64, u64::MAX, 7];
     let input = host_input::<u64, u64>(hashes);
-    let mut store = chunk_store(hashes);
 
-    let (status, out) = ffi_serialize_u64(&input, &mut store, |_| {});
+    let (status, out) = ffi_serialize_u64(&input, |_| {});
     assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
 
     // SAFETY: `out` came from the successful call above.
@@ -482,9 +334,8 @@ fn serialize_u128_matches_rust_api() {
     // Hashes that differ in their high bytes, so a byte order mix-up shows.
     let hashes = [1_u128, u128::MAX, 1 << 120];
     let input = host_input::<u128, U128Bytes>(hashes);
-    let mut store = chunk_store(hashes);
 
-    let (status, out) = ffi_serialize_u128(&input, &mut store, |_| {});
+    let (status, out) = ffi_serialize_u128(&input, |_| {});
     assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
 
     // SAFETY: `out` came from the successful call above.
@@ -498,10 +349,9 @@ fn serialize_u128_matches_rust_api() {
 #[test]
 fn serialize_rejects_null_filenames() {
     let hashes = [1_u64, 2, 3];
-    let mut store = chunk_store(hashes);
 
     let input = host_input::<u64, u64>(hashes);
-    let (status, out) = ffi_serialize_u64(&input, &mut store, |args| {
+    let (status, out) = ffi_serialize_u64(&input, |args| {
         args.filenames = ptr::null();
     });
     assert_eq!(status_code(status), status_code(FFIStatus::NullArgument));
@@ -509,7 +359,7 @@ fn serialize_rejects_null_filenames() {
 
     let mut input = host_input::<u64, u64>(hashes);
     input.name_ptrs[1] = ptr::null();
-    let (status, out) = ffi_serialize_u64(&input, &mut store, |_| {});
+    let (status, out) = ffi_serialize_u64(&input, |_| {});
     assert_eq!(status_code(status), status_code(FFIStatus::NullArgument));
     assert!(out.is_null());
 }
@@ -517,11 +367,10 @@ fn serialize_rejects_null_filenames() {
 #[test]
 fn serialize_rejects_duplicate_filename() {
     let hashes = [1_u64, 2, 3];
-    let mut store = chunk_store(hashes);
     let mut input = host_input::<u64, u64>(hashes);
     input.name_ptrs[2] = input.name_ptrs[0];
 
-    let (status, out) = ffi_serialize_u64(&input, &mut store, |_| {});
+    let (status, out) = ffi_serialize_u64(&input, |_| {});
 
     assert_eq!(status_code(status), status_code(FFIStatus::DuplicateFilename));
     assert!(out.is_null());
@@ -530,38 +379,13 @@ fn serialize_rejects_duplicate_filename() {
 #[test]
 fn serialize_rejects_filename_that_is_not_utf8() {
     let hashes = [1_u64, 2, 3];
-    let mut store = chunk_store(hashes);
     let invalid = CString::new([0xff, 0xfe]).unwrap();
     let mut input = host_input::<u64, u64>(hashes);
     input.name_ptrs[0] = invalid.as_ptr();
 
-    let (status, out) = ffi_serialize_u64(&input, &mut store, |_| {});
+    let (status, out) = ffi_serialize_u64(&input, |_| {});
 
     assert_eq!(status_code(status), status_code(FFIStatus::InvalidString));
-    assert!(out.is_null());
-}
-
-/// A failed chunk callback is reported as the host's error, not as a
-/// missing chunk, and the u128 version no longer ignores the status and
-/// reads the array the callback never filled in.
-#[test]
-fn serialize_reports_chunk_callback_error() {
-    let hashes = [1_u64, 2, 3];
-    let input = host_input::<u64, u64>(hashes);
-    let mut store = chunk_store(hashes);
-    let (status, out) = ffi_serialize_u64(&input, &mut store, |args| {
-        args.get_chunks_cb = fail_chunks_u64;
-    });
-    assert_eq!(status_code(status), status_code(FFIStatus::InternalError));
-    assert!(out.is_null());
-
-    let hashes = [1_u128, 2, 3];
-    let input = host_input::<u128, U128Bytes>(hashes);
-    let mut store = chunk_store(hashes);
-    let (status, out) = ffi_serialize_u128(&input, &mut store, |args| {
-        args.get_chunks_cb = fail_chunks_u128;
-    });
-    assert_eq!(status_code(status), status_code(FFIStatus::InternalError));
     assert!(out.is_null());
 }
 
@@ -807,8 +631,7 @@ where
 fn build_ssmc_prefix_u64_matches_rust_api() {
     let hashes = [1_u64, u64::MAX, 7];
     let input = host_input::<u64, u64>(hashes);
-    let mut store = chunk_store(hashes);
-    let (status, ser) = ffi_serialize_u64(&input, &mut store, |_| {});
+    let (status, ser) = ffi_serialize_u64(&input, |_| {});
     assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
 
     // SAFETY: `ser` came from the successful call above.
@@ -829,8 +652,7 @@ fn build_ssmc_prefix_u64_matches_rust_api() {
 fn build_ssmc_prefix_u128_matches_rust_api() {
     let hashes = [1_u128, u128::MAX, 1 << 120];
     let input = host_input::<u128, U128Bytes>(hashes);
-    let mut store = chunk_store(hashes);
-    let (status, ser) = ffi_serialize_u128(&input, &mut store, |_| {});
+    let (status, ser) = ffi_serialize_u128(&input, |_| {});
     assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
 
     // SAFETY: `ser` came from the successful call above.
@@ -967,9 +789,16 @@ where
     H: Copy + Ord + Hash + Display + Encode + Send + Sync + 'static,
 {
     let ser = rust_serialize(hashes);
-    // Encoded as pairs, which decode as the map the parser reads.
-    let chunk_index: Vec<(H, ChunkLocation)> =
-        ser.chunk_index.into_iter().collect();
+    // Encoded as pairs, which decode as the map the parser reads. The
+    // parsers never read the data, so any contiguous locations will do.
+    let chunk_index: Vec<(H, ChunkLocation)> = ser
+        .sorted_hashes
+        .iter()
+        .zip(0_u64..)
+        .map(|(&hash, i)| {
+            (hash, ChunkLocation { offset: i * 10, compressed_length: 10 })
+        })
+        .collect();
     let enc_chunk_index = encode(&chunk_index);
     let comp = CompressionResult {
         enc_chunk_index_size: enc_chunk_index.len() as u64,
@@ -1341,7 +1170,6 @@ fn rust_round_trip_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     }
 
     let total_size = store.values().map(|chunk| chunk.len() as u64).sum();
-    let keys: Vec<u64> = store.keys().copied().collect();
     let store = Arc::new(store);
     let get_chunks = move |hashes: &[u64]| {
         Ok::<_, SpriteShrinkError>(
@@ -1349,12 +1177,7 @@ fn rust_round_trip_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
         )
     };
 
-    let ser = serialize_uncompressed_data(
-        &file_manifest,
-        &move || Ok::<_, SpriteShrinkError>(keys.clone()),
-        &get_chunks.clone(),
-    )
-    .unwrap();
+    let ser = serialize_uncompressed_data(&file_manifest);
 
     let written = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&written);
@@ -1538,13 +1361,10 @@ fn ffi_round_trip_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
         manifest_array_ptr: manifests.as_ptr(),
         filenames: name_ptrs.as_ptr(),
         manifest_len: manifests.len(),
-        user_data: ptr::from_mut(&mut host.chunks).cast(),
-        get_keys_cb: get_keys_u64,
-        get_chunks_cb: get_chunks_u64,
     };
     let mut ser = ptr::null_mut();
-    // SAFETY: `ser_args` points into `manifests`, `name_ptrs` and
-    // `host.chunks`, which outlive the call, and `ser` is a local.
+    // SAFETY: `ser_args` points into `manifests` and `name_ptrs`, which
+    // outlive the call, and `ser` is a local.
     let status = unsafe {
         serialize_uncompressed_data_u64(&raw const ser_args, &raw mut ser)
     };

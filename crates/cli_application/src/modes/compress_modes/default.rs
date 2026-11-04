@@ -163,19 +163,6 @@ where
     process_file_in_memory function.*/
     let process_threads = args.threads.map_or(0, |count| count);
 
-    //Callback for getting all keys (hashes) in cache
-    let key_ret_cb = {
-        let cache_clone = Arc::clone(&temp_cache);
-        let running_clone = Arc::clone(&running);
-        move || -> Result<Vec<H>, CliError> {
-            if !running_clone.load(Ordering::SeqCst) {
-                return Err(CliError::Cancelled);
-            }
-
-            cache_clone.get_keys()
-        }
-    };
-
     //Callback for getting a list of chunks from the provided list of hashes
     let chunk_ret_cb = Arc::new({
         let cache_clone = Arc::clone(&temp_cache);
@@ -284,11 +271,7 @@ where
         veri_hashes = _temp_data.veri_hashes;
 
         /*Serialize the data for later using it for verifying the files. */
-        let temp_serialized_data = serialize_uncompressed_data(
-                &file_manifest,
-                &key_ret_cb,
-                chunk_ret_cb.as_ref()
-            )?;
+        let temp_serialized_data = serialize_uncompressed_data(&file_manifest);
 
         //Calc the sum of all chunks in cache
         chunk_sum = temp_cache.get_tot_data_size();
@@ -335,18 +318,11 @@ where
         How many chunks the file requires.
         A sorted vector contain chunk location data. Sorted offset*/
 
-    /*chunk_index: Stores the index of the chunk data associated with a hash.
-    Key is the hash, value is the index location.*/
-
     /*sorted_hashes: Sorted vector that stores all chunk hashes.*/
 
     /*Prepares and serializes all data for the final archive. See above for
     each variable in the output tuple.*/
-    let serialized_data = serialize_uncompressed_data(
-            &file_manifest,
-            &key_ret_cb,
-            chunk_ret_cb.as_ref()
-        )?;
+    let serialized_data = serialize_uncompressed_data(&file_manifest);
 
     /*Drop file_manifest since it is no longer needed and was only used for
     verifying files.*/
@@ -436,10 +412,6 @@ where
     drop(veri_hashes);
 
     debug!("File verification passed!");
-
-    /*chunk index was storing non compressed data_store locations and is no
-    longer needed.*/
-    drop(serialized_data.chunk_index);
 
     //Define progress bar to be used by callback
     let progress_bar = Arc::new(Mutex::new(None));

@@ -516,18 +516,13 @@ impl<H> SeekMetadata<H> {
 ///   per file in the archive. The vector is sorted by filename and each
 ///   file’s `chunk_metadata` slice is sorted by the original byte offset,
 ///   making it easy to rebuild files during extraction.
-/// * `chunk_index` – A map from each chunk hash (`H`) to its location
-///   (`ChunkLocation`) within the final data blob. This index is produced by
-///   `serialize_store` and is required for locating chunks when reading an
-///   archive.
 /// * `sorted_hashes` – The list of all unique chunk hashes, sorted in a
-///   deterministic order. The order is used both for generating `chunk_index`
-///   and for the later compression step that writes the actual chunk bytes.
+///   deterministic order. The compression step writes the chunks in this
+///   order.
 #[derive(Debug)]
 pub struct SerializedData<H>{
     pub ser_file_manifest: Vec<FileManifestParent<H>>,
     pub archive_toc: Vec<SSMCTocEntry>,
-    pub chunk_index: HashMap<H, ChunkLocation>,
     pub sorted_hashes: Vec<H>,
 }
 
@@ -537,24 +532,20 @@ pub struct SerializedData<H>{
 /// instance without having to manually initialise each field. The generic type
 /// `H` represents the hash type used throughout the archive and does not need
 /// to implement `Default` because the default instance only contains empty
-/// collections (`Vec` and `HashMap`).
+/// collections.
 ///
 /// # Fields
 /// * `ser_file_manifest`: an empty `Vec<FileManifestParent<H>>`.
 ///   This will later hold a sorted list of file manifests needed to
 ///   reconstruct a file.
-/// * `chunk_index`: an empty `HashMap<H, ChunkLocation>`.
-///   The index maps each chunk hash to its location in the final data blob; it
-///   is filled by `serialize_store` once the chunk data is known.
 /// * `sorted_hashes`: an empty `Vec<H>`.
 ///   This vector will be populated with all unique chunk hashes in a
-///   deterministic order before the chunk index is built.
+///   deterministic order.
 impl<H> Default for SerializedData<H> {
     fn default() -> Self {
         SerializedData {
             ser_file_manifest: Vec::new(),
             archive_toc: Vec::new(),
-            chunk_index: HashMap::new(),
             sorted_hashes: Vec::new(),
         }
     }

@@ -5,7 +5,6 @@
 
 use std::{
     ffi::CStr,
-    os::raw::c_void,
     slice
 };
 
@@ -17,10 +16,10 @@ use crate::ffi::ffi_error_handling::{
     FFIResult
 };
 use crate::ffi::ffi_types::{
-    FFIChunkDataArray, FFIChunkIndexEntry, FFICompData,
+    FFICompData,
     FFIFileManifestParent, FFIFileManifestParentU64,
     FFIFileManifestParentU128,
-    FFIKeyArray, FFISerializedOutput,
+    FFISerializedOutput,
     FFISerializedOutputU64, FFISerializedOutputU128,
     SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
     FFITocEntry, FFIVecBytes, U128Bytes
@@ -29,7 +28,6 @@ use crate::ffi::ffi_ownership::{
     free_manifests, free_toc, manifests_into_ffi, toc_into_ffi,
     vec_into_raw_parts
 };
-use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{
     HASH_TYPE_XXH3_64,HASH_TYPE_XXH3_128,
     CompressionResult, FileManifestParent, SerializedData, SSMCTocEntry,
@@ -106,13 +104,6 @@ where
     let manifests: Vec<FFIFileManifestParent<F>> =
         manifests_into_ffi(data.ser_file_manifest);
 
-    let chunk_index: Vec<FFIChunkIndexEntry<F>> = data.chunk_index
-        .into_iter()
-        .map(|(hash, location)| {
-            FFIChunkIndexEntry::from((hash.into(), location))
-        })
-        .collect();
-
     let sorted_hashes: Vec<F> = data.sorted_hashes
         .into_iter()
         .map(F::from)
@@ -121,8 +112,6 @@ where
     let (toc_ptr, toc_len, toc_cap) = vec_into_raw_parts(toc);
     let (ser_manifest_ptr, ser_manifest_len, ser_manifest_cap) =
         vec_into_raw_parts(manifests);
-    let (ser_chunk_index_ptr, ser_chunk_index_len, ser_chunk_index_cap) =
-        vec_into_raw_parts(chunk_index);
     let (sorted_hashes_ptr, sorted_hashes_len, sorted_hashes_cap) =
         vec_into_raw_parts(sorted_hashes);
 
@@ -133,9 +122,6 @@ where
         ser_manifest_ptr,
         ser_manifest_len,
         ser_manifest_cap,
-        ser_chunk_index_ptr,
-        ser_chunk_index_len,
-        ser_chunk_index_cap,
         sorted_hashes_ptr,
         sorted_hashes_len,
         sorted_hashes_cap,
@@ -145,16 +131,14 @@ where
 /// Serialises uncompressed sprite data using 64bit hash keys.
 ///
 /// Function for obtaining a `FFISerializedOutputU64` containing a table of
-/// contents, a manifest, a chunk index and a sorted hash list. The function
-/// validates its arguments and then forwards the work to
-/// `serialize_uncompressed_data`.
+/// contents, a manifest and a sorted hash list. The function validates its
+/// arguments and then forwards the work to `serialize_uncompressed_data`.
 ///
 /// # Parameters
 ///
 /// * `args` – A pointer to a fully‑initialised
 ///   `SerializeUncompressedDataArgsU64` structure. The structure supplies the
-///   manifest, user data and the two callbacks required for the serialisation
-///   process.
+///   manifests and their filenames.
 /// * `out_ptr` – A mutable pointer that will be populated with a pointer to a
 ///   newly allocated `FFISerializedOutputU64` on success. The caller is
 ///   responsible for freeing this output via the matching
@@ -172,9 +156,6 @@ where
 ///   of the call.
 /// * `args.filenames` must be a valid, non‑null pointer to an array of
 ///   `args.manifest_len` null-terminated strings, one per manifest.
-/// * The callbacks contained in `args` (`get_keys_cb` and `get_chunks_cb`) are
-///   `unsafe extern "C"` functions; they must obey the contract described in
-///   `SerializeUncompressedDataArgsU64`.
 ///
 /// # Return value
 ///
@@ -186,9 +167,6 @@ where
 ///   filename array inside `args`, or one of the filenames was null.
 /// * `FFIResult::InvalidString` – A filename isn't valid UTF-8.
 /// * `FFIResult::DuplicateFilename` – Two manifests have the same filename.
-/// * `FFIResult::SerializationMissingChunk` – The chunk callback didn't
-///   return data for a hash in the manifests.
-/// * Other error variants if, for example, a callback fails.
 #[unsafe(no_mangle)]
 #[allow(clippy::double_must_use)]
 #[must_use]
@@ -223,85 +201,8 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
         Err(status) => return status,
     };
 
-    //Wrap C function pointers into Rust closures for the core library.
-    let get_chunks_cb = args_int.get_chunks_cb;
-    let get_keys_cb = args_int.get_keys_cb;
-    let user_data_addr = args_int.user_data as usize;
-
-    let get_keys_closure = || -> Result<Vec<u64>, SpriteShrinkError> {
-        let mut ffi_keys_array = FFIKeyArray {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        };
-
-        let status = unsafe {
-            get_keys_cb(
-                user_data_addr as *mut c_void,
-                &mut ffi_keys_array, //Pass a pointer to our struct
-            )
-        };
-        Result::from(status)?;
-        //Take ownership of the C-allocated array
-        let keys = unsafe {
-            Vec::from_raw_parts(
-                ffi_keys_array.ptr,
-                ffi_keys_array.len,
-                ffi_keys_array.cap
-            )
-        };
-
-        Ok(keys)
-    };
-
-    let get_chunks_closure = move |hashes: &[u64]| -> Result<
-        Vec<Vec<u8>>,
-        SpriteShrinkError>
-    {
-        let mut ffi_chunks_array = FFIChunkDataArray {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0
-        };
-        let status = unsafe {
-            get_chunks_cb(
-                user_data_addr as *mut c_void,
-                hashes.as_ptr(),
-                hashes.len(),
-                & mut ffi_chunks_array
-            )
-        };
-        Result::from(status)?;
-        let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len
-        )};
-
-        let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
-        }).collect();
-
-        let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len,
-            ffi_chunks_array.cap)};
-        Ok(chunks)
-    };
-
     //Call the core Rust serialization logic.
-    let serialized_data = match serialize_uncompressed_data::<
-        _,
-        SpriteShrinkError,
-        u64,
-        _
-    >(
-        &file_manifest,
-        &get_keys_closure,
-        &get_chunks_closure
-    ) {
-        Ok(data) => data,
-        Err(e) => return e.into(),
-    };
+    let serialized_data = serialize_uncompressed_data(&file_manifest);
 
     let output = match into_ffi_output::<u64, u64>(serialized_data) {
         Ok(output) => output,
@@ -319,16 +220,14 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 /// Serialises uncompressed sprite data using 128bit hash keys.
 ///
 /// Function for obtaining a `FFISerializedOutputU128` containing a table of
-/// contents, a manifest, a chunk index and a sorted hash list. The function
-/// validates its arguments and then forwards the work to
-/// `serialize_uncompressed_data`.
+/// contents, a manifest and a sorted hash list. The function validates its
+/// arguments and then forwards the work to `serialize_uncompressed_data`.
 ///
 /// # Parameters
 ///
 /// * `args`: A pointer to a fully‑initialised
 ///   `SerializeUncompressedDataArgsU128` structure. The structure supplies the
-///   manifest, user data and the two callbacks required for the serialisation
-///   process.
+///   manifests and their filenames.
 /// * `out_ptr`: A mutable pointer that will be populated with a pointer to a
 ///   newly allocated `FFISerializedOutputU128` on success. The caller is
 ///   responsible for freeing this output via the matching
@@ -346,9 +245,6 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 ///   of the call.
 /// * `args.filenames` must be a valid, non‑null pointer to an array of
 ///   `args.manifest_len` null-terminated strings, one per manifest.
-/// * The callbacks contained in `args` (`get_keys_cb` and `get_chunks_cb`) are
-///   `unsafe extern "C"` functions; they must obey the contract described in
-///   `SerializeUncompressedDataArgsU128`.
 ///
 /// # Return value
 ///
@@ -360,9 +256,6 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 ///   filename array inside `args`, or one of the filenames was null.
 /// * `FFIResult::InvalidString` – A filename isn't valid UTF-8.
 /// * `FFIResult::DuplicateFilename` – Two manifests have the same filename.
-/// * `FFIResult::SerializationMissingChunk` – The chunk callback didn't
-///   return data for a hash in the manifests.
-/// * Other error variants if, for example, a callback fails.
 #[unsafe(no_mangle)]
 #[allow(clippy::double_must_use)]
 #[must_use]
@@ -397,93 +290,8 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
         Err(status) => return status,
     };
 
-    //Wrap C function pointers into Rust closures for the core library.
-    let get_chunks_cb = args_int.get_chunks_cb;
-    let get_keys_cb = args_int.get_keys_cb;
-    let user_data_addr = args_int.user_data as usize;
-
-    let get_keys_closure = || -> Result<Vec<u128>, SpriteShrinkError> {
-        let mut ffi_keys_array = FFIKeyArray::<U128Bytes> {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
-        };
-
-        let status = unsafe {
-            get_keys_cb(
-                user_data_addr as *mut c_void,
-                &mut ffi_keys_array, //Pass a pointer to the struct
-            )
-        };
-        Result::from(status)?;
-
-        let keys_bytes = unsafe {
-            Vec::from_raw_parts(
-                ffi_keys_array.ptr,
-                ffi_keys_array.len,
-                ffi_keys_array.cap)
-        };
-
-        let keys = keys_bytes
-            .iter()
-            .map(|bytes| (*bytes).into())
-            .collect();
-
-        Ok(keys)
-    };
-
-    let get_chunks_closure = move |
-        hashes: &[u128]
-    | -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
-        let mut ffi_chunks_array = FFIChunkDataArray {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0
-        };
-        let ffi_hash_bytes: Vec<u8> = hashes
-            .iter()
-            .flat_map(|h| h.to_le_bytes())
-            .collect();
-
-        let status = unsafe {
-            (get_chunks_cb)(
-                user_data_addr as *mut c_void,
-                ffi_hash_bytes.as_ptr(),
-                hashes.len(),
-                & mut ffi_chunks_array
-            )};
-        Result::from(status)?;
-
-        let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len
-        )};
-
-        let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
-        }).collect();
-
-        let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len,
-            ffi_chunks_array.cap)};
-        Ok(chunks)
-    };
-
-    //Pass converted data to internal library Rust logic.
-    let serialized_data = match serialize_uncompressed_data::<
-        _,
-        SpriteShrinkError,
-        u128,
-        _
-    >(
-        &file_manifest,
-        &get_keys_closure,
-        &get_chunks_closure
-    ) {
-        Ok(data) => data,
-        Err(e) => return e.into(),
-    };
+    //Call the core Rust serialization logic.
+    let serialized_data = serialize_uncompressed_data(&file_manifest);
 
     let output = match into_ffi_output::<u128, U128Bytes>(serialized_data) {
         Ok(output) => output,
@@ -528,7 +336,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
 ///   (via `Box::into_raw`).  Passing a null or invalid pointer
 ///   results in undefined behaviour.
 /// * The function assumes that all inner pointers (`toc_ptr`,
-///   `ser_manifest_ptr`, `ser_chunk_index_ptr`, `sorted_hashes_ptr`) and
+///   `ser_manifest_ptr`, `sorted_hashes_ptr`) and
 ///   the embedded C
 ///   strings and `FFISSAChunkMeta` arrays were allocated by the
 ///   serialization routine and have not yet been freed.
@@ -548,10 +356,6 @@ unsafe fn free_serialized_output_internal<H>(
             output.ser_manifest_cap,
         );
 
-        let _ = Vec::from_raw_parts(
-            output.ser_chunk_index_ptr,
-            output.ser_chunk_index_len,
-            output.ser_chunk_index_cap);
         let _ = Vec::from_raw_parts(
             output.sorted_hashes_ptr as *mut H,
             output.sorted_hashes_len,

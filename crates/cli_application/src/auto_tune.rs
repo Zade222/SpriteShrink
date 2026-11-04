@@ -177,20 +177,6 @@ where
 
         let (file_data, temp_cache) = processor_fn(current_window_size)?;
 
-        /*Callback for getting all keys(hashes) from temporary
-        cache*/
-        let key_ret_cb = {
-            let cache_clone = Arc::clone(&temp_cache);
-            let running_clone = Arc::clone(running);
-            move || -> Result<Vec<H>, CliError> {
-                if !running_clone.load(Ordering::SeqCst) {
-                    return Err(CliError::Cancelled);
-                }
-
-                cache_clone.get_keys()
-            }
-        };
-
         /*Callback for getting one or more chunks from the temporary
         cache*/
         let chunk_ret_cb = Arc::new({
@@ -205,11 +191,8 @@ where
             }
         });
 
-        let serialized_data = serialize_uncompressed_data(
-            &file_data.file_manifest,
-            &key_ret_cb,
-            chunk_ret_cb.as_ref()
-        )?;
+        let serialized_data =
+            serialize_uncompressed_data(&file_data.file_manifest);
 
         let total_data_size = temp_cache.get_tot_data_size();
 

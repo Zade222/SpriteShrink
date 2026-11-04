@@ -74,7 +74,6 @@ fn build_archive<H: TestHash>(files: &[FileData], hash_type: u8) -> Built {
     }
 
     let total_size = store.values().map(|chunk| chunk.len() as u64).sum();
-    let keys: Vec<H> = store.keys().copied().collect();
     // The callbacks must be `'static`, so they share the store through an
     // `Arc` rather than borrowing it.
     let store = Arc::new(store);
@@ -84,12 +83,7 @@ fn build_archive<H: TestHash>(files: &[FileData], hash_type: u8) -> Built {
         )
     };
 
-    let ser = serialize_uncompressed_data(
-        &file_manifest,
-        &move || Ok::<_, SpriteShrinkError>(keys.clone()),
-        &get_chunks.clone(),
-    )
-    .unwrap();
+    let ser = serialize_uncompressed_data(&file_manifest);
 
     // The write callback must be `'static` too, so the test keeps a second
     // handle to the buffer to read it back after `build`.

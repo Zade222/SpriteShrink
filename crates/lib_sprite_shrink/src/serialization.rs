@@ -6,18 +6,19 @@
 //! chunk index, and the compressed data store, ensuring all components
 //! are correctly ordered and formatted.
 
-use std::collections::{HashMap, HashSet};
+use std::{
+    cmp::Reverse,
+    collections::{HashMap, HashSet},
+};
 
 use bitcode::{Encode, encode};
 use dashmap::DashMap;
 use thiserror::Error;
 
-use crate::lib_error_handling::{
-    IsCancelled, SpriteShrinkError
-};
+use crate::lib_error_handling::SpriteShrinkError;
 use crate::lib_structs::{
     ALGORITHM_ZSTD, SSMC_UID,
-    ChunkLocation, CompressionResult, FileHeader, FileManifestParent,
+    CompressionResult, FileHeader, FileManifestParent,
     SerializedData, SSMCFormatData, SSMCTocEntry
 };
 
@@ -63,98 +64,12 @@ where
     input_dash.iter().map(|entry| entry.value().clone()).collect()
 }
 
-/// Serializes a chunk store and generates a corresponding index.
-///
-/// This function is responsible for creating a `chunk_index`, which maps each
-/// unique data chunk's hash to its precise offset and length within a
-/// conceptual, serialized data block. Rather than building the entire data
-/// block in memory, this function calculates the layout and returns the index,
-/// making it memory-efficient for large datasets.
-///
-/// The function operates on data retrieved via a callback
-/// (`data_store_get_chunk_cb`). This design decouples the serialization logic
-/// from the underlying storage mechanism, allowing the caller to supply chunk
-/// data from various sources, such as an in-memory `HashMap`, a thread-safe
-/// `DashMap`, or a persistent key-value store like a database.
-///
-/// # Arguments
-///
-/// * `sorted_hashes`: A slice of hashes that have been sorted into a
-///   deterministic order. This consistent ordering is critical for ensuring
-///   that the generated chunk index and its offsets are correct and
-///   reproducible.
-/// * `data_store_get_chunk_cb`: A callback function that the serializer uses
-///   to fetch the raw byte data for a given set of hashes. It must return a
-///   `Vec<Vec<u8>>` where the data for each chunk is in the same order as the
-///   input hashes.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(HashMap<H, ChunkLocation>)` on success. The `HashMap` is the complete
-///   chunk index, where each key is a chunk's hash and the value is its
-///   `ChunkLocation` (offset and length) in the final serialized data blob.
-/// - `Err(SerializationError::SerializationMissingChunkError)` if the
-///   `data_store_get_chunk_cb` returns empty data for any requested hash,
-///   which indicates that a required chunk is missing from the data store.
-///
-/// # Type Parameters
-///
-/// * `D`: The type of the `data_store_get_chunk_cb` callback. It must be a
-///   closure that implements `Fn(&[H]) -> Vec<Vec<u8>>`.
-/// * `H`: The generic hash type used for identifying chunks. It must be
-///   `Copy`,
-///   `Eq`, `Hash`, and `Display`.
-pub fn serialize_store<D, E, H>(
-    sorted_hashes: &[H],
-    data_store_get_chunk_cb: &D
-) -> Result<HashMap<H, ChunkLocation>, SerializationError>
-where
-    D: Fn(&[H]) -> Result<Vec<Vec<u8>>, E>,
-    E: std::error::Error + Send + Sync + 'static,
-    H: Copy + Eq + std::hash::Hash + std::fmt::Display,
-{
-
-    let (chunk_index, _offset) = sorted_hashes.iter().try_fold(
-        (
-            HashMap::with_capacity(sorted_hashes.len()),
-            0u64, //Current_offset
-        ),
-        |(mut index_map, mut offset), hash| {
-            let data_entry = &data_store_get_chunk_cb(&[*hash])
-            .map_err(|e| SerializationError::External(e.to_string()))?
-            .remove(0);
-
-            if !data_entry.is_empty() {
-                let data = data_entry;
-                let data_len = data.len() as u64;
-
-                index_map.insert(
-                    *hash,
-                    ChunkLocation {
-                        offset,
-                        compressed_length: data_len as u32,
-                    },
-                );
-
-                offset += data_len;
-
-                Ok((index_map, offset))
-            } else {
-                //If a chunk is missing, return an error
-                Err(SerializationError::MissingChunk(hash.to_string()))
-            }
-        },
-    )?;
-
-    Ok(chunk_index)
-}
-
 /// Prepares and serializes all data necessary for the final archive assembly.
 ///
 /// This function acts as a final preparation step before the archive is
-/// constructed. It takes the collected file metadata and the unique data
-/// chunks and organizes them into a consistent, serializable format.
+/// constructed. It takes the collected file metadata and organizes it into a
+/// consistent, serializable format. It only reads the manifests: no chunk
+/// data is needed.
 ///
 /// The key operations performed are:
 /// 1.  **Sorting the File Manifest**: The file manifest is sorted
@@ -173,48 +88,29 @@ where
 ///     files in descending order of their score. This places the most
 ///     commonly shared data together at the start of the archive, reducing
 ///     disk seek time during extraction.
-/// 4.  **Generating the Chunk Index**: It calls the `serialize_store` function
-///     to create the final chunk index, which maps each hash from the
-///     optimized layout to its location in the data blob.
 ///
 /// # Arguments
 ///
 /// * `file_manifest`: A thread-safe `DashMap` where each key is a filename and
 ///   the value is the corresponding `FileManifestParent` struct containing all
 ///   of its metadata.
-/// * `data_store_key_cb`: A callback function that, when called, returns a
-///   complete `Vec` of all unique chunk hashes from the data store.
-/// * `data_store_get_chunk_cb`: A callback function that is passed to
-///   `serialize_store` to retrieve the byte data for a given set of hashes.
 ///
 /// # Returns
 ///
-/// A `Result` which is:
-/// - `Ok` on success, containing a struct with three fields:
-///   - `Vec<FileManifestParent<H>>`: The file manifest, sorted by filename.
-///   - `HashMap<H, ChunkLocation>`: The complete chunk index, mapping each
-///     hash to its location.
-///   - `Vec<H>`: A vector of all unique chunk hashes, sorted in a
-///     deterministic order.
-/// - `Err(SpriteShrinkError)` if any part of the serialization process fails,
-///   such as a missing chunk in the data store.
+/// The table of contents and file manifests, both sorted by filename, and
+/// every chunk hash the files use, once each, in the order to lay the
+/// chunks out in.
 ///
 /// # Type Parameters
 ///
-/// * `D`: The type of the `data_store_get_chunk_cb` callback.
-/// * `H`: The generic hash type, which must be `Copy`, `Ord`, `Eq`, `Hash`,
-///   and `Display`.
-/// * `K`: The type of the `data_store_key_cb` callback.
-pub fn serialize_uncompressed_data<D, E, H, K>(
+/// * `H`: The generic hash type, which must be `Copy`, `Ord`, `Eq` and
+///   `Hash`.
+#[must_use]
+pub fn serialize_uncompressed_data<H>(
     file_manifest: &DashMap<String, FileManifestParent<H>>,
-    data_store_key_cb: &K,
-    data_store_get_chunk_cb: &D
-) -> Result<SerializedData<H>, SpriteShrinkError>
+) -> SerializedData<H>
 where
-    D: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
-    E: std::error::Error + IsCancelled + Send + Sync + 'static,
-    H: Copy + Ord + Eq + std::hash::Hash + std::fmt::Display,
-    K: Fn() -> Result<Vec<H>, E>
+    H: Copy + Ord + Eq + std::hash::Hash,
 {
     let mut entries: Vec<(String, FileManifestParent<H>)> = file_manifest
         .iter()
@@ -245,52 +141,35 @@ where
         manifests.push(manifest);
     }
 
-    let mut serialized_data = SerializedData::<H> {
-        ser_file_manifest: manifests,
-        archive_toc: toc,
-        ..Default::default()
-    };
-
     let mut chunk_freq = HashMap::new();
-    for fmp in &serialized_data.ser_file_manifest{
+    for fmp in &manifests {
         for chunk in &fmp.chunk_metadata{
             *chunk_freq.entry(chunk.hash).or_insert(0) += 1;
         }
     }
 
-    let mut scored_indices: Vec<_> = serialized_data
-        .ser_file_manifest
+    let mut scored_manifests: Vec<(&FileManifestParent<H>, u32)> = manifests
         .iter()
-        .enumerate()
-        .map(|(i, fmp)| {
+        .map(|fmp| {
             let score: u32 = fmp
                 .chunk_metadata
                 .iter()
                 .map(|chunk| chunk_freq.get(&chunk.hash).copied().unwrap_or(0))
                 .sum();
-            (i, score)
+            (fmp, score)
         }).collect();
 
-    /*Sorts each index, which points to the position in the FileManifestParent
-    vector, in descending order of the score.*/
-    scored_indices.sort_by(|a, b| b.1.cmp(&a.1));
+    /*Sorts the manifests in descending order of the score: Reverse flips
+    the key's ordering, so the highest score sorts first.*/
+    scored_manifests.sort_by_key(|&(_, score)| Reverse(score));
 
-    let total_hashes = match data_store_key_cb() {
-        Ok(hashes) => hashes.len(),
-        Err(e) => {
-            if e.is_cancelled() {
-                return Err(SpriteShrinkError::Cancelled);
-            }
-            return Err(SpriteShrinkError::External(Box::new(e)));
-        }
-    };
-    let mut sorted_hashes = Vec::with_capacity(total_hashes);
-    let mut seen_hashes = HashSet::with_capacity(total_hashes);
+    //chunk_freq has one entry per hash the files use.
+    let mut sorted_hashes = Vec::with_capacity(chunk_freq.len());
+    let mut seen_hashes = HashSet::with_capacity(chunk_freq.len());
 
     /*Store the order of the chunks in order of the file with the most shared
     chunks to the least.*/
-    for(index, _score) in scored_indices{
-        let fmp = &serialized_data.ser_file_manifest[index];
+    for (fmp, _score) in scored_manifests {
         for chunk in &fmp.chunk_metadata{
             if seen_hashes.insert(chunk.hash){
                 sorted_hashes.push(chunk.hash);
@@ -298,14 +177,11 @@ where
         }
     }
 
-    serialized_data.sorted_hashes = sorted_hashes;
-
-    serialized_data.chunk_index = serialize_store(
-        &serialized_data.sorted_hashes,
-        data_store_get_chunk_cb
-    )?;
-
-    Ok(serialized_data)
+    SerializedData {
+        ser_file_manifest: manifests,
+        archive_toc: toc,
+        sorted_hashes,
+    }
 }
 
 /// Builds every byte of an SSMC archive that comes before the compressed
@@ -385,8 +261,6 @@ mod tests {
     use super::*;
     use crate::lib_structs::SSAChunkMeta;
 
-    type ReadResult = Result<Vec<Vec<u8>>, SpriteShrinkError>;
-
     /// A manifest for `chunks`, given as (hash, length) in file order, with
     /// each chunk's offset where the previous one ended.
     fn manifest(chunks: &[(u64, u32)]) -> FileManifestParent<u64> {
@@ -405,54 +279,24 @@ mod tests {
         }
     }
 
-    /// The files' manifests by name, and a store holding `length` bytes of
-    /// `hash as u8` for every chunk they use.
-    fn archive_input(
+    /// The files' manifests, keyed by name.
+    fn manifests(
         files: &[(&str, FileManifestParent<u64>)],
-    ) -> (DashMap<String, FileManifestParent<u64>>, HashMap<u64, Vec<u8>>) {
-        let mut store = HashMap::new();
-        for (_name, manifest) in files {
-            for chunk in &manifest.chunk_metadata {
-                let byte = u8::try_from(chunk.hash % 256).unwrap();
-                store.insert(chunk.hash, vec![byte; chunk.length as usize]);
-            }
-        }
-        let manifests = files
+    ) -> DashMap<String, FileManifestParent<u64>> {
+        files
             .iter()
             .map(|(name, manifest)| ((*name).to_owned(), manifest.clone()))
-            .collect();
-        (manifests, store)
-    }
-
-    /// A read callback that returns each requested chunk from `store`.
-    fn read_from(
-        store: HashMap<u64, Vec<u8>>,
-    ) -> impl Fn(&[u64]) -> ReadResult + Send + Sync + 'static {
-        move |hashes| Ok(hashes.iter().map(|hash| store[hash].clone()).collect())
-    }
-
-    /// Runs `serialize_uncompressed_data` with a key callback that lists
-    /// every chunk in `store`.
-    fn serialize(
-        manifests: &DashMap<String, FileManifestParent<u64>>,
-        store: HashMap<u64, Vec<u8>>,
-    ) -> Result<SerializedData<u64>, SpriteShrinkError> {
-        let keys: Vec<u64> = store.keys().copied().collect();
-        serialize_uncompressed_data(
-            manifests,
-            &move || -> Result<Vec<u64>, SpriteShrinkError> { Ok(keys.clone()) },
-            &read_from(store),
-        )
+            .collect()
     }
 
     #[test]
     fn the_toc_is_sorted_by_filename_and_lines_up_with_the_manifests() {
-        let (manifests, store) = archive_input(&[
+        let manifests = manifests(&[
             ("c.bin", manifest(&[(1, 10)])),
             ("a.bin", manifest(&[(2, 10), (3, 10)])),
             ("b.bin", manifest(&[(4, 10), (5, 10), (6, 10)])),
         ]);
-        let data = serialize(&manifests, store).unwrap();
+        let data = serialize_uncompressed_data(&manifests);
 
         let names: Vec<&str> = data
             .archive_toc
@@ -480,9 +324,9 @@ mod tests {
         let mut shuffled = manifest(&[(1, 100), (2, 30), (3, 7), (4, 50)]);
         shuffled.chunk_metadata.swap(0, 3);
         shuffled.chunk_metadata.swap(1, 2);
-        let (manifests, store) = archive_input(&[("file.bin", shuffled)]);
+        let manifests = manifests(&[("file.bin", shuffled)]);
 
-        let data = serialize(&manifests, store).unwrap();
+        let data = serialize_uncompressed_data(&manifests);
 
         assert_eq!(data.archive_toc[0].uncompressed_size, 187);
         let offsets: Vec<u64> = data.ser_file_manifest[0]
@@ -495,9 +339,8 @@ mod tests {
 
     #[test]
     fn an_empty_file_has_size_zero() {
-        let (manifests, store) =
-            archive_input(&[("empty.bin", manifest(&[])), ("a.bin", manifest(&[(1, 5)]))]);
-        let data = serialize(&manifests, store).unwrap();
+        let manifests = manifests(&[("empty.bin", manifest(&[])), ("a.bin", manifest(&[(1, 5)]))]);
+        let data = serialize_uncompressed_data(&manifests);
         assert_eq!(data.archive_toc[1].filename, "empty.bin");
         assert_eq!(data.archive_toc[1].uncompressed_size, 0);
     }
@@ -505,15 +348,12 @@ mod tests {
     #[test]
     fn sorted_hashes_holds_each_used_hash_once() {
         // Chunk 1 is in every file, and twice in a.bin.
-        let (manifests, mut store) = archive_input(&[
+        let manifests = manifests(&[
             ("a.bin", manifest(&[(1, 10), (2, 10), (1, 10)])),
             ("b.bin", manifest(&[(1, 10), (3, 10)])),
             ("c.bin", manifest(&[(4, 10), (1, 10)])),
         ]);
-        // A chunk in the store that no file uses isn't archived.
-        store.insert(99, vec![0; 10]);
-
-        let data = serialize(&manifests, store).unwrap();
+        let data = serialize_uncompressed_data(&manifests);
 
         assert_eq!(data.sorted_hashes.len(), 4);
         let unique: HashSet<u64> = data.sorted_hashes.iter().copied().collect();
@@ -527,12 +367,12 @@ mod tests {
         // the most, so its chunks come first, then each later file adds
         // only the chunks not yet laid out. a and m tie, and keep filename
         // order. Filename order alone would start with a.
-        let (manifests, store) = archive_input(&[
+        let manifests = manifests(&[
             ("a.bin", manifest(&[(1, 10), (3, 10), (20, 10), (21, 10)])),
             ("m.bin", manifest(&[(1, 10), (2, 10), (30, 10), (31, 10)])),
             ("z.bin", manifest(&[(1, 10), (2, 10), (3, 10), (10, 10)])),
         ]);
-        let data = serialize(&manifests, store).unwrap();
+        let data = serialize_uncompressed_data(&manifests);
 
         assert_eq!(data.sorted_hashes, [1, 2, 3, 10, 20, 21, 30, 31]);
     }
