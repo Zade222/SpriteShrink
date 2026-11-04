@@ -10,7 +10,7 @@ use std::{
     ffi::c_void,
     fmt::Debug,
     hash::Hash,
-    sync::{Arc, Mutex},
+    sync::Arc,
     thread
 };
 
@@ -752,48 +752,24 @@ where
         dictionary_size, //Max dictionary size in bytes
         ).map_err(|e| ProcessingError::DictionaryError(e.to_string()))?;
 
-    //Callback wrapper for getting chunk data from host application.
-    let get_chunk_data_wrapper = move |hashes: &[H]| ->
-        Result<Vec<(H, Vec<u8>)>, E> {
-            let ret_chunks = get_chunk_data(hashes)?;
-            let mut chunk_pairs: Vec<(H, Vec<u8>)> =
-                Vec::with_capacity(ret_chunks.len());
-
-            for (index, chunk) in ret_chunks.iter().enumerate(){
-                chunk_pairs.push((hashes[index], chunk.clone()));
-            };
-
-            Ok(chunk_pairs)
-    };
-
-    //Arc(Mutex) for storing the total data size.
-    let final_size = Arc::new(Mutex::new(0usize));
-
-    /*Callback that doesn't store but adds the size of the chunk to
-    final_size.*/
-    let write_chunk_data_cb = {
-        let final_size_clone = Arc::clone(&final_size);
-        move |chunk: &[u8]| -> Result<(), E> {
-            let mut size = final_size_clone.lock().unwrap();
-            *size += chunk.len();
-            Ok(())
-        }
+    //Add up the compressed sizes instead of storing the data.
+    let mut compressed_size = 0usize;
+    let add_chunk_size = |chunk: &[u8]| -> Result<(), E> {
+        compressed_size += chunk.len();
+        Ok(())
     };
 
     //Run compression for data for test data.
-    let _chunk_index = compress_chunks(
+    compress_chunks(
         worker_count,
         &dictionary,
         sorted_hashes,
         compression_level.min(7),
-        get_chunk_data_wrapper,
-        write_chunk_data_cb
+        &get_chunk_data,
+        add_chunk_size
     )?;
 
-    //Pull the finalize size from the Arc(Mutex)
-    let final_size_val = *final_size.lock().unwrap();
-
-    Ok((dictionary.len() as usize) + final_size_val)
+    Ok(dictionary.len() + compressed_size)
 }
 
 /// Calculates which chunks and what parts of them are needed to satisfy a
