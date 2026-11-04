@@ -97,8 +97,8 @@ impl From<ProcessingError> for SpriteShrinkError {
 /// wraps most serialization-specific errors within the
 /// `SpriteShrinkError::Serialization` variant.
 ///
-/// A special case is handled for `ProcessingError::Cancelled` to ensure that a
-/// user-initiated cancellation is preserved as the top-level
+/// A special case is handled for `SerializationError::Cancelled` to ensure
+/// that a user-initiated cancellation is preserved as the top-level
 /// `SpriteShrinkError::Cancelled` variant, allowing for specific cancellation
 /// logic in the calling application.
 impl From<SerializationError> for SpriteShrinkError {
@@ -181,6 +181,46 @@ mod tests {
 
         for (error, message) in cases {
             assert_eq!(error.to_string(), message);
+        }
+    }
+
+    #[test]
+    fn a_cancellation_stays_a_cancellation_at_the_top_level() {
+        let cancelled = [
+            SpriteShrinkError::from(ArchiveError::Cancelled),
+            SpriteShrinkError::from(ProcessingError::Cancelled),
+            SpriteShrinkError::from(SerializationError::Cancelled),
+        ];
+
+        for error in cancelled {
+            assert!(matches!(error, SpriteShrinkError::Cancelled), "{error:?}");
+            assert!(error.is_cancelled());
+        }
+    }
+
+    #[test]
+    fn other_module_errors_are_wrapped_and_not_cancelled() {
+        let archive = SpriteShrinkError::from(ArchiveError::External(
+            "host failed".to_string(),
+        ));
+        assert!(matches!(archive, SpriteShrinkError::Archive(_)));
+
+        let processing = SpriteShrinkError::from(ProcessingError::External(
+            "host failed".to_string(),
+        ));
+        assert!(matches!(processing, SpriteShrinkError::Processing(_)));
+
+        let serialization = SpriteShrinkError::from(
+            SerializationError::External("host failed".to_string()),
+        );
+        assert!(matches!(serialization, SpriteShrinkError::Serialization(_)));
+
+        let parsing =
+            SpriteShrinkError::from(ParsingError::InvalidHeader(String::new()));
+        assert!(matches!(parsing, SpriteShrinkError::Parsing(_)));
+
+        for error in [archive, processing, serialization, parsing] {
+            assert!(!error.is_cancelled(), "{error:?}");
         }
     }
 }
