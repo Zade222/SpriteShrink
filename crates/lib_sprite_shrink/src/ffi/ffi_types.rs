@@ -121,7 +121,9 @@ pub struct ArchiveBuilderU128 { _private: [u8; 0] }
 /// * `free_chunks_cb`: A C function pointer to free the data array returned by
 ///   `get_chunks_cb`.
 /// * `write_comp_data_cb`: A C function pointer that the builder calls to
-///   write out the compressed archive data.
+///   write out the compressed archive data, once per chunk in order. Every
+///   chunk has been written when the build function returns, so a host
+///   that buffers its writes should flush them then.
 ///
 /// # Safety
 ///
@@ -153,7 +155,6 @@ pub struct ArchiveBuilderArgsU64 {
         user_data: *mut c_void,
         data: *const u8,
         data_len: usize,
-        is_flush: bool
     ) -> FFICallbackStatus,
 }
 
@@ -183,7 +184,9 @@ pub struct ArchiveBuilderArgsU64 {
 /// * `free_chunks_cb`: A C function pointer to free the data array returned by
 ///   `get_chunks_cb`.
 /// * `write_comp_data_cb`: A C function pointer that the builder calls to
-///   write out the compressed archive data.
+///   write out the compressed archive data, once per chunk in order. Every
+///   chunk has been written when the build function returns, so a host
+///   that buffers its writes should flush them then.
 ///
 /// # Safety
 ///
@@ -215,7 +218,6 @@ pub struct ArchiveBuilderArgsU128 {
         user_data: *mut c_void,
         data: *const u8,
         data_len: usize,
-        is_flush: bool
     ) -> FFICallbackStatus,
 }
 
@@ -246,9 +248,8 @@ pub struct ArchiveBuilderArgsU128 {
 ///   `SpriteShrinkError` if something goes wrong.
 ///
 /// * `write_data` – A boxed closure of type `CallbackWriteData`.
-///   It receives a byte slice to write and a `bool` indicating whether the
-///   caller is requesting a flush. It returns `Result<(), SpriteShrinkError>`
-///   propagating any I/O‑related error.
+///   It receives a byte slice to write and returns
+///   `Result<(), SpriteShrinkError>`, propagating any I/O‑related error.
 pub struct BuilderCallbacks<H> {
     pub get_chunks: CallbackGetChunks<H>,
     pub write_data: CallbackWriteData,
@@ -267,10 +268,9 @@ pub type CallbackGetChunks<H> = Box<dyn Fn(&[H]) -> Result<Vec<Vec<u8>>,
 ///
 /// This boxed `dyn FnMut` trait object hides the concrete closure type,
 /// allowing the callback to be stored in a struct that is safe to pass across
-/// the FFI boundary. It takes a slice of bytes to write and a `bool`
-/// indicating whether this is a flush operation, and returns a
+/// the FFI boundary. It takes a slice of bytes to write and returns a
 /// `Result<(), SpriteShrinkError>`.
-pub type CallbackWriteData = Box<dyn FnMut(&[u8], bool) -> Result<(),
+pub type CallbackWriteData = Box<dyn FnMut(&[u8]) -> Result<(),
     SpriteShrinkError> + Send + Sync + 'static>;
 
 

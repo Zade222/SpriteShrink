@@ -418,7 +418,7 @@ where
         let tmp_audio_write_cb = {
             let blob_size_clone = Arc::clone(&audio_blob_size);
             let writer_clone = Arc::clone(&writer);
-            move |data: &[u8], flush_flag: bool| -> Result<(), CliError>{
+            move |data: &[u8]| -> Result<(), CliError>{
                 blob_size_clone.fetch_add(data.len() as u64, Ordering::SeqCst);
 
                 writer_clone.lock().unwrap().write_all(data)?;
@@ -453,15 +453,11 @@ where
         }
     };
 
-    /*Callback for storing and writing chunk data.
-    Flush flag can be used to force the data to be written if the buffer has
-    not reached the BUFFER_SIZE.*/
-    let tmp_chunk_write_cb = {
-        let writer_clone = Arc::clone(&writer);
-        move |chunk: &[u8], flush_flag: bool| -> Result<(), CliError>{
-            writer_clone.lock().unwrap().write_all(chunk)?;
-            Ok(())
-        }
+    /*Writes each compressed chunk, in order. The builder only borrows the
+    writer, so it's flushed below once the build is done.*/
+    let tmp_chunk_write_cb = |chunk: &[u8]| -> Result<(), CliError> {
+        writer.lock().unwrap().write_all(chunk)?;
+        Ok(())
     };
 
     let mut comp_data_builder = ArchiveBuilder::new(

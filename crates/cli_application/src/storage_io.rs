@@ -11,7 +11,7 @@ use std::{
     fmt::Display,
     fs::{self, File, OpenOptions, metadata, read_dir, remove_file},
     hash::Hash,
-    io::{self, BufWriter, Read, Seek, SeekFrom, Write, copy},
+    io::{self, Read, Seek, SeekFrom, Write, copy},
     path::{Path, PathBuf},
     process::id,
     sync::{Arc, Mutex},
@@ -374,43 +374,6 @@ pub fn load_config() -> Result<SpriteShrinkConfig, CliError> {
         Err(e) => Err(CliError::from(e)),
     }
 }
-
-/// Appends a slice of bytes to the end of a file, creating the file if it
-/// does not exist.
-///
-/// This function is designed for efficiently writing data in chunks, such as
-/// when buffering compressed data to a temporary file. It opens the file in
-/// append mode and uses a `BufWriter` to batch writes, minimizing system calls
-/// and improving performance.
-///
-/// # Arguments
-///
-/// * `path`: A `Path` reference to the file to which data will be appended.
-/// * `data`: A byte slice (`&[u8]`) containing the data to write.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(())` if the data was successfully appended to the file.
-/// - `Err(CliError::Io)` if the file cannot be opened or written to.
-pub fn append_data_to_file(path: &Path, data: &[u8]) -> Result<(), CliError> {
-    let file = OpenOptions::new()
-        //Create the file if it doesn't exist.
-        .create(true)
-        //Append to the end of the file.
-        .append(true)
-        //Open the file with the specified options at the specified path
-        .open(path)?;
-
-    //Creates an in-memory buffer that batches writes to the OS.
-    let mut writer = BufWriter::new(file);
-
-    //`write_all` ensures that the entire `data` slice is written.
-    writer.write_all(data)?;
-
-    Ok(())
-}
-
 /// Calculates the total combined size of all files from a list of paths.
 ///
 /// This function iterates over a slice of `PathBuf`s, retrieves the metadata

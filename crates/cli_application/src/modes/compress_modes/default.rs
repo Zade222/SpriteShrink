@@ -9,6 +9,7 @@
 use std::{
     fmt::{Debug, Display},
     fs::{File, create_dir_all},
+    io::{BufWriter, Write},
     path::PathBuf,
     sync::{Arc, Mutex, atomic::{
         AtomicBool, Ordering
@@ -40,13 +41,13 @@ use crate::{
     arg_handling::Args,
     auto_tune::{auto_tune_dict, auto_tune_win},
     cli_types::{
-        ChunkMessage, FileData, FileCompleteData,
-        TempFileGuard, APPIDENTIFIER
+        APPIDENTIFIER,
+        ChunkMessage, FileData, FileCompleteData, TempFileGuard,
     },
     error_handling::CliError,
     storage_io::{
-        append_data_to_file, calc_tot_input_size, get_cache_paths,
-        write_final_archive, TempCache
+        calc_tot_input_size, get_cache_paths, write_final_archive,
+        TempCache
     },
     utils::{process_in_memory_check, set_priority},
 };
@@ -514,29 +515,14 @@ where
         }
     };
 
-    //Const for the max amount of chunks to cache before writing to disk.
-    const BUFFER_SIZE: usize = 1000;
-
-    /*Write buffer holds chunk byte data prior to being written.
-    Vector made with capacity to hold 1000 chunks * the maximum window size
-    fastcdc has used. (avg x 4)*/
-    let mut write_buffer: Vec<u8> = Vec::with_capacity(
-        BUFFER_SIZE * (best_window_size as usize * 4)
-    );
-
-    //Holds the amount of chunks that have been stored in the buffer.
-    let mut chunk_count = 0usize;
-
-    //Set the temproary file path that will hold the compressed data.
-    let tmp_file_path = Arc::new(
-        args.output
+    //Set the temporary file path that will hold the compressed data.
+    let tmp_file_path = args.output
         .as_ref()
         .unwrap()
         .parent()
         .unwrap()
         .join(format!("{pid}"))
-        .with_extension("tmp")
-    );
+        .with_extension("tmp");
 
     let get_chunk_data_for_lib = {
         let cb = Arc::clone(&chunk_ret_cb);
@@ -552,26 +538,19 @@ where
         }
     };
 
+    let tmp_file = File::create(&tmp_file_path)?;
+
     /*Set file guard to clean up tmp files on error. */
     let _tmp_guard = TempFileGuard::new(&tmp_file_path);
 
-    /*Callback for storing and writing chunk data.
-    Flush flag can be used to force the data to be written if the buffer has
-    not reached the BUFFER_SIZE.*/
-    let tmp_chunk_write_cb = {
-        let tfp_clone = Arc::clone(&tmp_file_path);
-        move |chunk: &[u8], flush_flag: bool| -> Result<(), CliError>{
-            write_buffer.extend_from_slice(chunk);
-            chunk_count += 1;
+    //Batches the compressed chunks into larger writes to the temporary file.
+    let mut writer = BufWriter::with_capacity(64 * 1024, tmp_file);
 
-            if (chunk_count >= BUFFER_SIZE) || flush_flag {
-                append_data_to_file(&tfp_clone, &write_buffer)?;
-                write_buffer.clear();
-                chunk_count = 0;
-            };
-
-            Ok(())
-        }
+    /*Writes each compressed chunk, in order. The builder only borrows the
+    writer, so it can be flushed once the build is done.*/
+    let tmp_chunk_write_cb = |chunk: &[u8]| -> Result<(), CliError> {
+        writer.write_all(chunk)?;
+        Ok(())
     };
 
     /*Assembles the final archive header from its constituent parts, structures
@@ -594,6 +573,10 @@ where
     let comp_data = builder.with_progress(progress_callback)
         .build()?;
     super::note_if_no_dictionary(&comp_data);
+
+    /*Every chunk is written once build returns. Flush explicitly: a
+    BufWriter that flushes when dropped ignores any error.*/
+    writer.flush()?;
 
     if let Some(bar) = progress_bar.lock().unwrap().take()
         && !args.quiet

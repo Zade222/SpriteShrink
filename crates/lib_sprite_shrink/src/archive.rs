@@ -459,8 +459,8 @@ where
     E: std::error::Error + IsCancelled + Send + Sync + 'static,
     H: Copy + Debug + Encode + Eq + Hash + Serialize + Send + Sync + 'static + Display
         + Ord,
-    R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
-    W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
+    R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E>,
+    W: FnMut(&[u8]) -> Result<(), E>,
 {
     pub fn new(
         //ser_file_manifest: Vec<FileManifestParent<H>>,
@@ -567,13 +567,15 @@ where
     /// returned dictionary is empty. Such archives extract like any other.
     ///
     /// The compressed chunks go to the write callback in `sorted_hashes`
-    /// order, each with `flush` set to `false`. One last call with no data
-    /// and `flush` set to `true` follows once every chunk is written.
+    /// order, one call per chunk. Every chunk has been written when `build`
+    /// returns, so a caller that buffers its writes should flush them then.
+    /// Flushing on drop isn't enough for a `BufWriter`, which ignores errors
+    /// when it's dropped.
     ///
     /// Progress is reported to both the Rust and the C progress callback:
     /// `GeneratingDictionary`, `DictionaryDone`, `Compressing`, then
     /// `ChunkCompressed` once per chunk as it's written, then `Finalizing`
-    /// before the flush.
+    /// once every chunk is written.
     ///
     /// # Returns
     ///
@@ -677,10 +679,9 @@ where
         report_progress(Progress::DictionaryDone);
 
         /*compress_chunks calls this on this thread, so it can borrow the
-        write callback; the borrow ends when compress_chunks returns, before
-        the flush below.*/
+        write callback.*/
         let write_chunk_data_cb = |chunk: &[u8]| -> Result<(), E> {
-            write_comp_data(chunk, false)?;
+            write_comp_data(chunk)?;
             report_progress(Progress::ChunkCompressed);
             Ok(())
         };
@@ -701,8 +702,6 @@ where
         )?;
 
         report_progress(Progress::Finalizing);
-
-        write_comp_data(&[], true).map_err(|e| callback_error(&e))?;
 
         let enc_chunk_index = encode(&chunk_index);
 
@@ -1281,8 +1280,8 @@ mod tests {
     /// What `ArchiveBuilder::build` returned and passed to its callbacks.
     struct Built {
         result: Result<CompressionResult, SpriteShrinkError>,
-        /// Every call to the write callback: the data and the flush flag.
-        writes: Vec<(Vec<u8>, bool)>,
+        /// The data of every call to the write callback.
+        writes: Vec<Vec<u8>>,
         /// Every report to the Rust progress callback, as its Debug text.
         progress: Vec<String>,
     }
@@ -1293,22 +1292,22 @@ mod tests {
     fn build_with(
         hashes: &[u64],
         total_size: u64,
-        read: impl Fn(&[u64]) -> ReadResult + Send + Sync + 'static,
+        read: impl Fn(&[u64]) -> ReadResult,
         optimize: bool,
         c_progress: bool,
     ) -> Built {
-        let writes = Arc::new(Mutex::new(Vec::new()));
+        let mut writes = Vec::new();
+        // The progress callback must be 'static, so it can't borrow.
         let progress = Arc::new(Mutex::new(Vec::new()));
 
         let mut builder = {
-            let writes = Arc::clone(&writes);
             let progress = Arc::clone(&progress);
             ArchiveBuilder::new(
                 hashes,
                 total_size,
                 read,
-                move |data: &[u8], flush: bool| -> Result<(), SpriteShrinkError> {
-                    writes.lock().unwrap().push((data.to_vec(), flush));
+                |data: &[u8]| -> Result<(), SpriteShrinkError> {
+                    writes.push(data.to_vec());
                     Ok(())
                 },
             )
@@ -1325,7 +1324,6 @@ mod tests {
         }
         let result = builder.build();
 
-        let writes = std::mem::take(&mut *writes.lock().unwrap());
         let progress = std::mem::take(&mut *progress.lock().unwrap());
         Built { result, writes, progress }
     }
@@ -1351,7 +1349,7 @@ mod tests {
         let blob: Vec<u8> = built
             .writes
             .iter()
-            .flat_map(|(data, _flush)| data.iter().copied())
+            .flat_map(|data| data.iter().copied())
             .collect();
         let index =
             parse_file_chunk_index::<u64>(&result.enc_chunk_index).unwrap();
@@ -1389,16 +1387,16 @@ mod tests {
     }
 
     #[test]
-    fn the_only_flush_is_one_empty_write_at_the_end() {
+    fn every_write_is_one_compressed_chunk() {
+        // There used to be one more, empty write at the end, flagged as a
+        // flush.
         let (hashes, chunks, total_size) = builder_input(300);
         let built =
             build_with(&hashes, total_size, read_from(chunks), false, false);
         built.result.unwrap();
 
-        let (last, chunk_writes) = built.writes.split_last().unwrap();
-        assert_eq!(last, &(Vec::new(), true));
-        assert_eq!(chunk_writes.len(), hashes.len());
-        assert!(chunk_writes.iter().all(|(_data, flush)| !flush));
+        assert_eq!(built.writes.len(), hashes.len());
+        assert!(built.writes.iter().all(|data| !data.is_empty()));
     }
 
     #[test]
@@ -1496,17 +1494,14 @@ mod tests {
     }
 
     #[test]
-    fn a_cancelled_flush_cancels_the_build() {
+    fn a_cancelled_write_cancels_the_build() {
         let (hashes, chunks, total_size) = builder_input(300);
         let result = ArchiveBuilder::new(
             &hashes,
             total_size,
             read_from(chunks),
-            |_: &[u8], flush: bool| -> Result<(), SpriteShrinkError> {
-                if flush {
-                    return Err(SpriteShrinkError::Cancelled);
-                }
-                Ok(())
+            |_: &[u8]| -> Result<(), SpriteShrinkError> {
+                Err(SpriteShrinkError::Cancelled)
             },
         )
         .build();

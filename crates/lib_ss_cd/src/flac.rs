@@ -96,7 +96,7 @@ where
     A: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
     E: std::error::Error + Send + Sync + 'static,
     H: Hashable,
-    W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
+    W: FnMut(&[u8]) -> Result<(), E> + Send + Sync + 'static,
 {
     const PREFETCH_LOW_THRESHOLD: usize = 100;
     const PREFETCH_HIGH_THRESHOLD: usize = 500;
@@ -229,10 +229,7 @@ where
             while let Some(Some(_)) = reorder_buffer.front() {
                 if let Some((hash, comp_block)) = reorder_buffer.pop_front().unwrap() {
                     let comp_block_len = comp_block.len() as u64;
-                    if let Err(e) = com_block_write_cb(
-                        &comp_block,
-                        false
-                    ) {
+                    if let Err(e) = com_block_write_cb(&comp_block) {
                         return Err(FlacError::External(e.to_string()));
                     }
 
@@ -255,9 +252,6 @@ where
             }
 
         }
-
-        let _ = com_block_write_cb(&[], true);
-
 
         Ok(())
     });

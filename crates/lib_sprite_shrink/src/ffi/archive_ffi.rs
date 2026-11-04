@@ -61,7 +61,7 @@ where
     H: Copy + std::fmt::Debug + Encode + Eq + std::hash::Hash + serde::Serialize +
         Send + Sync + 'static + std::fmt::Display + Ord,
     R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
-    W: FnMut(&[u8], bool) -> Result<(), E> + Send + Sync + 'static,
+    W: FnMut(&[u8]) -> Result<(), E> + Send + Sync + 'static,
 {
     /*fn set_compression_algorithm(&mut self, algorithm: u16) {
         self.compression_algorithm(algorithm);
@@ -196,13 +196,19 @@ pub unsafe extern "C" fn archive_builder_new_u64(
 
     let write_data_closure = {
         let parent_write_cb = args_int.write_comp_data_cb;
-    move |data: &[u8],flush: bool| -> Result<(), SpriteShrinkError> {
+    move |data: &[u8]| -> Result<(), SpriteShrinkError> {
+        /*SAFETY: `ArchiveBuilderArgsU64` requires the caller to keep
+        `write_comp_data_cb` and `user_data` valid for the builder's whole
+        lifetime, and this closure only runs while the builder builds.
+        `user_data_addr` is that `user_data` pointer, stored as a usize so
+        the closure is Send, and is passed back unchanged. `data` is a live
+        slice for the length of the call, so its pointer and length describe
+        `data.len()` initialised bytes, valid until the callback returns.*/
         let status = unsafe {
             parent_write_cb(
                 user_data_addr as *mut c_void,
                 data.as_ptr(),
                 data.len(),
-                flush,
             )
         };
 
@@ -351,13 +357,19 @@ pub unsafe extern "C" fn archive_builder_new_u128(
 
     let write_data_closure = {
         let parent_write_cb = args_int.write_comp_data_cb;
-    move |data: &[u8], flush: bool| -> Result<(), SpriteShrinkError> {
+    move |data: &[u8]| -> Result<(), SpriteShrinkError> {
+        /*SAFETY: `ArchiveBuilderArgsU128` requires the caller to keep
+        `write_comp_data_cb` and `user_data` valid for the builder's whole
+        lifetime, and this closure only runs while the builder builds.
+        `user_data_addr` is that `user_data` pointer, stored as a usize so
+        the closure is Send, and is passed back unchanged. `data` is a live
+        slice for the length of the call, so its pointer and length describe
+        `data.len()` initialised bytes, valid until the callback returns.*/
         let status = unsafe {
             parent_write_cb(
                 user_data_addr as *mut c_void,
                 data.as_ptr(),
                 data.len(),
-                flush,
             )
         };
         Result::from(status)?;

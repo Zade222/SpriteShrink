@@ -99,7 +99,7 @@ fn build_archive<H: TestHash>(files: &[FileData], hash_type: u8) -> Built {
         &ser.sorted_hashes,
         total_size,
         get_chunks,
-        move |data: &[u8], _flush: bool| {
+        move |data: &[u8]| {
             sink.lock().unwrap().extend_from_slice(data);
             Ok::<_, SpriteShrinkError>(())
         },

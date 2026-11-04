@@ -1362,7 +1362,7 @@ fn rust_round_trip_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
         &ser.sorted_hashes,
         total_size,
         get_chunks,
-        move |data: &[u8], _flush: bool| {
+        move |data: &[u8]| {
             sink.lock().unwrap().extend_from_slice(data);
             Ok::<_, SpriteShrinkError>(())
         },
@@ -1436,7 +1436,6 @@ unsafe extern "C" fn builder_write(
     user_data: *mut c_void,
     data: *const u8,
     data_len: usize,
-    _is_flush: bool,
 ) -> FFICallbackStatus {
     // SAFETY: the round trip passes a `BuildHost` as `user_data`.
     let host = unsafe { &*user_data.cast::<BuildHost>() };
