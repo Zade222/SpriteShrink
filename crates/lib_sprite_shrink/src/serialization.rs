@@ -227,18 +227,20 @@ where
     let mut manifests = Vec::with_capacity(entries.len());
 
     for (filename, mut manifest) in entries {
-        let uncomp_size = if let Some(chunk) = manifest.chunk_metadata.last() {
-            chunk.offset + chunk.length as u64
-        } else {
-            0
-        };
+        /*Put each file's chunks in order from the beginning of the file to
+        the end, to aid in processing when rebuilding the file. The size is
+        read after sorting: the last chunk by offset is the one that ends
+        the file, whatever order the chunks arrived in.*/
+        manifest.chunk_metadata.sort_by_key(|metadata| metadata.offset);
+
+        let uncomp_size = manifest.chunk_metadata.last().map_or(0, |chunk| {
+            chunk.offset + u64::from(chunk.length)
+        });
 
         toc.push(SSMCTocEntry {
             filename,
             uncompressed_size: uncomp_size,
         });
-
-        manifest.chunk_metadata.sort_by_key(|metadata| metadata.offset);
 
         manifests.push(manifest);
     }
@@ -248,15 +250,6 @@ where
         archive_toc: toc,
         ..Default::default()
     };
-
-    /*Put each files chunks in order from the beginning of the file to the end
-    for easier processing when rebuilding file. */
-    serialized_data
-        .ser_file_manifest
-        .iter_mut()
-        .for_each(|fmp| {
-            fmp.chunk_metadata.sort_by_key(|metadata| metadata.offset);
-    });
 
     let mut chunk_freq = HashMap::new();
     for fmp in &serialized_data.ser_file_manifest{
@@ -385,4 +378,174 @@ where
     prefix.extend_from_slice(&comp.enc_chunk_index);
 
     Ok(prefix)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lib_structs::SSAChunkMeta;
+
+    type ReadResult = Result<Vec<Vec<u8>>, SpriteShrinkError>;
+
+    /// A manifest for `chunks`, given as (hash, length) in file order, with
+    /// each chunk's offset where the previous one ended.
+    fn manifest(chunks: &[(u64, u32)]) -> FileManifestParent<u64> {
+        let mut offset = 0;
+        let chunk_metadata = chunks
+            .iter()
+            .map(|&(hash, length)| {
+                let meta = SSAChunkMeta { hash, offset, length };
+                offset += u64::from(length);
+                meta
+            })
+            .collect();
+        FileManifestParent {
+            chunk_count: chunks.len() as u64,
+            chunk_metadata,
+        }
+    }
+
+    /// The files' manifests by name, and a store holding `length` bytes of
+    /// `hash as u8` for every chunk they use.
+    fn archive_input(
+        files: &[(&str, FileManifestParent<u64>)],
+    ) -> (DashMap<String, FileManifestParent<u64>>, HashMap<u64, Vec<u8>>) {
+        let mut store = HashMap::new();
+        for (_name, manifest) in files {
+            for chunk in &manifest.chunk_metadata {
+                let byte = u8::try_from(chunk.hash % 256).unwrap();
+                store.insert(chunk.hash, vec![byte; chunk.length as usize]);
+            }
+        }
+        let manifests = files
+            .iter()
+            .map(|(name, manifest)| ((*name).to_owned(), manifest.clone()))
+            .collect();
+        (manifests, store)
+    }
+
+    /// A read callback that returns each requested chunk from `store`.
+    fn read_from(
+        store: HashMap<u64, Vec<u8>>,
+    ) -> impl Fn(&[u64]) -> ReadResult + Send + Sync + 'static {
+        move |hashes| Ok(hashes.iter().map(|hash| store[hash].clone()).collect())
+    }
+
+    /// Runs `serialize_uncompressed_data` with a key callback that lists
+    /// every chunk in `store`.
+    fn serialize(
+        manifests: &DashMap<String, FileManifestParent<u64>>,
+        store: HashMap<u64, Vec<u8>>,
+    ) -> Result<SerializedData<u64>, SpriteShrinkError> {
+        let keys: Vec<u64> = store.keys().copied().collect();
+        serialize_uncompressed_data(
+            manifests,
+            &move || -> Result<Vec<u64>, SpriteShrinkError> { Ok(keys.clone()) },
+            &read_from(store),
+        )
+    }
+
+    #[test]
+    fn the_toc_is_sorted_by_filename_and_lines_up_with_the_manifests() {
+        let (manifests, store) = archive_input(&[
+            ("c.bin", manifest(&[(1, 10)])),
+            ("a.bin", manifest(&[(2, 10), (3, 10)])),
+            ("b.bin", manifest(&[(4, 10), (5, 10), (6, 10)])),
+        ]);
+        let data = serialize(&manifests, store).unwrap();
+
+        let names: Vec<&str> = data
+            .archive_toc
+            .iter()
+            .map(|entry| entry.filename.as_str())
+            .collect();
+        assert_eq!(names, ["a.bin", "b.bin", "c.bin"]);
+
+        // Each TOC entry's manifest is the one at the same index.
+        for (entry, manifest) in data.archive_toc.iter().zip(&data.ser_file_manifest) {
+            assert_eq!(
+                manifest.chunk_count,
+                manifests.get(&entry.filename).unwrap().chunk_count,
+                "{}",
+                entry.filename
+            );
+            assert_eq!(entry.uncompressed_size, manifest.chunk_count * 10);
+        }
+    }
+
+    #[test]
+    fn unordered_chunk_metadata_gets_the_right_size_and_order() {
+        // The size used to be read from the last chunk before the chunks
+        // were sorted, so it was only right if they arrived in order.
+        let mut shuffled = manifest(&[(1, 100), (2, 30), (3, 7), (4, 50)]);
+        shuffled.chunk_metadata.swap(0, 3);
+        shuffled.chunk_metadata.swap(1, 2);
+        let (manifests, store) = archive_input(&[("file.bin", shuffled)]);
+
+        let data = serialize(&manifests, store).unwrap();
+
+        assert_eq!(data.archive_toc[0].uncompressed_size, 187);
+        let offsets: Vec<u64> = data.ser_file_manifest[0]
+            .chunk_metadata
+            .iter()
+            .map(|chunk| chunk.offset)
+            .collect();
+        assert_eq!(offsets, [0, 100, 130, 137]);
+    }
+
+    #[test]
+    fn an_empty_file_has_size_zero() {
+        let (manifests, store) =
+            archive_input(&[("empty.bin", manifest(&[])), ("a.bin", manifest(&[(1, 5)]))]);
+        let data = serialize(&manifests, store).unwrap();
+        assert_eq!(data.archive_toc[1].filename, "empty.bin");
+        assert_eq!(data.archive_toc[1].uncompressed_size, 0);
+    }
+
+    #[test]
+    fn sorted_hashes_holds_each_used_hash_once() {
+        // Chunk 1 is in every file, and twice in a.bin.
+        let (manifests, mut store) = archive_input(&[
+            ("a.bin", manifest(&[(1, 10), (2, 10), (1, 10)])),
+            ("b.bin", manifest(&[(1, 10), (3, 10)])),
+            ("c.bin", manifest(&[(4, 10), (1, 10)])),
+        ]);
+        // A chunk in the store that no file uses isn't archived.
+        store.insert(99, vec![0; 10]);
+
+        let data = serialize(&manifests, store).unwrap();
+
+        assert_eq!(data.sorted_hashes.len(), 4);
+        let unique: HashSet<u64> = data.sorted_hashes.iter().copied().collect();
+        assert_eq!(unique, HashSet::from([1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn the_file_sharing_the_most_chunks_is_laid_out_first() {
+        // Similar files, as the archive is meant for. Chunks 1 to 3 are
+        // shared: 1 by every file, 2 by z and m, 3 by z and a. z shares
+        // the most, so its chunks come first, then each later file adds
+        // only the chunks not yet laid out. a and m tie, and keep filename
+        // order. Filename order alone would start with a.
+        let (manifests, store) = archive_input(&[
+            ("a.bin", manifest(&[(1, 10), (3, 10), (20, 10), (21, 10)])),
+            ("m.bin", manifest(&[(1, 10), (2, 10), (30, 10), (31, 10)])),
+            ("z.bin", manifest(&[(1, 10), (2, 10), (3, 10), (10, 10)])),
+        ]);
+        let data = serialize(&manifests, store).unwrap();
+
+        assert_eq!(data.sorted_hashes, [1, 2, 3, 10, 20, 21, 30, 31]);
+    }
+
+    #[test]
+    fn dashmap_values_to_vec_returns_every_value() {
+        let map = DashMap::new();
+        map.insert("a", 1);
+        map.insert("b", 2);
+        map.insert("c", 3);
+
+        let mut values = dashmap_values_to_vec(&map);
+        values.sort_unstable();
+        assert_eq!(values, [1, 2, 3]);
+    }
 }
