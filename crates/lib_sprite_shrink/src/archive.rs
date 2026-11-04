@@ -15,7 +15,6 @@ use std::{
     io::{self, Read},
     marker::PhantomData,
     os::raw::c_void,
-    sync::{Arc, Mutex},
     thread
 };
 
@@ -479,7 +478,7 @@ where
             //Set default values for optional parameters
             compression_level: 19,
             dictionary_size: 16 * 1024,
-            worker_threads: 0, //Let Rayon decide
+            worker_threads: 0, //Use the available parallelism
             opt_dict: false,
             progress_callback: None,
             c_progress_callback: None,
@@ -514,7 +513,9 @@ where
         self
     }
 
-
+    /// Sets the number of threads that compress chunks.
+    ///
+    /// The default value is `0`, which uses the available parallelism.
     pub fn worker_threads(&mut self, threads: usize) -> &mut Self {
         self.worker_threads = threads;
         self
@@ -565,20 +566,32 @@ where
     /// little distinct data, the chunks are compressed without one and the
     /// returned dictionary is empty. Such archives extract like any other.
     ///
+    /// The compressed chunks go to the write callback in `sorted_hashes`
+    /// order, each with `flush` set to `false`. One last call with no data
+    /// and `flush` set to `true` follows once every chunk is written.
+    ///
+    /// Progress is reported to both the Rust and the C progress callback:
+    /// `GeneratingDictionary`, `DictionaryDone`, `Compressing`, then
+    /// `ChunkCompressed` once per chunk as it's written, then `Finalizing`
+    /// before the flush.
+    ///
     /// # Returns
     ///
-    /// A `Result` which is:
-    /// - `Ok(Vec<u8>)` containing the complete binary data of the archive
-    ///   header.
-    /// - `Err(SpriteShrinkError)` if any step fails, such as dictionary
-    ///   training, compression, or serialization.
+    /// The dictionary and the encoded chunk index. The compressed chunks
+    /// themselves have gone to the write callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `SpriteShrinkError` if any step fails, such as reading
+    /// chunks for the dictionary samples, compression, or a callback.
+    /// `is_cancelled()` is true if a callback reported a cancellation.
     pub fn build(self) -> Result<CompressionResult, SpriteShrinkError> {
         //Destructure self into its fields
         let ArchiveBuilder {
             sorted_hashes,
             total_size,
             get_chunk_data,
-            write_comp_data,
+            mut write_comp_data,
             compression_level,
             dictionary_size,
             worker_threads,
@@ -588,15 +601,11 @@ where
             _error_type
         } = self;
 
-        let get_chunk_data_arc = Arc::new(get_chunk_data);
-        let write_comp_data_arc = Arc::new(Mutex::new(write_comp_data));
-
-        let progress_callback_arc = progress_callback.map(Arc::new);
-
+        //Every report goes to both progress callbacks, if they're set.
         let report_progress = {
-            let progress_callback_clone = progress_callback_arc.clone();
+            let progress_callback = progress_callback.as_ref();
             move |progress: Progress| {
-                if let Some(callback) = &progress_callback_clone {
+                if let Some(callback) = progress_callback {
                     callback(progress.clone());
                 }
                 if let Some((callback, user_data)) = c_progress_callback {
@@ -634,7 +643,7 @@ where
             sorted_hashes,
             total_size,
             dictionary_size as usize,
-            get_chunk_data_arc.as_ref()
+            &get_chunk_data
         )?;
 
         /*Make dictionary from sorted data. Training fails when there's too
@@ -644,7 +653,7 @@ where
         than it saves, so the archive is built without one instead. An
         empty dictionary is stored with length 0, and zstd treats it as no
         dictionary when compressing and decompressing.*/
-        let _dictionary = if opt_dict {
+        let dictionary = if opt_dict {
             gen_zstd_opt_dict(
                 &samples_for_dict,
                 &sample_sizes,
@@ -667,20 +676,13 @@ where
         //Report progress after dictionary generation is done.
         report_progress(Progress::DictionaryDone);
 
-        let write_chunk_data_cb = {
-            let progress_callback_clone = progress_callback_arc.clone();
-            let write_comp_data_arc_clone = Arc::clone(&write_comp_data_arc);
-            move |chunk: &[u8]| -> Result<(), E> {
-                let mut writer = write_comp_data_arc_clone.lock().unwrap();
-                (*writer)(chunk, false)?;
-
-                if let Some(callback) = &progress_callback_clone {
-                    callback(Progress::ChunkCompressed);
-                };
-
-                Ok(())
-            }
-
+        /*compress_chunks calls this on this thread, so it can borrow the
+        write callback; the borrow ends when compress_chunks returns, before
+        the flush below.*/
+        let write_chunk_data_cb = |chunk: &[u8]| -> Result<(), E> {
+            write_comp_data(chunk, false)?;
+            report_progress(Progress::ChunkCompressed);
+            Ok(())
         };
 
         report_progress(Progress::Compressing {
@@ -691,56 +693,24 @@ where
 
         let chunk_index = compress_chunks(
             worker_threads,
-            &_dictionary,
+            &dictionary,
             sorted_hashes,
             compression_level,
-            get_chunk_data_arc.as_ref(),
+            &get_chunk_data,
             write_chunk_data_cb
         )?;
 
-        //Flush remaining buffer to disk
-        let empty_data: [u8; 0] = [];
-        let mut writer = write_comp_data_arc.lock().unwrap();
-        (*writer)(&empty_data, true).map_err(|e| {
-            if e.is_cancelled() {
-                ArchiveError::Cancelled
-            } else {
-                ArchiveError::External(e.to_string())
-            }
-        })?;
+        report_progress(Progress::Finalizing);
 
-        /*The following are now prepared:
-        compressed_data store
-        chunk_index
-        dictionary*/
+        write_comp_data(&[], true).map_err(|e| callback_error(&e))?;
 
         let enc_chunk_index = encode(&chunk_index);
 
-        //Build the file header
-        /*let file_header = build_file_header(
-            file_count,
-            compression_algorithm,
-            hash_type,
-            bin_file_manifest.len() as u64,
-            _dictionary.len() as u64,
-            bin_chunk_index.len() as u64,
-        );*/
-
-        let mut comp_data = Vec::with_capacity(
-            //file_header.data_offset as usize + //bin_file_manifest.len() as usize
-                 _dictionary.len() + enc_chunk_index.len() as usize
-        );
-
-        //final_data.extend_from_slice(file_header.as_bytes());
-        //final_data.extend_from_slice(&bin_file_manifest);
-        comp_data.extend_from_slice(&_dictionary);
-        comp_data.extend_from_slice(&enc_chunk_index);
-
-        let dictionary_size = _dictionary.len() as u64;
+        let dictionary_size = dictionary.len() as u64;
         let enc_chunk_index_size = enc_chunk_index.len() as u64;
 
         Ok(CompressionResult {
-            dictionary: _dictionary,
+            dictionary,
             dictionary_size,
             enc_chunk_index,
             enc_chunk_index_size
@@ -789,7 +759,7 @@ mod tests {
         cell::Cell,
         collections::HashMap,
         io::ErrorKind,
-        sync::{OnceLock, mpsc},
+        sync::{Arc, Mutex, OnceLock, mpsc},
         time::Duration,
     };
 
@@ -797,6 +767,7 @@ mod tests {
     use sprite_shrink_test_support::tiled_bytes;
 
     use super::*;
+    use crate::parsing::parse_file_chunk_index;
 
     /// A dictionary trained on 64 KiB of ROM-like data cut into 1 KiB
     /// samples, trained once and shared by every test.
@@ -1305,5 +1276,240 @@ mod tests {
             max_read_ahead <= REORDER_WINDOW,
             "read {max_read_ahead} chunks ahead of writing"
         );
+    }
+
+    /// What `ArchiveBuilder::build` returned and passed to its callbacks.
+    struct Built {
+        result: Result<CompressionResult, SpriteShrinkError>,
+        /// Every call to the write callback: the data and the flush flag.
+        writes: Vec<(Vec<u8>, bool)>,
+        /// Every report to the Rust progress callback, as its Debug text.
+        progress: Vec<String>,
+    }
+
+    /// Builds `hashes` through `ArchiveBuilder` with 4 workers at level 19,
+    /// reading through `read`. `c_progress` also sets the C progress
+    /// callback, which records into `C_PROGRESS`.
+    fn build_with(
+        hashes: &[u64],
+        total_size: u64,
+        read: impl Fn(&[u64]) -> ReadResult + Send + Sync + 'static,
+        optimize: bool,
+        c_progress: bool,
+    ) -> Built {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let progress = Arc::new(Mutex::new(Vec::new()));
+
+        let mut builder = {
+            let writes = Arc::clone(&writes);
+            let progress = Arc::clone(&progress);
+            ArchiveBuilder::new(
+                hashes,
+                total_size,
+                read,
+                move |data: &[u8], flush: bool| -> Result<(), SpriteShrinkError> {
+                    writes.lock().unwrap().push((data.to_vec(), flush));
+                    Ok(())
+                },
+            )
+            .with_progress(move |report| {
+                progress.lock().unwrap().push(format!("{report:?}"));
+            })
+        };
+        builder
+            .compression_level(19)
+            .worker_threads(4)
+            .optimize_dictionary(optimize);
+        if c_progress {
+            builder.with_c_progress(record_c_progress, c_progress_user_data());
+        }
+        let result = builder.build();
+
+        let writes = std::mem::take(&mut *writes.lock().unwrap());
+        let progress = std::mem::take(&mut *progress.lock().unwrap());
+        Built { result, writes, progress }
+    }
+
+    /// `count` chunks from `chunk_store`, with their total size.
+    fn builder_input(count: u64) -> (Vec<u64>, HashMap<u64, Vec<u8>>, u64) {
+        let (hashes, chunks) = chunk_store(count);
+        let total_size = chunks.values().map(|chunk| chunk.len() as u64).sum();
+        (hashes, chunks, total_size)
+    }
+
+    /// Checks that `built` succeeded and that every chunk in `chunks` can
+    /// be found through the chunk index and decompressed with the
+    /// dictionary.
+    fn assert_round_trips(built: &Built, chunks: &HashMap<u64, Vec<u8>>) {
+        let result = built.result.as_ref().unwrap();
+        assert_eq!(result.dictionary_size, result.dictionary.len() as u64);
+        assert_eq!(
+            result.enc_chunk_index_size,
+            result.enc_chunk_index.len() as u64
+        );
+
+        let blob: Vec<u8> = built
+            .writes
+            .iter()
+            .flat_map(|(data, _flush)| data.iter().copied())
+            .collect();
+        let index =
+            parse_file_chunk_index::<u64>(&result.enc_chunk_index).unwrap();
+        assert_eq!(index.len(), chunks.len());
+
+        for (hash, chunk) in chunks {
+            let location = &index[hash];
+            let start = usize::try_from(location.offset).unwrap();
+            let end = start + location.compressed_length as usize;
+            let decompressed =
+                decompress_chunk(&blob[start..end], &result.dictionary).unwrap();
+            assert!(decompressed == *chunk, "chunk {hash}");
+        }
+    }
+
+    #[test]
+    fn build_round_trips_every_chunk_through_the_chunk_index() {
+        let (hashes, chunks, total_size) = builder_input(300);
+        let built =
+            build_with(&hashes, total_size, read_from(chunks.clone()), false, false);
+
+        assert_round_trips(&built, &chunks);
+        // The input has enough distinct data to train on.
+        assert_ne!(built.result.unwrap().dictionary.len(), 0);
+    }
+
+    #[test]
+    fn an_optimized_dictionary_also_round_trips() {
+        let (hashes, chunks, total_size) = builder_input(300);
+        let built =
+            build_with(&hashes, total_size, read_from(chunks.clone()), true, false);
+
+        assert_round_trips(&built, &chunks);
+        assert_ne!(built.result.unwrap().dictionary.len(), 0);
+    }
+
+    #[test]
+    fn the_only_flush_is_one_empty_write_at_the_end() {
+        let (hashes, chunks, total_size) = builder_input(300);
+        let built =
+            build_with(&hashes, total_size, read_from(chunks), false, false);
+        built.result.unwrap();
+
+        let (last, chunk_writes) = built.writes.split_last().unwrap();
+        assert_eq!(last, &(Vec::new(), true));
+        assert_eq!(chunk_writes.len(), hashes.len());
+        assert!(chunk_writes.iter().all(|(_data, flush)| !flush));
+    }
+
+    #[test]
+    fn progress_is_reported_in_order_with_one_report_per_chunk() {
+        let (hashes, chunks, total_size) = builder_input(300);
+        let built =
+            build_with(&hashes, total_size, read_from(chunks), false, false);
+        built.result.unwrap();
+
+        let mut expected = vec![
+            "GeneratingDictionary".to_owned(),
+            "DictionaryDone".to_owned(),
+            "Compressing { total_chunks: 300 }".to_owned(),
+        ];
+        expected.extend(std::iter::repeat_n("ChunkCompressed".to_owned(), 300));
+        expected.push("Finalizing".to_owned());
+        assert_eq!(built.progress, expected);
+    }
+
+    /// Reports to `record_c_progress`: each one's type as a number, its
+    /// `total_chunks` and the user data pointer it came with.
+    static C_PROGRESS: Mutex<Vec<(u8, u64, usize)>> = Mutex::new(Vec::new());
+
+    /// The address passed to the C progress callback as its user data. It's
+    /// only compared, never dereferenced.
+    static C_PROGRESS_MARKER: u8 = 0;
+
+    fn c_progress_user_data() -> *mut c_void {
+        (&raw const C_PROGRESS_MARKER).cast_mut().cast()
+    }
+
+    /// A C progress callback that records what it's given. It must not
+    /// panic, since a panic can't unwind out of an `extern "C"` function,
+    /// so a poisoned lock is recovered instead of unwrapped.
+    extern "C" fn record_c_progress(progress: FFIProgress, user_data: *mut c_void) {
+        C_PROGRESS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((progress.ty as u8, progress.total_chunks, user_data as usize));
+    }
+
+    #[test]
+    fn the_c_progress_callback_gets_every_report_too() {
+        // It used to get every report but ChunkCompressed, so C hosts
+        // couldn't show per-chunk progress.
+        let (hashes, chunks, total_size) = builder_input(300);
+        let built =
+            build_with(&hashes, total_size, read_from(chunks), false, true);
+        built.result.unwrap();
+
+        let user_data = c_progress_user_data() as usize;
+        let report = |ty: FFIProgressType, total_chunks| {
+            (ty as u8, total_chunks, user_data)
+        };
+        let mut expected = vec![
+            report(FFIProgressType::GeneratingDictionary, 0),
+            report(FFIProgressType::DictionaryDone, 0),
+            report(FFIProgressType::Compressing, 300),
+        ];
+        expected.extend(
+            (0..300).map(|_| report(FFIProgressType::ChunkCompressed, 0)),
+        );
+        expected.push(report(FFIProgressType::Finalizing, 0));
+        assert_eq!(*C_PROGRESS.lock().unwrap(), expected);
+        // The Rust callback still gets the same reports.
+        assert_eq!(built.progress.len(), expected.len());
+    }
+
+    #[test]
+    fn a_cancelled_read_cancels_the_build() {
+        // The dictionary samples are read one chunk at a time, and the
+        // chunks to compress in batches, so the request size tells the
+        // two phases apart.
+        for (phase, cancel_when) in [
+            ("sampling", (|len| len == 1) as fn(usize) -> bool),
+            ("compression", |len| len > 1),
+        ] {
+            let (hashes, chunks, total_size) = builder_input(300);
+            let read = read_from(chunks);
+            let built = build_with(
+                &hashes,
+                total_size,
+                move |requested| {
+                    if cancel_when(requested.len()) {
+                        return Err(SpriteShrinkError::Cancelled);
+                    }
+                    read(requested)
+                },
+                false,
+                false,
+            );
+            let error = built.result.unwrap_err();
+            assert!(error.is_cancelled(), "{phase}: {error:?}");
+        }
+    }
+
+    #[test]
+    fn a_cancelled_flush_cancels_the_build() {
+        let (hashes, chunks, total_size) = builder_input(300);
+        let result = ArchiveBuilder::new(
+            &hashes,
+            total_size,
+            read_from(chunks),
+            |_: &[u8], flush: bool| -> Result<(), SpriteShrinkError> {
+                if flush {
+                    return Err(SpriteShrinkError::Cancelled);
+                }
+                Ok(())
+            },
+        )
+        .build();
+        assert!(result.unwrap_err().is_cancelled());
     }
 }
