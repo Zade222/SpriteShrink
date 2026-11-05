@@ -148,7 +148,7 @@ const PREFETCH_HIGH_THRESHOLD: usize = 500;
 /// one before is still being written.
 const REORDER_WINDOW: usize = 2 * PREFETCH_HIGH_THRESHOLD;
 
-/// Maps an error from one of `compress_chunks`' callbacks to an
+/// Maps an error from one of `run_pipeline`'s callbacks to an
 /// `ArchiveError`, keeping cancellation distinct.
 fn callback_error<E: std::error::Error + IsCancelled>(e: &E) -> ArchiveError {
     if e.is_cancelled() {
@@ -156,6 +156,152 @@ fn callback_error<E: std::error::Error + IsCancelled>(e: &E) -> ArchiveError {
     } else {
         ArchiveError::External(e.to_string())
     }
+}
+
+/// Compresses chunks with Zstandard, in parallel, for an archive.
+///
+/// A wrapper around `run_pipeline` that gives each worker a Zstandard
+/// compressor with `dictionary` loaded.
+///
+/// # Arguments
+///
+/// * `worker_count`: The number of worker threads to compress with. `0`
+///   uses the available parallelism.
+/// * `dictionary`: The Zstandard dictionary to compress with. It may be
+///   empty.
+/// * `sorted_hashes`: The chunks to compress, in the order to write them.
+/// * `compression_level`: The Zstandard compression level for the workers.
+/// * `chunk_list_read_cb`: Reads the uncompressed data for a set of hashes.
+/// * `chunk_write_cb`: Writes the ordered, compressed chunk data.
+///
+/// # Errors
+///
+/// - `ArchiveError::Dictionary` if zstd can't use `dictionary`. This is
+///   checked before any chunk is read.
+/// - Any error from `run_pipeline`, or from compressing a chunk.
+pub(crate) fn compress_chunks<ERead, EWrite, H, R, W>(
+    worker_count: usize,
+    dictionary: &[u8],
+    sorted_hashes: &[H],
+    compression_level: i32,
+    chunk_list_read_cb: R,
+    chunk_write_cb: W,
+) -> Result<Vec<(H, ChunkLocation)>, ArchiveError>
+where
+    ERead: std::error::Error + IsCancelled,
+    EWrite: std::error::Error + IsCancelled,
+    H: Copy,
+    R: Fn(&[H]) -> Result<Vec<Vec<u8>>, ERead>,
+    W: FnMut(&[u8]) -> Result<(), EWrite>,
+{
+    /*Each worker gets its own compressor, so the dictionary is loaded once
+    per worker rather than once per chunk.*/
+    let new_compressor = || {
+        let mut compressor = chunk_compressor(compression_level, dictionary)?;
+        Ok(move |data: &[u8]| {
+            compressor.compress(data).map_err(ArchiveError::from)
+        })
+    };
+
+    run_pipeline(
+        worker_count,
+        sorted_hashes,
+        new_compressor,
+        chunk_list_read_cb,
+        chunk_write_cb,
+    )
+}
+
+/// Compresses chunks in parallel with a caller-supplied compressor, and
+/// writes them in order.
+///
+/// This is the pipeline `ArchiveBuilder` compresses with, for hosts that
+/// compress some chunks with another codec (e.g. FLAC for CD audio). It
+/// reads chunks in batches through `chunk_list_read_cb`, compresses them on
+/// a pool of worker threads, and writes the results through
+/// `chunk_write_cb` in `sorted_hashes` order.
+///
+/// # Type Parameters
+///
+/// * `F`: Makes a compressor. It's called once per worker thread, so a
+///   compressor can keep state (e.g. a loaded dictionary) between chunks.
+/// * `C`: A compressor: takes a chunk's data and returns it compressed.
+/// * `R`: The read callback. Given a slice of hashes, it returns the
+///   uncompressed data of each, in the same order.
+/// * `W`: The write callback, called once per chunk, in order, with the
+///   compressed bytes.
+///
+/// # Arguments
+///
+/// * `worker_count`: The number of worker threads to compress with. `0`
+///   uses the available parallelism. The calling thread coordinates
+///   besides these, and mostly waits.
+/// * `sorted_hashes`: The chunks to compress, in the order to write them. A
+///   hash that appears twice is compressed and written twice.
+/// * `new_compressor`: Makes each worker's compressor.
+/// * `chunk_list_read_cb`: Reads the uncompressed data for a set of hashes.
+/// * `chunk_write_cb`: Writes the ordered, compressed chunk data to its
+///   final destination (e.g., a file or an in-memory buffer).
+///
+/// # Returns
+///
+/// The chunk index: each hash of `sorted_hashes`, in order, with the offset
+/// and length of its compressed data in the written output.
+///
+/// # Errors
+///
+/// - `SpriteShrinkError::Cancelled` if either callback reports a
+///   cancellation.
+/// - `SpriteShrinkError::Archive` for every other error, which includes:
+///   an error from either callback; a read callback that returns a
+///   different number of chunks than it was asked for; an error from
+///   `new_compressor` or a compressor (its message is kept); a worker
+///   thread that panics; a compressed chunk of 4 GiB or more, which the
+///   chunk index can't record; and a `worker_count` of 0 when the available
+///   parallelism can't be determined.
+///
+/// `new_compressor` is called once before any chunk is read, so a
+/// compressor that can't be made fails before the callbacks are used.
+pub fn compress_chunks_with<C, EComp, ERead, EWrite, F, H, R, W>(
+    worker_count: usize,
+    sorted_hashes: &[H],
+    new_compressor: F,
+    chunk_list_read_cb: R,
+    chunk_write_cb: W,
+) -> Result<Vec<(H, ChunkLocation)>, SpriteShrinkError>
+where
+    C: FnMut(&[u8]) -> Result<Vec<u8>, EComp> + Send,
+    EComp: std::error::Error,
+    ERead: std::error::Error + IsCancelled,
+    EWrite: std::error::Error + IsCancelled,
+    F: Fn() -> Result<C, EComp> + Sync,
+    H: Copy,
+    R: Fn(&[H]) -> Result<Vec<Vec<u8>>, ERead>,
+    W: FnMut(&[u8]) -> Result<(), EWrite>,
+{
+    /*ArchiveError isn't public, so the caller's error type can't convert
+    into it. Its message is kept instead.*/
+    let compression_error =
+        |e: EComp| ArchiveError::CompressionError(e.to_string());
+
+    /*Wraps each compressor so its errors are ArchiveErrors. The closure
+    that maps them captures nothing, so it's Copy and each wrapper gets
+    its own.*/
+    let new_archive_compressor = || {
+        new_compressor()
+            .map(|mut compress| move |data: &[u8]| {
+                compress(data).map_err(compression_error)
+            })
+            .map_err(compression_error)
+    };
+
+    run_pipeline(
+        worker_count,
+        sorted_hashes,
+        new_archive_compressor,
+        chunk_list_read_cb,
+        chunk_write_cb,
+    ).map_err(SpriteShrinkError::from)
 }
 
 /// Compresses a collection of data chunks in parallel using a
@@ -170,6 +316,8 @@ fn callback_error<E: std::error::Error + IsCancelled>(e: &E) -> ArchiveError {
 ///
 /// # Type Parameters
 ///
+/// * `F`: Makes a compressor. Each worker calls it once.
+/// * `C`: A compressor: takes a chunk's data and returns it compressed.
 /// * `H`: The hash type.
 /// * `R`: The read callback. Given a slice of hashes, it returns the
 ///   uncompressed data of each, in the same order.
@@ -181,11 +329,10 @@ fn callback_error<E: std::error::Error + IsCancelled>(e: &E) -> ArchiveError {
 /// * `worker_count`: The number of worker threads to compress with. `0`
 ///   uses the available parallelism. The calling thread coordinates
 ///   besides these, and mostly waits.
-/// * `dictionary`: The Zstandard dictionary to compress with. It may be
-///   empty.
 /// * `sorted_hashes`: The chunks to compress, in the order to write them. A
 ///   hash that appears twice is compressed and written twice.
-/// * `compression_level`: The Zstandard compression level for the workers.
+/// * `new_compressor`: Makes each worker's compressor. The first one is
+///   made on the calling thread before any chunk is read.
 /// * `chunk_list_read_cb`: Reads the uncompressed data for a set of hashes.
 /// * `chunk_write_cb`: Writes the ordered, compressed chunk data to its
 ///   final destination (e.g., a file or an in-memory buffer).
@@ -204,22 +351,21 @@ fn callback_error<E: std::error::Error + IsCancelled>(e: &E) -> ArchiveError {
 /// - `ArchiveError::Io` if `worker_count` is 0 and the available
 ///   parallelism can't be determined.
 /// - `ArchiveError::WorkerError` if a worker thread panics.
-/// - `ArchiveError::Dictionary` if zstd can't use `dictionary`. This is
-///   checked before any chunk is read.
 /// - `ArchiveError::CompressionError` if a compressed chunk is 4 GiB or
 ///   more, which the chunk index can't record. Nothing is written for it.
-/// - Any error from compressing a chunk.
-pub(crate) fn compress_chunks<ERead, EWrite, H, R, W>(
+/// - Any error from `new_compressor` or a compressor.
+fn run_pipeline<C, ERead, EWrite, F, H, R, W>(
     worker_count: usize,
-    dictionary: &[u8],
     sorted_hashes: &[H],
-    compression_level: i32,
+    new_compressor: F,
     chunk_list_read_cb: R,
     chunk_write_cb: W,
 ) -> Result<Vec<(H, ChunkLocation)>, ArchiveError>
 where
+    C: FnMut(&[u8]) -> Result<Vec<u8>, ArchiveError> + Send,
     ERead: std::error::Error + IsCancelled,
     EWrite: std::error::Error + IsCancelled,
+    F: Fn() -> Result<C, ArchiveError> + Sync,
     H: Copy,
     R: Fn(&[H]) -> Result<Vec<Vec<u8>>, ERead>,
     W: FnMut(&[u8]) -> Result<(), EWrite>,
@@ -240,13 +386,18 @@ where
     let (from_compress_tx, from_compress_rx) =
         flume::unbounded::<Result<(usize, Vec<u8>), ArchiveError>>();
 
-    /*Check the dictionary before reading any chunks or starting any
-    threads. The compressor isn't thrown away: the first worker uses it.*/
-    let mut checked_compressor =
-        Some(chunk_compressor(compression_level, dictionary)?);
+    /*Make one compressor before reading any chunks or starting any threads,
+    so a bad configuration (e.g. a dictionary zstd rejects) fails first.
+    It isn't thrown away: the first worker uses it.*/
+    let mut checked_compressor = Some(new_compressor()?);
 
-    /*Scoped threads can borrow the dictionary, and are all joined before
-    the scope returns, even when the coordinator stops early.*/
+    /*Each worker's closure is `move`, so it needs its own handle on the
+    factory. A shared reference is Copy, and is Send because F is Sync.*/
+    let new_compressor = &new_compressor;
+
+    /*Scoped threads can borrow the factory and whatever it borrows (e.g.
+    the dictionary), and are all joined before the scope returns, even when
+    the coordinator stops early.*/
     thread::scope(|scope| {
         let workers: Vec<_> = (0..num_workers)
             .map(|_| {
@@ -255,12 +406,10 @@ where
                 //Some for the first worker, None for the rest.
                 let checked = checked_compressor.take();
                 scope.spawn(move || {
-                    let compressor = checked.map_or_else(
-                        || chunk_compressor(compression_level, dictionary),
-                        Ok,
-                    );
-                    let mut compressor = match compressor {
-                        Ok(compressor) => compressor,
+                    let mut compress = match checked
+                        .map_or_else(new_compressor, Ok)
+                    {
+                        Ok(compress) => compress,
                         Err(e) => {
                             /*A failed send means the coordinator has
                             already stopped and doesn't need the error.*/
@@ -272,9 +421,8 @@ where
                     /*Workers loop until the queue is empty and the
                     coordinator has dropped its sender.*/
                     while let Ok((position, data)) = to_compress_rx.recv() {
-                        let result = compressor.compress(&data)
-                            .map(|compressed| (position, compressed))
-                            .map_err(ArchiveError::from);
+                        let result = compress(&data)
+                            .map(|compressed| (position, compressed));
                         let failed = result.is_err();
 
                         /*A failed send means the coordinator has stopped,
@@ -316,7 +464,7 @@ where
     })
 }
 
-/// Runs the calling thread's side of `compress_chunks`: reads chunks and
+/// Runs the calling thread's side of `run_pipeline`: reads chunks and
 /// queues them for the workers, and writes the results in order.
 fn coordinate_chunks<ERead, EWrite, H, R, W>(
     sorted_hashes: &[H],
@@ -758,7 +906,10 @@ mod tests {
         cell::Cell,
         collections::HashMap,
         io::ErrorKind,
-        sync::{Arc, Mutex, OnceLock, mpsc},
+        sync::{
+            Arc, Mutex, OnceLock, mpsc,
+            atomic::{AtomicUsize, Ordering as AtomicOrdering},
+        },
         time::Duration,
     };
 
@@ -1036,6 +1187,124 @@ mod tests {
             );
             assert!(written == expected_written, "{workers} workers");
         }
+    }
+
+    /// Runs `compress_chunks_with` on `hashes` from `chunks`, with
+    /// `workers` workers and the compressors `new_compressor` makes.
+    /// Returns the result and each chunk passed to the write callback.
+    fn compress_with_custom<C, F>(
+        workers: usize,
+        hashes: Vec<u64>,
+        chunks: HashMap<u64, Vec<u8>>,
+        new_compressor: F,
+    ) -> (Result<ChunkIndex, SpriteShrinkError>, Vec<Vec<u8>>)
+    where
+        C: FnMut(&[u8]) -> Result<Vec<u8>, io::Error> + Send,
+        F: Fn() -> Result<C, io::Error> + Send + Sync + 'static,
+    {
+        within_timeout(move || {
+            let mut written = Vec::new();
+            let result = compress_chunks_with(
+                workers,
+                &hashes,
+                new_compressor,
+                read_from(chunks),
+                |chunk: &[u8]| -> Result<(), SpriteShrinkError> {
+                    written.push(chunk.to_vec());
+                    Ok(())
+                },
+            );
+            (result, written)
+        })
+    }
+
+    #[test]
+    fn a_custom_compressor_is_made_once_per_worker() {
+        let (hashes, chunks) = chunk_store(600);
+        let made = Arc::new(AtomicUsize::new(0));
+        let made_in_factory = Arc::clone(&made);
+
+        // Reverses each chunk, so the output shows the compressor ran.
+        let (result, written) = compress_with_custom(
+            3,
+            hashes.clone(),
+            chunks.clone(),
+            move || {
+                made_in_factory.fetch_add(1, AtomicOrdering::SeqCst);
+                Ok(|data: &[u8]| Ok(data.iter().rev().copied().collect()))
+            },
+        );
+        let index = result.unwrap();
+
+        assert_eq!(made.load(AtomicOrdering::SeqCst), 3);
+        let mut offset = 0;
+        for (((hash, location), compressed), expected_hash) in
+            index.iter().zip(&written).zip(&hashes)
+        {
+            assert_eq!(hash, expected_hash);
+            assert_eq!(location.offset, offset, "chunk {hash}");
+            offset += u64::from(location.compressed_length);
+            let reversed: Vec<u8> = chunks[hash].iter().rev().copied().collect();
+            assert_eq!(compressed, &reversed, "chunk {hash}");
+        }
+    }
+
+    /// A compressor type for a factory that never makes one.
+    type Compressor = fn(&[u8]) -> io::Result<Vec<u8>>;
+
+    #[test]
+    fn a_compressor_that_cannot_be_made_fails_before_anything_is_read() {
+        let result = within_timeout(|| {
+            compress_chunks_with(
+                2,
+                &[1u64, 2, 3],
+                || -> io::Result<Compressor> {
+                    Err(io::Error::other("no codec available"))
+                },
+                |_: &[u64]| -> ReadResult { panic!("nothing should be read") },
+                |_: &[u8]| -> Result<(), SpriteShrinkError> {
+                    panic!("nothing should be written")
+                },
+            )
+        });
+
+        assert!(
+            matches!(
+                &result,
+                Err(SpriteShrinkError::Archive(ArchiveError::CompressionError(
+                    message
+                ))) if message == "no codec available"
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_compressor_error_keeps_its_message() {
+        let (hashes, chunks) = chunk_store(50);
+        // Fails on the one chunk that is 230 bytes long.
+        let (result, _written) = compress_with_custom(
+            2,
+            hashes,
+            chunks,
+            || Ok(|data: &[u8]| {
+                if data.len() == 230 {
+                    Err(io::Error::other("block 30 is malformed"))
+                } else {
+                    Ok(data.to_vec())
+                }
+            }),
+        );
+
+        assert!(
+            matches!(
+                &result,
+                Err(SpriteShrinkError::Archive(ArchiveError::CompressionError(
+                    message
+                ))) if message == "block 30 is malformed"
+            ),
+            "{result:?}"
+        );
     }
 
     #[test]

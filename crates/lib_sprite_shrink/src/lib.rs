@@ -1,6 +1,6 @@
 mod archive;
 pub use archive::{
-    ArchiveBuilder, decompress_chunk
+    ArchiveBuilder, compress_chunks_with, decompress_chunk
 };
 
 pub mod ffi;

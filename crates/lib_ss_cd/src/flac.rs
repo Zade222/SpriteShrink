@@ -1,23 +1,17 @@
-use std::{
-    collections::{VecDeque},
-    io::{Cursor, Read, Write},
-    sync::{Arc, Mutex},
-    thread
-};
+use std::io::{Cursor, Read, Write};
 
 use flac_codec::{
     byteorder::LittleEndian,
     decode::FlacByteReader,
     encode::{FlacByteWriter, Options},
 };
-use flume::{bounded, unbounded};
 use thiserror::Error;
 
 use crate::{
     lib_error_handling::SpriteShrinkCDError,
 };
 
-use sprite_shrink::{ChunkLocation, Hashable};
+use sprite_shrink::{ChunkLocation, IsCancelled, compress_chunks_with};
 
 
 #[derive(Error, Debug)]
@@ -28,14 +22,8 @@ pub enum FlacError {
     #[error("Flac decode error: {0}")]
     Decode(String),
 
-    #[error("An error occurred in an external callback: {0}")]
-    External(String),
-
     #[error("Flac finalization error: {0}")]
     Finalization(String),
-
-    #[error("Worker Error {0}")]
-    Worker(String),
 
     #[error("Flac init error: {0}")]
     Init(String),
@@ -86,196 +74,330 @@ pub fn decompress_flac_block(
 }
 
 
-pub fn compress_audio_blocks<A, E, H, W>(
-    audio_block_hashes: Vec<H>,
-    get_audio_blocks_cb: A,
+/// Compresses CD audio blocks with FLAC, in parallel, and writes them in
+/// order.
+///
+/// Uses the same pipeline as the data chunks of an archive
+/// (`sprite_shrink::compress_chunks_with`), with each block compressed by
+/// `compress_audio_block` at its best setting.
+///
+/// # Arguments
+///
+/// * `audio_block_hashes`: The blocks to compress, in the order to write
+///   them.
+/// * `get_audio_blocks_cb`: Reads the PCM data for a set of hashes, in the
+///   same order.
+/// * `com_block_write_cb`: Writes each compressed block, in order.
+/// * `worker_count`: The number of worker threads. `0` uses the available
+///   parallelism.
+///
+/// # Returns
+///
+/// Each hash of `audio_block_hashes`, in order, with the offset and length
+/// of its compressed block in the written output.
+///
+/// # Errors
+///
+/// `SpriteShrinkCDError::SpriteShrink` wrapping:
+/// - `SpriteShrinkError::Cancelled` if either callback reports a
+///   cancellation.
+/// - `SpriteShrinkError::Archive` for any other callback error, a read
+///   callback that returns a different number of blocks than it was asked
+///   for, or a block FLAC can't compress (the `FlacError` message is kept).
+pub fn compress_audio_blocks<E, H, R, W>(
+    audio_block_hashes: &[H],
+    get_audio_blocks_cb: R,
     com_block_write_cb: W,
     worker_count: usize,
 ) -> Result<Vec<(H, ChunkLocation)>, SpriteShrinkCDError>
 where
-    A: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
-    E: std::error::Error + Send + Sync + 'static,
-    H: Hashable,
-    W: FnMut(&[u8]) -> Result<(), E> + Send + Sync + 'static,
+    E: std::error::Error + IsCancelled,
+    H: Copy,
+    R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E>,
+    W: FnMut(&[u8]) -> Result<(), E>,
 {
-    const PREFETCH_LOW_THRESHOLD: usize = 100;
-    const PREFETCH_HIGH_THRESHOLD: usize = 500;
+    /*FLAC keeps no state between blocks, so every worker's compressor is
+    the same stateless function.*/
+    let new_compressor = || Ok::<_, FlacError>(
+        |block: &[u8]| compress_audio_block(block, true)
+    );
 
-    let total_blocks = audio_block_hashes.len();
+    Ok(compress_chunks_with(
+        worker_count,
+        audio_block_hashes,
+        new_compressor,
+        get_audio_blocks_cb,
+        com_block_write_cb,
+    )?)
+}
 
-    let audio_block_hashes_arc: Arc<[H]> = Arc::from(audio_block_hashes);
 
-    let (to_compress_tx, to_compress_rx) =
-        bounded::<(usize, H, Vec<u8>)>(PREFETCH_HIGH_THRESHOLD);
-
-    let (from_compress_tx, from_compress_rx) =
-        unbounded::<(usize, H, Vec<u8>)>();
-
-    let (err_tx, err_rx) = std::sync::mpsc::channel::<FlacError>();
-
-    let mut worker_handles = Vec::with_capacity(worker_count);
-
-    let num_threads = if worker_count == 0 {
-        std::thread::available_parallelism()?.get()
-    } else {
-        worker_count
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap,
+        f64::consts::TAU,
+        sync::mpsc,
+        time::Duration,
     };
 
-    // Resolve the number of threads to use. If 0, use available parallelism.
-    let num_workers = (num_threads).saturating_sub(1).max(1);
+    use sprite_shrink::SpriteShrinkError;
 
-    for _ in 0..num_workers {
-        //Clone necessary data to be used safely.
-        let to_compress_rx_clone = to_compress_rx.clone();
-        let from_compress_tx_clone = from_compress_tx.clone();
-        let err_tx_clone = err_tx.clone();
+    use super::*;
 
-        let handle = thread::spawn(move ||{
-            while let Ok((batch_idx, hash, block)) = to_compress_rx_clone.recv() {
-                match compress_audio_block(
-                    &block,
-                    true
-                ) {
-                    Ok(compress_block) => {
-                        if from_compress_tx_clone.send((
-                            batch_idx,
-                            hash,
-                            compress_block
-                        )).is_err() {
-                            //The I/O thread has terminated; exit gracefully.
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = err_tx_clone.send(e);
-                        break;
-                    }
-                }
+    /// Bytes in one CD sector of audio: 588 stereo 16-bit frames.
+    const SECTOR: usize = 2352;
+
+    /// `frames` stereo frames of 16-bit little-endian PCM, each sample
+    /// given by `sample(frame, channel)`.
+    fn pcm(frames: usize, sample: impl Fn(usize, usize) -> i16) -> Vec<u8> {
+        (0..frames)
+            .flat_map(|frame| [sample(frame, 0), sample(frame, 1)])
+            .flat_map(i16::to_le_bytes)
+            .collect()
+    }
+
+    fn silence(frames: usize) -> Vec<u8> {
+        pcm(frames, |_, _| 0)
+    }
+
+    /// A 441 Hz tone at 44.1 kHz, a quarter of full scale, with the right
+    /// channel half a cycle behind the left.
+    fn sine(frames: usize) -> Vec<u8> {
+        pcm(frames, |frame, channel| {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "frame and channel are small"
+            )]
+            let phase = (frame as f64 / 100.0 + channel as f64 / 2.0) * TAU;
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "the value is within ±8192"
+            )]
+            let value = (phase.sin() * 8192.0).round() as i16;
+            value
+        })
+    }
+
+    /// Full-scale white noise from a fixed-seed xorshift, which FLAC can't
+    /// shrink.
+    fn noise(frames: usize) -> Vec<u8> {
+        let mut state = 0x5EED_F1AC_u64;
+        (0..frames * 4)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_le_bytes()[0]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn audio_round_trips_through_flac() {
+        let frames = 10 * SECTOR / 4;
+        for (name, audio) in [
+            ("silence", silence(frames)),
+            ("sine", sine(frames)),
+            ("noise", noise(frames)),
+        ] {
+            for best in [true, false] {
+                let flac = compress_audio_block(&audio, best).unwrap();
+                assert_eq!(
+                    decompress_flac_block(&flac).unwrap(),
+                    audio,
+                    "{name}, best {best}"
+                );
             }
+        }
+    }
+
+    #[test]
+    fn silence_and_a_tone_compress() {
+        let frames = 10 * SECTOR / 4;
+        for (name, audio) in [("silence", silence(frames)), ("sine", sine(frames))] {
+            let flac = compress_audio_block(&audio, true).unwrap();
+            assert!(
+                flac.len() < audio.len() / 2,
+                "{name}: {} bytes from {}",
+                flac.len(),
+                audio.len()
+            );
+        }
+    }
+
+    #[test]
+    fn an_empty_block_is_an_error() {
+        // flac_codec rejects a total length of 0. Audio blocks are whole
+        // sectors, so the CLI never asks for one.
+        assert!(matches!(
+            compress_audio_block(&[], true),
+            Err(FlacError::Init(_))
+        ));
+    }
+
+    #[test]
+    fn a_block_that_is_not_whole_frames_is_an_error() {
+        let audio = sine(SECTOR / 4);
+        for cut in 1..4 {
+            let partial = &audio[..audio.len() - cut];
+            assert!(
+                compress_audio_block(partial, true).is_err(),
+                "{} bytes",
+                partial.len()
+            );
+        }
+    }
+
+    #[test]
+    fn garbage_does_not_decode() {
+        decompress_flac_block(&[]).unwrap_err();
+        decompress_flac_block(&noise(100)).unwrap_err();
+    }
+
+    type ReadResult = Result<Vec<Vec<u8>>, SpriteShrinkError>;
+    type BlockIndex = Vec<(u64, ChunkLocation)>;
+
+    /// `count` blocks of one to four sectors of a tone, each with a
+    /// different length, stored under the hashes `0..count`.
+    fn block_store(count: u64) -> (Vec<u64>, HashMap<u64, Vec<u8>>) {
+        let blocks = (0..count)
+            .map(|i| {
+                let sectors = 1 + usize::try_from(i % 4).unwrap();
+                (i, sine(sectors * SECTOR / 4))
+            })
+            .collect();
+        ((0..count).collect(), blocks)
+    }
+
+    /// Runs `compress_audio_blocks` on another thread, failing the test if
+    /// it takes longer than 30 seconds: the old pipeline hung forever when
+    /// the read callback returned too few blocks. Returns the result and
+    /// each block passed to the write callback.
+    fn compress_blocks(
+        workers: usize,
+        hashes: Vec<u64>,
+        read: impl Fn(&[u64]) -> ReadResult + Send + 'static,
+    ) -> (Result<BlockIndex, SpriteShrinkCDError>, Vec<Vec<u8>>) {
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut written = Vec::new();
+            let result = compress_audio_blocks(
+                &hashes,
+                read,
+                |block: &[u8]| -> Result<(), SpriteShrinkError> {
+                    written.push(block.to_vec());
+                    Ok(())
+                },
+                workers,
+            );
+            /*The send fails only if the receiver timed out and was
+            dropped, and that already failed the test.*/
+            let _ignored = tx.send((result, written));
         });
-        worker_handles.push(handle);
+        rx.recv_timeout(Duration::from_secs(30))
+            .expect("compress_audio_blocks didn't return within 30 seconds")
     }
 
-    drop(to_compress_rx);
-
-    drop(from_compress_tx);
-
-    let abha_clone = Arc::clone(&audio_block_hashes_arc);
-
-    let audio_block_index = Arc::new(Mutex::new(Vec::with_capacity(total_blocks)));
-
-    let block_index_clone = Arc::clone(&audio_block_index);
-
-    let io_handle = thread::spawn(move || -> Result<(), FlacError> {
-        let mut next_needed_idx = 0usize;
-        let mut read_cursor = 0usize;
-        let mut reorder_buffer: VecDeque<Option<(H, Vec<u8>)>> =
-            VecDeque::with_capacity(num_workers * 2);
-        let mut offset = 0u64;
-
-        let mut com_block_write_cb = com_block_write_cb;
-
-        while next_needed_idx < total_blocks {
-            if to_compress_tx.len() < PREFETCH_LOW_THRESHOLD &&
-            read_cursor < total_blocks
-            {
-                let end = (read_cursor + PREFETCH_HIGH_THRESHOLD)
-                    .min(total_blocks);
-
-                let hashes_to_read = &abha_clone[read_cursor..end];
-
-                let blocks = match get_audio_blocks_cb(hashes_to_read) {
-                    Ok(blocks) => blocks,
-                    Err(e) => {
-                        //if canceled, return error canceled
-
-                        return Err(FlacError::Worker(e.to_string()));
-                    }
-                };
-
-                for (i, block) in blocks.into_iter().enumerate() {
-                    let global_idx = read_cursor + i;
-                    let hash = hashes_to_read[i];
-
-                    if to_compress_tx.send((global_idx, hash, block)).is_err() {
-                        return Err(FlacError::Finalization("Worker pool died".into()));
-                    }
-                }
-                read_cursor = end;
-            }
-
-            match from_compress_rx.recv() {
-                Ok((idx, hash, comp_data)) => {
-                    if idx >= next_needed_idx {
-                        let relative = idx - next_needed_idx;
-
-                        while reorder_buffer.len() <= relative {
-                            reorder_buffer.push_back(None);
-                        }
-
-                        reorder_buffer[relative] = Some((hash, comp_data));
-                    }
-                }
-                Err(_) => {
-                    if next_needed_idx < total_blocks {
-                         return Err(FlacError::Worker(
-                            "Worker pool finished but not all chunks \
-                            were processed.".to_string()));
-                    }
-                    break;
-                }
-            }
-
-            while let Some(Some(_)) = reorder_buffer.front() {
-                if let Some((hash, comp_block)) = reorder_buffer.pop_front().unwrap() {
-                    let comp_block_len = comp_block.len() as u64;
-                    if let Err(e) = com_block_write_cb(&comp_block) {
-                        return Err(FlacError::External(e.to_string()));
-                    }
-
-
-                    let mut bi_clone = block_index_clone
-                        .lock()
-                        .unwrap();
-
-                    bi_clone.push((
-                        hash,
-                        ChunkLocation {
-                            offset,
-                            compressed_length: comp_block_len as u32,
-                        }
-                    ));
-                    offset += comp_block_len;
-                }
-
-                next_needed_idx += 1;
-            }
-
-        }
-
-        Ok(())
-    });
-
-    loop {
-        if io_handle.is_finished() {
-            break;
-        }
-
-        if let Ok(err) = err_rx.try_recv() {
-            return Err(err.into());
+    /// A read callback that returns each requested block from `blocks`.
+    fn read_from(
+        blocks: HashMap<u64, Vec<u8>>,
+    ) -> impl Fn(&[u64]) -> ReadResult + Send + 'static {
+        move |hashes| {
+            Ok(hashes.iter().map(|hash| blocks[hash].clone()).collect())
         }
     }
 
-    for handle in worker_handles {
-        handle.join().expect("A compression worker thread panicked.");
+    #[test]
+    fn blocks_are_written_in_order_with_contiguous_offsets() {
+        // More than one 500-block batch, so the queue is refilled.
+        let (hashes, blocks) = block_store(700);
+        let (result, written) =
+            compress_blocks(4, hashes.clone(), read_from(blocks.clone()));
+        let index = result.unwrap();
+
+        let indexed: Vec<u64> = index.iter().map(|(hash, _)| *hash).collect();
+        assert_eq!(indexed, hashes);
+        assert_eq!(written.len(), hashes.len());
+
+        let mut offset = 0;
+        for ((hash, location), flac) in index.iter().zip(&written) {
+            assert_eq!(location.offset, offset, "block {hash}");
+            assert_eq!(
+                location.compressed_length as usize,
+                flac.len(),
+                "block {hash}"
+            );
+            offset += u64::from(location.compressed_length);
+            assert_eq!(
+                decompress_flac_block(flac).unwrap(),
+                blocks[hash],
+                "block {hash}"
+            );
+        }
     }
 
-    io_handle.join().expect("The I/O thread panicked.")?;
+    #[test]
+    fn a_read_returning_too_few_or_too_many_blocks_is_an_error() {
+        let (hashes, blocks) = block_store(20);
+        for change in [-1_isize, 1] {
+            let blocks = blocks.clone();
+            let read = move |hashes: &[u64]| -> ReadResult {
+                let mut read: Vec<Vec<u8>> =
+                    hashes.iter().map(|hash| blocks[hash].clone()).collect();
+                if change < 0 {
+                    read.pop();
+                } else {
+                    read.push(silence(SECTOR / 4));
+                }
+                Ok(read)
+            };
 
-    let audio_block_index = Arc::try_unwrap(audio_block_index)
-        .expect("Arc should be uniquely owned here")
-        .into_inner()
-        .expect("Mutex should not be poisoned");
+            let (result, written) = compress_blocks(2, hashes.clone(), read);
+            assert!(
+                matches!(
+                    &result,
+                    Err(SpriteShrinkCDError::SpriteShrink(
+                        SpriteShrinkError::Archive(_)
+                    ))
+                ),
+                "change {change}: {result:?}"
+            );
+            assert_eq!(written.len(), 0, "change {change}");
+        }
+    }
 
-    Ok(audio_block_index)
+    #[test]
+    fn a_cancelled_read_is_reported_as_cancelled() {
+        let (result, _written) = compress_blocks(
+            2,
+            vec![1, 2, 3],
+            |_: &[u64]| -> ReadResult { Err(SpriteShrinkError::Cancelled) },
+        );
+        assert!(
+            matches!(
+                result,
+                Err(SpriteShrinkCDError::SpriteShrink(
+                    SpriteShrinkError::Cancelled
+                ))
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_block_flac_rejects_fails_with_its_message() {
+        // A block of 3 bytes isn't a whole stereo frame.
+        let (result, _written) = compress_blocks(
+            2,
+            vec![1, 2, 3],
+            |hashes: &[u64]| -> ReadResult {
+                Ok(hashes.iter().map(|_| vec![0; 3]).collect())
+            },
+        );
+        let Err(SpriteShrinkCDError::SpriteShrink(error)) = result else {
+            panic!("expected a sprite_shrink error, got {result:?}");
+        };
+        assert!(error.to_string().contains("Flac"), "{error}");
+    }
 }

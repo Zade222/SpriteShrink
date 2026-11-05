@@ -427,7 +427,7 @@ where
         };
 
         audio_block_index = compress_audio_blocks(
-            audio_chunk_hashes,
+            &audio_chunk_hashes,
             get_audio_data_for_lib,
             tmp_audio_write_cb,
             process_threads
