@@ -76,7 +76,11 @@ jobs:
 
   no-avx2:
     name: CD tests without AVX2
-    runs-on: ubuntu-latest
+    # Ubuntu 26.04 runners install x86-64-v3 builds of system packages, which
+    # need AVX2. The test binary links the runner's glibc, so under the
+    # Westmere model it died with SIGILL before running any test. 24.04 uses
+    # baseline x86-64 builds.
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout repository
