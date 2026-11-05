@@ -1,7 +1,6 @@
 use std::{
     borrow::Cow,
     io::{self, Read, Seek},
-    iter::repeat_n,
 };
 
 use sprite_shrink::{
@@ -379,35 +378,6 @@ fn normalize_cue_sheet(
     })
 }
 
-/// Decompresses a run-length encoded sector map into a full, per-sector vector
-/// for fast lookups.
-///
-/// This function takes an `RleSectorMap` (which is optimized for compact
-/// storage) and expands it into a `SectorMap` (which is optimized for fast,
-/// O(1) lookups in memory).
-///
-/// # Arguments
-/// - `rle_map`: A reference to the `RleSectorMap` to be decoded.
-///
-/// # Returns
-/// A `SectorMap` containing a `Vec<SectorType>` where each element corresponds
-/// to the type of an individual sector on the disc.
-pub fn rle_decode_map(rle_map: &RleSectorMap) -> SectorMap {
-    let total_sectors: usize = rle_map.runs
-        .iter()
-        .map(|(count, _)| *count as usize)
-        .sum();
-
-    let mut sectors = Vec::with_capacity(total_sectors);
-
-    for (count, sector_type) in &rle_map.runs {
-        sectors.extend(repeat_n(*sector_type, *count as usize));
-    }
-
-    SectorMap { sectors }
-}
-
-
 pub fn rle_encode_map(sector_map: &SectorMap) -> RleSectorMap {
     let mut runs: Vec<(u32, SectorType)> = Vec::new();
 
@@ -432,8 +402,83 @@ pub fn rle_encode_map(sector_map: &SectorMap) -> RleSectorMap {
     RleSectorMap { runs }
 }
 
-const fn from_bcd (bcd: u8) -> u8 {
+pub(crate) const fn from_bcd (bcd: u8) -> u8 {
     let tens = (bcd >> 4) * 10;
     let ones = bcd & 0x0F;
     tens + ones
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::iter::repeat_n;
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::reconstruction::expand_sector_map;
+
+    const ALL_SECTOR_TYPES: [SectorType; 16] = [
+        SectorType::Audio,
+        SectorType::Mode1,
+        SectorType::Mode1Exception,
+        SectorType::Mode2Form1,
+        SectorType::Mode2Form1Exception,
+        SectorType::Mode2Form2,
+        SectorType::Mode2Form2Exception,
+        SectorType::PregapMode1,
+        SectorType::PregapMode1Exception,
+        SectorType::PregapMode2,
+        SectorType::PregapMode2Exception,
+        SectorType::PregapAudio,
+        SectorType::ZeroedAudio,
+        SectorType::ZeroedMode1Data,
+        SectorType::ZeroedMode2Data,
+        SectorType::None,
+    ];
+
+    /// A sector map built from runs, so long repeats are common. Adjacent
+    /// runs can share a type, which `rle_encode_map` has to merge.
+    fn sector_map() -> impl Strategy<Value = Vec<SectorType>> {
+        proptest::collection::vec(
+            (proptest::sample::select(ALL_SECTOR_TYPES.to_vec()), 1..40_usize),
+            0..20,
+        ).prop_map(|runs| {
+            runs.into_iter()
+                .flat_map(|(sector_type, count)| repeat_n(sector_type, count))
+                .collect()
+        })
+    }
+
+    fn encode(sectors: &[SectorType]) -> RleSectorMap {
+        rle_encode_map(&SectorMap { sectors: sectors.to_vec() })
+    }
+
+    proptest! {
+        #[test]
+        fn expanding_an_encoded_map_gives_it_back(sectors in sector_map()) {
+            prop_assert_eq!(expand_sector_map(&encode(&sectors)), sectors);
+        }
+
+        #[test]
+        fn encoded_runs_are_as_long_as_possible(sectors in sector_map()) {
+            let rle = encode(&sectors);
+            prop_assert!(rle.runs.iter().all(|&(count, _)| count > 0));
+            prop_assert!(rle.runs.windows(2).all(|pair| pair[0].1 != pair[1].1));
+        }
+    }
+
+    #[test]
+    fn a_map_without_repeats_encodes_as_runs_of_one() {
+        let rle = encode(&ALL_SECTOR_TYPES);
+        assert_eq!(rle.runs.len(), ALL_SECTOR_TYPES.len());
+        for (&(count, sector_type), expected) in rle.runs.iter().zip(ALL_SECTOR_TYPES) {
+            assert_eq!((count, sector_type), (1, expected));
+        }
+    }
+
+    #[test]
+    fn an_empty_map_encodes_as_no_runs() {
+        assert_eq!(encode(&[]).runs.len(), 0);
+    }
 }

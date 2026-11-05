@@ -38,6 +38,7 @@ cbindgen = "0.29"
 
 [dev-dependencies]
 criterion = { version = "~0.8", default-features = false, features = ["cargo_bench_support"] }
+proptest = { version = "~1.12", default-features = false, features = ["std"] }
 
 [[bench]]
 name = "sector_rebuild"

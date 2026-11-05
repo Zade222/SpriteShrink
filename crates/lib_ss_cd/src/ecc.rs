@@ -384,6 +384,7 @@ fn gf_mul_simd<S: Simd>(simd: S, feedback: S::u8s) -> (S::u8s, S::u8s) {
 
 #[cfg(test)]
 mod tests {
+    use proptest::prelude::*;
     use pulp::{Scalar, Scalar128b, Scalar256b};
 
     use super::*;
@@ -488,5 +489,157 @@ mod tests {
     fn calc_ecc_simd_inplace_short_sector_panics() {
         let mut sector = [0_u8; 2300];
         calc_ecc_simd_inplace(&mut sector);
+    }
+
+    /// The CD-ROM EDC computed one bit at a time: CRC-32 with the reflected
+    /// polynomial 0xD8018001 (x^32 + x^31 + x^16 + x^15 + x^4 + x^3 + x + 1),
+    /// initial value 0 and no final XOR (ECMA-130 section 14.3). Written
+    /// independently of `crc-fast` so `calculate_edc` isn't checked against
+    /// itself.
+    fn edc_reference(data: &[u8]) -> [u8; 4] {
+        let mut crc = 0_u32;
+        for &byte in data {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xD801_8001
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        crc.to_le_bytes()
+    }
+
+    /// Multiplication in GF(2^8) with the CD-ROM field polynomial
+    /// x^8 + x^4 + x^3 + x^2 + 1 (0x11D), by shift and add.
+    fn gf_mul_reference(mut a: u8, mut b: u8) -> u8 {
+        let mut product = 0_u8;
+        while b != 0 {
+            if b & 1 == 1 {
+                product ^= a;
+            }
+            let carry = a & 0x80 != 0;
+            a <<= 1;
+            if carry {
+                a ^= 0x1D;
+            }
+            b >>= 1;
+        }
+        product
+    }
+
+    /// A sector with a random body and valid P and Q parity.
+    fn sector_with_ecc(body: &[u8]) -> [u8; SECTOR_SIZE] {
+        let mut sector = [0_u8; SECTOR_SIZE];
+        sector.copy_from_slice(body);
+        calc_ecc_bitwise(&mut sector);
+        sector
+    }
+
+    fn ecc_check(sector: &[u8; SECTOR_SIZE], sector_type: SectorType) -> bool {
+        sector_ecc_check_bitwise(
+            sector,
+            &sector[2076..2248],
+            &sector[2248..],
+            sector_type,
+        )
+    }
+
+    #[test]
+    fn gf_mul_scalar_returns_times_2_and_times_3() {
+        for feedback in 0..=u8::MAX {
+            assert_eq!(
+                gf_mul_scalar(feedback),
+                (
+                    gf_mul_reference(feedback, 2),
+                    gf_mul_reference(feedback, 3)
+                ),
+                "feedback {feedback:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn edc_of_an_unsupported_type_is_the_crc_of_nothing() {
+        let sector = [0xA5_u8; SECTOR_SIZE];
+        for sector_type in [
+            SectorType::Audio,
+            SectorType::Mode1Exception,
+            SectorType::PregapMode1,
+            SectorType::ZeroedMode1Data,
+            SectorType::None,
+        ] {
+            assert_eq!(calculate_edc(&sector, sector_type), [0; 4]);
+        }
+    }
+
+    #[test]
+    fn a_header_change_breaks_mode1_ecc_but_not_mode2_form1() {
+        // Mode 2 Form 1 parity is computed with the header zeroed, so a
+        // valid sector stays valid whatever its header says. Mode 1 parity
+        // covers the header.
+        let mut sector = sector_with_ecc(&test_sectors()[3]);
+        assert!(ecc_check(&sector, SectorType::Mode1));
+
+        let mut zero_header = sector;
+        zero_header[12..16].fill(0);
+        calc_ecc_bitwise(&mut zero_header);
+        sector[2076..].copy_from_slice(&zero_header[2076..]);
+        assert!(ecc_check(&sector, SectorType::Mode2Form1));
+
+        sector[12..16].copy_from_slice(&[0x00, 0x02, 0x16, 0x02]);
+        assert!(!ecc_check(&sector, SectorType::Mode1));
+        assert!(ecc_check(&sector, SectorType::Mode2Form1));
+    }
+
+    proptest! {
+        #[test]
+        fn calculate_edc_matches_the_bitwise_crc(
+            body in proptest::collection::vec(any::<u8>(), SECTOR_SIZE),
+        ) {
+            for (sector_type, range) in [
+                (SectorType::Mode1, 0..2064),
+                (SectorType::Mode2Form1, 16..2072),
+                (SectorType::Mode2Form2, 16..2348),
+            ] {
+                prop_assert_eq!(
+                    calculate_edc(&body, sector_type),
+                    edc_reference(&body[range]),
+                    "{:?}", sector_type
+                );
+            }
+        }
+
+        #[test]
+        fn mode1_ecc_check_rejects_any_changed_byte_after_the_sync(
+            body in proptest::collection::vec(any::<u8>(), SECTOR_SIZE),
+            index in 12..SECTOR_SIZE,
+            flip in 1..=u8::MAX,
+        ) {
+            // The P and Q codewords cover every byte from the header to
+            // the end. A distance-3 Reed-Solomon code detects any single
+            // wrong symbol, so one changed byte must always fail.
+            let mut sector = sector_with_ecc(&body);
+            prop_assert!(ecc_check(&sector, SectorType::Mode1));
+
+            sector[index] ^= flip;
+            prop_assert!(!ecc_check(&sector, SectorType::Mode1));
+        }
+
+        #[test]
+        fn mode2_form1_ecc_check_rejects_any_changed_byte_after_the_header(
+            body in proptest::collection::vec(any::<u8>(), SECTOR_SIZE),
+            index in 16..SECTOR_SIZE,
+            flip in 1..=u8::MAX,
+        ) {
+            let mut body = body;
+            body[12..16].fill(0);
+            let mut sector = sector_with_ecc(&body);
+            prop_assert!(ecc_check(&sector, SectorType::Mode2Form1));
+
+            sector[index] ^= flip;
+            prop_assert!(!ecc_check(&sector, SectorType::Mode2Form1));
+        }
     }
 }

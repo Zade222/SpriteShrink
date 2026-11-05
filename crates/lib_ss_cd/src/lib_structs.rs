@@ -15,9 +15,10 @@ use crate::{
     flac::decompress_flac_block,
     lib_error_handling::SpriteShrinkCDError,
     reconstruction::{
-        ReconstructionError,
-        build_decoded_map, expand_exception_index, expand_sector_map,
-        expand_subheader_map, rebuild_sector_simd
+        MsfOffsets, ReconstructionError,
+        build_decoded_map, exception_data_for, expand_exception_index,
+        expand_sector_map, expand_subheader_map, rebuild_sector_simd,
+        subheader_for
     },
 };
 
@@ -222,6 +223,9 @@ impl<'a, H> DiscReconstructor<'a, H>
 where
     H: Hashable + Display + Copy + Eq,
 {
+    /// # Errors
+    /// [`ReconstructionError::ExceptionSectorOutOfRange`] when the manifest's
+    /// exception index names a sector past the end of the disc.
     pub fn new(
         manifest: &'a DiscManifest<H>,
         indices: &'a SSMDIndices<H>,
@@ -229,7 +233,7 @@ where
         archive_file: &'a File,
         exception_blob: &'a [u8],
         subheader_table: &'a [[u8; 8]],
-    ) -> Self {
+    ) -> Result<Self, ReconstructionError> {
         let context = ReconstructionContext::new(manifest);
 
         let expanded_sector_types = expand_sector_map(
@@ -244,9 +248,9 @@ where
         let expanded_exception_map = expand_exception_index(
             &manifest.disc_exception_index,
             total_sectors
-        );
+        )?;
 
-        Self {
+        Ok(Self {
             manifest,
             indices,
             dictionary,
@@ -257,7 +261,7 @@ where
             expanded_subheader_map,
             expanded_exception_map,
             expanded_sector_types,
-        }
+        })
     }
 
     /// Reads and reconstructs a specific sector by its index
@@ -267,17 +271,12 @@ where
     ) -> Result<[u8; 2352], SpriteShrinkCDError> {
         let sector_idx_usize = sector_idx as usize;
 
-        if sector_idx_usize >= self.expanded_sector_types.len() {
-            return Err(SpriteShrinkCDError::Reconstruction(
-                ReconstructionError::InternalError(format!(
-                    "Sector index {} out of bounds (max {})",
-                    sector_idx,
-                    self.expanded_sector_types.len() - 1
-                ))
-            ));
-        }
-
-        let sector_type = self.expanded_sector_types[sector_idx_usize];
+        let sector_type = *self.expanded_sector_types.get(sector_idx_usize)
+            .ok_or_else(|| ReconstructionError::InternalError(format!(
+                "Sector index {} out of bounds (the disc has {} sectors)",
+                sector_idx,
+                self.expanded_sector_types.len()
+            )))?;
 
         let reconstruction_info = self.context.get_reconstruction_info(
             sector_idx
@@ -367,31 +366,23 @@ where
         }
 
 
-        let exception = self.expanded_exception_map[sector_idx_usize]
-            .map(|excep_id| {
-                let offset = self.indices.exception_index[excep_id as usize] as usize;
-                let size = sector_type.excep_size();
-                &self.exception_blob[offset..offset + size]
-            });
+        let exception = self.expanded_exception_map.get(sector_idx_usize)
+            .copied().flatten()
+            .map(|excep_id| exception_data_for(
+                &self.indices.exception_index,
+                self.exception_blob,
+                excep_id,
+                sector_type.excep_size()
+            ))
+            .transpose()?;
 
-        let metadata = self.expanded_subheader_map[sector_idx_usize]
-            .map(|did| &self.subheader_table[did as usize])
+        let data_id = self.expanded_subheader_map.get(sector_idx_usize)
+            .copied().flatten()
             .ok_or(ReconstructionError::MissingSubheader(sector_idx_usize))?;
+        let metadata = subheader_for(self.subheader_table, data_id)?;
 
-        let lba_map = &self.manifest.lba_map;
-        let mut current_msf_offset = lba_map[0].1;
-        let mut lba_index = 0;
-
-        while lba_index < lba_map.len() - 1 {
-            let next_threshold = lba_map[lba_index + 1].0;
-            if (sector_idx + current_msf_offset) >= next_threshold {
-                lba_index += 1;
-                current_msf_offset = lba_map[lba_index].1;
-            } else {
-                break;
-            }
-        }
-        let lba = sector_idx + current_msf_offset;
+        let lba = MsfOffsets::new(&self.manifest.lba_map)
+            .sector_num(sector_idx);
 
         let user_data_len = sector_type.data_size() as usize;
 
@@ -948,5 +939,52 @@ impl Display for TrackType {
             TrackType::Mode1_2352 => write!(f, "MODE1/2352"),
             TrackType::Mode2_2352 => write!(f, "MODE2/2352"),
         }
+    }
+}
+
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registering_the_same_exception_twice_returns_the_same_id() {
+        let registry = ExceptionRegistry::default();
+        let a = registry.get_or_register(vec![1; 20]);
+        let b = registry.get_or_register(vec![2; 296]);
+        assert_eq!(registry.get_or_register(vec![1; 20]), a);
+        assert_eq!(registry.get_or_register(vec![2; 296]), b);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn the_exception_index_points_at_each_entry_in_the_blob() {
+        let registry = ExceptionRegistry::default();
+        let entries = [vec![1; 296], vec![2; 20], vec![3; 296]];
+        let ids: Vec<u32> = entries.iter()
+            .map(|data| registry.get_or_register(data.clone()))
+            .collect();
+        registry.get_or_register(entries[1].clone());
+
+        let (blob, index) = registry.generate_blob_and_index();
+        assert_eq!(index, [0, 296, 316]);
+        assert_eq!(blob.len(), 612);
+        for (id, data) in ids.into_iter().zip(&entries) {
+            let start = usize::try_from(index[id as usize]).unwrap();
+            assert_eq!(&blob[start..start + data.len()], data.as_slice());
+        }
+    }
+
+    #[test]
+    fn subheaders_are_deduplicated_and_listed_by_id() {
+        let registry = SubheaderRegistry::default();
+        let a = registry.get_or_register([0, 0, 8, 0, 0, 0, 8, 0]);
+        let b = registry.get_or_register([1, 0, 0x20, 0, 1, 0, 0x20, 0]);
+        assert_eq!(registry.get_or_register([0, 0, 8, 0, 0, 0, 8, 0]), a);
+
+        let table = registry.generate_blob();
+        assert_eq!(table.len(), 2);
+        assert_eq!(table[usize::from(a)], [0, 0, 8, 0, 0, 0, 8, 0]);
+        assert_eq!(table[usize::from(b)], [1, 0, 0x20, 0, 1, 0, 0x20, 0]);
     }
 }
