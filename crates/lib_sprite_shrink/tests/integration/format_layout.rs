@@ -19,7 +19,7 @@ use sprite_shrink::{
 /// endian.
 const GOLDEN_HEADER: [u8; 36] = [
     0x53, 0x53, 0x41, 0x52, 0x43, 0x48, 0x56, 0x31, // magic_num "SSARCHV1"
-    0x00, 0x00, 0x02, 0x00,                         // file_version 0x00020000
+    0x01, 0x00, 0x02, 0x00,                         // file_version 0x00020001
     0x03, 0x00, 0x00, 0x00,                         // file_count 3
     0x62, 0x00,                                     // algorithm 98 (zstd)
     0x01,                                           // hash_type 1 (xxh3_64)
@@ -74,7 +74,7 @@ fn ssmc_format_data_layout_matches_spec() {
 #[test]
 fn format_constants_are_unchanged() {
     assert_eq!(MAGIC_NUMBER, *b"SSARCHV1");
-    assert_eq!(SUPPORTED_VERSION, 0x0002_0000);
+    assert_eq!(SUPPORTED_VERSION, 0x0002_0001);
     // Changing the seed changes every chunk boundary and hash, so the same
     // input no longer produces the same archive.
     assert_eq!(SS_SEED, 0x4202_8030_1019_2019);

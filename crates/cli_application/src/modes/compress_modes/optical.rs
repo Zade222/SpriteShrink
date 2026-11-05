@@ -39,7 +39,8 @@ use sprite_shrink_cd::{
     SectorType, SpriteShrinkCDError, SSMDPrefix, SSMDTocEntry,
     SubheaderRegistry, UserDataStream,
     analyze_cue_sheets, analyze_and_map_disc, build_ssmd_prefix,
-    compress_audio_blocks, resolve_file_sector_counts, rle_encode_map,
+    compress_audio_blocks, disc_files, resolve_file_sector_counts,
+    rle_encode_map,
     verify_disc_integrity
 };
 use xxhash_rust::xxh3::Xxh3;
@@ -622,6 +623,7 @@ where
                     );
 
                     let dm = DiscManifest {
+                        files: dcd.files,
                         lba_map: dcd.lba_map,
                         rle_sector_map: dcd.rle_sector_map,
                         audio_block_map: dcd.audio_block_map,
@@ -773,6 +775,9 @@ where
         &file_provider
     )?;
 
+    let files = disc_files(cue_sheet, &sector_count)
+        .map_err(SpriteShrinkCDError::from)?;
+
     let sector_result = analyze_and_map_disc(
         cue_sheet,
         &sector_count,
@@ -912,6 +917,7 @@ where
     //  set elsewhere
     Ok(DiscCompleteData {
         title: cue_sheet.source_filename.clone(),
+        files,
         lba_map: sector_result.lba_map,
         rle_sector_map,
         audio_block_map,

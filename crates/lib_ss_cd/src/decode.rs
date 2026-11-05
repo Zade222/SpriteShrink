@@ -12,8 +12,9 @@ use crate::{
     lib_error_handling::SpriteShrinkCDError,
     lib_structs::{
         SSMD_UID,
-        DiscManifest, ParsedSSMD, SSMDFormatData,
-        SSMDIndices, SSMDTocEntry
+        ContentBlock, DataChunkLayout, DiscManifest, ParsedSSMD,
+        RleSectorMap, SSMDFormatData, SSMDIndices, SSMDTocEntry,
+        SubHeaderEntry
     }
 };
 
@@ -33,6 +34,42 @@ pub enum DecodeError {
 
     //#[error("Failed to decode file manifest: {0}")]
     //ManifestDecodeError(String),
+}
+
+/// The first format version whose disc manifests list the disc's files
+/// and tracks (`DiscManifest::files`).
+const FILE_LAYOUT_VERSION: u32 = 0x0002_0001;
+
+/// A disc manifest as format versions before 2.1 wrote it: the current
+/// fields without `files`. bitcode stores no field names, so the old layout
+/// needs its own type to decode.
+#[derive(Decode)]
+#[cfg_attr(test, derive(bitcode::Encode))]
+struct DiscManifestV2<H> {
+    lba_map: Vec<(u32, u32)>,
+    rle_sector_map: RleSectorMap,
+    audio_block_map: Vec<ContentBlock<H>>,
+    data_stream_layout: Vec<DataChunkLayout<H>>,
+    subheader_index: Vec<SubHeaderEntry>,
+    disc_exception_index: Vec<(u32, u32)>,
+    integrity_hash: u64,
+}
+
+impl<H> From<DiscManifestV2<H>> for DiscManifest<H> {
+    /// The old manifest has no file layout, so `files` is empty and the
+    /// CUE sheet is inferred from the sector map.
+    fn from(old: DiscManifestV2<H>) -> Self {
+        Self {
+            files: Vec::new(),
+            lba_map: old.lba_map,
+            rle_sector_map: old.rle_sector_map,
+            audio_block_map: old.audio_block_map,
+            data_stream_layout: old.data_stream_layout,
+            subheader_index: old.subheader_index,
+            disc_exception_index: old.disc_exception_index,
+            integrity_hash: old.integrity_hash,
+        }
+    }
 }
 
 pub fn decode_ssmd_format_data(
@@ -103,9 +140,9 @@ where
         format_data_region.bytes_in(prefix, "format data")?
     )?;
 
-    let disc_manifests: Vec<DiscManifest<H>> = decode_section(
+    let disc_manifests = decode_disc_manifests(
         format_data.enc_disc_manifest.bytes_in(prefix, "disc manifest")?,
-        "Disc Manifest"
+        header.file_version
     )?;
 
     let data_dictionary = format_data.data_dictionary
@@ -162,6 +199,24 @@ where
     })
 }
 
+/// Decodes the disc manifests in the layout `file_version` wrote them
+/// with.
+fn decode_disc_manifests<H>(
+    bytes: &[u8],
+    file_version: u32,
+) -> Result<Vec<DiscManifest<H>>, DecodeError>
+where
+    for<'de> H: Decode<'de>
+{
+    if file_version < FILE_LAYOUT_VERSION {
+        let old: Vec<DiscManifestV2<H>> =
+            decode_section(bytes, "Disc Manifest")?;
+        Ok(old.into_iter().map(DiscManifest::from).collect())
+    } else {
+        decode_section(bytes, "Disc Manifest")
+    }
+}
+
 /// Decodes one bitcode section, naming it in the error.
 fn decode_section<T>(bytes: &[u8], data: &str) -> Result<T, DecodeError>
 where
@@ -212,6 +267,56 @@ mod tests {
     /// that is known to be misaligned.
     #[repr(C, align(8))]
     struct Aligned<const N: usize>([u8; N]);
+
+    fn v2_manifest() -> DiscManifestV2<u64> {
+        DiscManifestV2 {
+            lba_map: vec![(0, 150)],
+            rle_sector_map: RleSectorMap {
+                runs: vec![(300, crate::SectorType::Mode1)],
+            },
+            audio_block_map: Vec::new(),
+            data_stream_layout: vec![DataChunkLayout { hash: 7, uncomp_len: 4096 }],
+            subheader_index: Vec::new(),
+            disc_exception_index: vec![(3, 0)],
+            integrity_hash: 0xABCD,
+        }
+    }
+
+    #[test]
+    fn a_manifest_from_before_2_1_decodes_without_a_layout() {
+        let bytes = bitcode::encode(&vec![v2_manifest()]);
+        let manifests: Vec<DiscManifest<u64>> =
+            decode_disc_manifests(&bytes, 0x0002_0000).unwrap();
+
+        assert_eq!(manifests, vec![DiscManifest::from(v2_manifest())]);
+        assert_eq!(manifests[0].files.len(), 0);
+        assert_eq!(manifests[0].integrity_hash, 0xABCD);
+    }
+
+    #[test]
+    fn a_2_1_manifest_decodes_with_its_layout() {
+        let manifest = DiscManifest {
+            files: vec![crate::DiscFile {
+                name: "disc.bin".to_string(),
+                sector_count: 300,
+                tracks: Vec::new(),
+            }],
+            ..DiscManifest::from(v2_manifest())
+        };
+        let bytes = bitcode::encode(&vec![manifest.clone()]);
+
+        assert_eq!(
+            decode_disc_manifests::<u64>(&bytes, FILE_LAYOUT_VERSION).unwrap(),
+            vec![manifest]
+        );
+    }
+
+    #[test]
+    fn the_layout_version_follows_the_supported_version() {
+        // A writer at SUPPORTED_VERSION must write the layout this reader
+        // expects for that version.
+        assert!(sprite_shrink::SUPPORTED_VERSION >= FILE_LAYOUT_VERSION);
+    }
 
     fn sample_format_data() -> SSMDFormatData {
         SSMDFormatData::build_format_data(

@@ -82,7 +82,7 @@ pub static MAGIC_NUMBER: [u8; 8] = *b"SSARCHV1";
 /// This constant is used during header parsing to ensure the library
 /// does not attempt to read files created by a newer, incompatible
 /// version of the software.
-pub static SUPPORTED_VERSION: u32 = 0x00020000;
+pub static SUPPORTED_VERSION: u32 = 0x0002_0001;
 
 /// The seed value used for deterministic chunking and hashing.
 ///

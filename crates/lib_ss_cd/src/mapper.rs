@@ -10,7 +10,8 @@ use sprite_shrink::{
 use crate::lib_error_handling::SpriteShrinkCDError;
 
 use crate::lib_structs::{
-    ContentBlock, CueFile, CueSheet, ExceptionRegistry, ExceptionType, MsfTime,
+    ContentBlock, CueFile, CueSheet, DiscFile, DiscIndex, DiscTrack,
+    ExceptionRegistry, ExceptionType, MsfTime,
     RleSectorMap, SectorMap, SectorMapResult, SectorType,
     SubHeaderEntry, SubheaderRegistry, Track, TrackType
 };
@@ -330,6 +331,56 @@ fn get_track_start_sector(track: &Track) -> Result<u32, MapperError> {
         .map(|i| i.position.to_total_frames());
 
     Ok(index_00.unwrap_or(index_01))
+}
+
+
+/// Lists a disc's files, tracks and indices for its manifest, so the CUE
+/// sheet can be written back on extraction.
+///
+/// Index positions stay relative to their own file, as the CUE sheet gives
+/// them, so the original file layout can be rebuilt as well as a single
+/// joined file.
+///
+/// # Arguments
+///
+/// * `cue_sheet`: The parsed CUE sheet.
+/// * `file_sec_count`: The length of each of the sheet's files in sectors,
+///   in the same order.
+///
+/// # Errors
+///
+/// Returns `MapperError::FileCountMismatch` if `file_sec_count` doesn't have
+/// one length per file.
+pub fn disc_files(
+    cue_sheet: &CueSheet,
+    file_sec_count: &[u32],
+) -> Result<Vec<DiscFile>, MapperError> {
+    if file_sec_count.len() != cue_sheet.files.len() {
+        return Err(MapperError::FileCountMismatch(
+            file_sec_count.len(),
+            cue_sheet.files.len()
+        ));
+    }
+
+    Ok(cue_sheet.files.iter()
+        .zip(file_sec_count)
+        .map(|(file, &sector_count)| DiscFile {
+            name: file.name.clone(),
+            sector_count,
+            tracks: file.tracks.iter()
+                .map(|track| DiscTrack {
+                    number: track.number,
+                    track_type: track.track_type,
+                    indices: track.indices.iter()
+                        .map(|index| DiscIndex {
+                            number: index.number,
+                            sector: index.position.to_total_frames(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+        })
+        .collect())
 }
 
 

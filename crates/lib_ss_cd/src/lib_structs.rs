@@ -129,8 +129,42 @@ pub struct ParsedSSMD<H> {
 }
 
 
+/// One source file of a disc, as its CUE sheet listed it.
+#[derive(Clone, Deserialize, Debug, Decode, Encode, Eq, PartialEq, Serialize)]
+pub struct DiscFile {
+    /// The file name as the CUE sheet's FILE line gave it.
+    pub name: String,
+    /// The file's length in 2352-byte sectors.
+    pub sector_count: u32,
+    /// The tracks in the file, in order.
+    pub tracks: Vec<DiscTrack>,
+}
+
+
+/// One track of a disc.
+#[derive(Clone, Deserialize, Debug, Decode, Encode, Eq, PartialEq, Serialize)]
+pub struct DiscTrack {
+    pub number: u8,
+    pub track_type: TrackType,
+    pub indices: Vec<DiscIndex>,
+}
+
+
+/// One INDEX of a track.
+#[derive(Clone, Copy, Deserialize, Debug, Decode, Encode, Eq, PartialEq, Serialize)]
+pub struct DiscIndex {
+    pub number: u8,
+    /// The index's position, in sectors from the start of its file.
+    pub sector: u32,
+}
+
+
 #[derive(Clone, Deserialize, Debug, Decode, Encode, Eq, PartialEq, Serialize)]
 pub struct DiscManifest<H> {
+    /// The disc's files, tracks and indices, as its CUE sheet gave them.
+    /// Empty for archives written before format version 2.1, whose CUE
+    /// sheet is rebuilt from the sector map instead.
+    pub files: Vec<DiscFile>,
     pub lba_map: Vec<(u32, u32)>,
     pub rle_sector_map: RleSectorMap,
     pub audio_block_map: Vec<ContentBlock<H>>,
@@ -925,7 +959,9 @@ impl TrackMode {
 }
 
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(
+    Clone, Copy, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize
+)]
 pub enum TrackType {
     Audio,
     Mode1_2352,

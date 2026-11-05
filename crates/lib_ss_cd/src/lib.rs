@@ -31,7 +31,8 @@ pub use lib_error_handling::SpriteShrinkCDError;
 mod lib_structs;
 pub use lib_structs::{
     SSMD_UID,
-    CueSheet, ContentBlock, DataChunkLayout, DiscManifest,
+    CueSheet, ContentBlock, DataChunkLayout, DiscFile, DiscIndex,
+    DiscManifest, DiscTrack, TrackType,
     ExceptionInfo, ExceptionRegistry, ExceptionType, DiscReconstructor,
     ParsedSSMD, RleSectorMap, SectorMap, SectorType, SSMDFormatData,
     SSMDIndices, SSMDTocEntry, SubHeaderEntry, SubheaderRegistry
@@ -39,7 +40,7 @@ pub use lib_structs::{
 
 mod mapper;
 pub use mapper::{
-    SectorDataProvider, analyze_and_map_disc, rle_encode_map
+    SectorDataProvider, analyze_and_map_disc, disc_files, rle_encode_map
 };
 
 mod reconstruction;

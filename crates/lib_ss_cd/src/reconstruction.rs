@@ -1591,6 +1591,7 @@ mod tests {
 
     fn empty_manifest() -> DiscManifest<u64> {
         DiscManifest {
+            files: Vec::new(),
             lba_map: Vec::new(),
             rle_sector_map: RleSectorMap { runs: Vec::new() },
             audio_block_map: Vec::new(),

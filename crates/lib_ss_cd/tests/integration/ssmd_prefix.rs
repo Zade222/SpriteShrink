@@ -10,9 +10,9 @@ use sprite_shrink::{
 };
 use sprite_shrink_cd::{
     SSMD_UID, 
-    ContentBlock, DataChunkLayout, DiscManifest, RleSectorMap,
-    SSMDFormatData, SSMDPrefix, SSMDTocEntry, SectorType, SpriteShrinkCDError,
-    SubHeaderEntry, 
+    ContentBlock, DataChunkLayout, DiscFile, DiscIndex, DiscManifest,
+    DiscTrack, RleSectorMap, SSMDFormatData, SSMDPrefix, SSMDTocEntry,
+    SectorType, SpriteShrinkCDError, SubHeaderEntry, TrackType,
     build_ssmd_prefix, decode_ssmd_format_data, parse_ssmd_prefix,
 };
 
@@ -47,6 +47,22 @@ impl<H> Inputs<H> {
 
 fn manifest<H: Copy>(data_hash: H, audio_hash: H) -> DiscManifest<H> {
     DiscManifest {
+        files: vec![DiscFile {
+            name: "disc.bin".to_string(),
+            sector_count: 375,
+            tracks: vec![
+                DiscTrack {
+                    number: 1,
+                    track_type: TrackType::Mode2_2352,
+                    indices: vec![DiscIndex { number: 1, sector: 0 }],
+                },
+                DiscTrack {
+                    number: 2,
+                    track_type: TrackType::Audio,
+                    indices: vec![DiscIndex { number: 1, sector: 300 }],
+                },
+            ],
+        }],
         lba_map: vec![(0, 300), (300, 75)],
         rle_sector_map: RleSectorMap {
             runs: vec![(300, SectorType::Mode2Form1), (75, SectorType::Audio)],

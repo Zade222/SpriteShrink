@@ -24,7 +24,7 @@ use sprite_shrink::{
     FileManifestParent, Hashable, SSAChunkMeta
 };
 use sprite_shrink_cd::{
-    ContentBlock, DataChunkLayout, RleSectorMap, SubHeaderEntry
+    ContentBlock, DataChunkLayout, DiscFile, RleSectorMap, SubHeaderEntry
 };
 
 
@@ -73,6 +73,7 @@ pub struct ChunkMessage<H: Hashable> {
 #[derive(Debug)]
 pub struct DiscCompleteData<H: Hashable> {
     pub title: String,
+    pub files: Vec<DiscFile>,
     pub lba_map: Vec<(u32, u32)>,
     pub rle_sector_map: RleSectorMap,
     pub audio_block_map: Vec<ContentBlock<H>>,

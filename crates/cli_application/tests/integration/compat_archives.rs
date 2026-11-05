@@ -28,6 +28,12 @@ use crate::common::{cli_output, reported_error, run_cli};
 const V2_DIR: &str = "v2";
 const V2_VERSION: u32 = 0x0002_0000;
 
+/// Written by the CLI at format version 2.1 (`file_version` `0x0002_0001`),
+/// the first whose disc manifests store the CUE sheet's file layout. Made
+/// from the same inputs as v2, so the hashes below apply to both.
+const V2_1_DIR: &str = "v2.1";
+const V2_1_VERSION: u32 = 0x0002_0001;
+
 /// The SHA-512 of each file in `v2/roms.ssmc`, in archive order.
 const V2_ROMS: [(&str, &str); 3] = [
     (
@@ -114,10 +120,11 @@ fn v2_ssmc_archive_extracts() {
     }
 }
 
-#[test]
-fn v2_ssmd_archive_extracts() {
-    let archive = compat_path(V2_DIR, "disc.ssmd");
-    assert_file_version(&archive, V2_VERSION);
+/// Extracts the disc in `version_dir`'s SSMD archive and checks it and
+/// the CUE sheet rebuilt for it.
+fn assert_ssmd_extracts(version_dir: &str, version: u32) {
+    let archive = compat_path(version_dir, "disc.ssmd");
+    assert_file_version(&archive, version);
     let out = TempDir::new().unwrap();
 
     extract(&archive, out.path(), "1");
@@ -137,6 +144,29 @@ fn v2_ssmd_archive_extracts() {
     ] {
         assert!(cue.contains(line), "disc.cue is missing {line:?}:\n{cue}");
     }
+}
+
+#[test]
+fn v2_ssmd_archive_extracts() {
+    assert_ssmd_extracts(V2_DIR, V2_VERSION);
+}
+
+#[test]
+fn v2_1_ssmc_archive_extracts() {
+    let archive = compat_path(V2_1_DIR, "roms.ssmc");
+    assert_file_version(&archive, V2_1_VERSION);
+    let out = TempDir::new().unwrap();
+
+    extract(&archive, out.path(), "1-3");
+
+    for (name, sha512) in V2_ROMS {
+        assert_extracted(out.path(), name, sha512);
+    }
+}
+
+#[test]
+fn v2_1_ssmd_archive_extracts() {
+    assert_ssmd_extracts(V2_1_DIR, V2_1_VERSION);
 }
 
 /// Extracting a truncated copy of `archive` has to fail with the CLI's
@@ -198,5 +228,19 @@ fn v2_ssmc_truncated_archive_reports_error() {
 fn v2_ssmd_truncated_archive_reports_error() {
     assert_truncated_copies_fail_cleanly(
         &compat_path(V2_DIR, "disc.ssmd"), "1", &[V2_DISC],
+    );
+}
+
+#[test]
+fn v2_1_ssmc_truncated_archive_reports_error() {
+    assert_truncated_copies_fail_cleanly(
+        &compat_path(V2_1_DIR, "roms.ssmc"), "1-3", &V2_ROMS,
+    );
+}
+
+#[test]
+fn v2_1_ssmd_truncated_archive_reports_error() {
+    assert_truncated_copies_fail_cleanly(
+        &compat_path(V2_1_DIR, "disc.ssmd"), "1", &[V2_DISC],
     );
 }
