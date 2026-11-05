@@ -1437,7 +1437,6 @@ dependencies = [
  "dashmap",
  "flac-codec",
  "flume",
- "once_cell",
  "proptest",
  "pulp",
  "regex",

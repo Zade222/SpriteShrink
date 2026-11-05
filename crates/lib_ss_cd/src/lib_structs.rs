@@ -946,6 +946,39 @@ impl Display for TrackType {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn msf_time_round_trips_through_frames(frames in 0u32..100 * 60 * 75) {
+            prop_assert_eq!(
+                MsfTime::from_total_frames(frames).to_total_frames(),
+                frames
+            );
+        }
+    }
+
+    #[test]
+    fn msf_time_splits_frames_into_minutes_seconds_and_frames() {
+        assert_eq!(
+            MsfTime::from_total_frames(150),
+            MsfTime { minute: 0, second: 2, frame: 0 }
+        );
+        assert_eq!(
+            MsfTime::from_total_frames(99 * 4500 + 59 * 75 + 74),
+            MsfTime { minute: 99, second: 59, frame: 74 }
+        );
+    }
+
+    #[test]
+    fn msf_time_prints_two_digits_per_field() {
+        assert_eq!(MsfTime::from_total_frames(0).to_string(), "00:00:00");
+        assert_eq!(MsfTime::from_total_frames(4500 + 75 + 1).to_string(), "01:01:01");
+        assert_eq!(
+            MsfTime { minute: 99, second: 59, frame: 74 }.to_string(),
+            "99:59:74"
+        );
+    }
 
     #[test]
     fn registering_the_same_exception_twice_returns_the_same_id() {
