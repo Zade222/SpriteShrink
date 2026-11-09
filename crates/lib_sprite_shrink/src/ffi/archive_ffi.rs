@@ -910,7 +910,7 @@ unsafe fn handle_build_result(
 /// - This function consumes the builder; `builder_handle` is invalid
 ///   after this call.
 /// - The pointer returned via `out_data` must be freed with
-///   `archive_data_free_u64`
+///   `archive_data_free`
 #[unsafe(no_mangle)]
 #[allow(clippy::double_must_use)]
 #[must_use]
@@ -945,7 +945,7 @@ pub unsafe extern "C" fn archive_builder_build_u64(
 /// - This function consumes the builder; `builder_handle` is invalid
 ///   after this call.
 /// - The pointer returned via `out_data` must be freed with
-///   `archive_data_free_u128`
+///   `archive_data_free`
 #[unsafe(no_mangle)]
 #[allow(clippy::double_must_use)]
 #[must_use]

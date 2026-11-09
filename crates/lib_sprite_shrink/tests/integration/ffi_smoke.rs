@@ -1,11 +1,11 @@
 //! Calls the C exports directly from Rust, the way a C host would, and
 //! checks them against the Rust API.
 //!
-//! The serializer's callbacks hand the library buffers from Rust's
-//! allocator, as its callback contract requires: the library takes them
-//! back with `Vec::from_raw_parts`. The archive builder instead copies the
-//! chunks and hands them back through `free_chunks_cb`, so its callbacks
-//! lend the host's own buffers.
+//! The callbacks for `verify_single_file_*` and `test_compression_*` hand
+//! the library buffers from Rust's allocator, as their contract requires:
+//! the library takes them back with `Vec::from_raw_parts`. The archive
+//! builder instead copies the chunks and hands them back through
+//! `free_chunks_cb`, so its callbacks lend the host's own buffers.
 
 use std::{
     collections::HashMap,
@@ -14,43 +14,60 @@ use std::{
     hash::Hash,
     mem::ManuallyDrop,
     ptr, slice,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}},
 };
 
 use bitcode::{Encode, encode};
 use dashmap::DashMap;
+use sha2::{Digest, Sha512};
 use sprite_shrink_test_support::assert_bytes_eq;
 use sprite_shrink::{
     ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, MAX_WINDOW_SIZE,
     MIN_WINDOW_SIZE, SSMC_UID, SUPPORTED_VERSION,
     ArchiveBuilder, ChunkLocation, CompressionResult, FileData, FileHeader,
-    FileManifestParent, ParsedSSMC, SSAChunkMeta, SSMCFormatData,
+    FileManifestParent, Hashable, ParsedSSMC, SSAChunkMeta, SSMCFormatData,
     SSMCTocEntry, SerializedData, SpriteShrinkError, build_ssmc_prefix,
-    create_file_manifest_and_chunks, parse_file_header, parse_ssmc_prefix,
-    process_file_in_memory, serialize_uncompressed_data,
+    create_file_manifest_and_chunks, get_seek_chunks, parse_file_header,
+    parse_ssmc_prefix, process_file_in_memory, serialize_uncompressed_data,
+    test_compression,
     ffi::{
-        ArchiveBuilderArgsU64, CreateFileManifestAndChunksArgs,
+        ArchiveBuilderArgsU64, ArchiveBuilderArgsU128, ArchiveBuilderU64,
+        ArchiveBuilderU128, CreateFileManifestAndChunksArgs,
         FFICallbackStatus, FFIChunkDataArray, FFIChunkLocation, FFICompData,
         FFIFileData,
-        FFIFileManifestParent, FFIParsedSSMC, FFISSAChunkMeta,
+        FFIFileManifestParent, FFIParsedSSMC, FFIProgress, FFIProgressType,
+        FFISSAChunkMeta, FFISeekInfoArray,
         FFISerializedOutput, FFIStatus, FFITocEntry, FFIVecBytes,
         SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
-        U128Bytes,
-        archive_builder_build_u64, archive_builder_new_u64,
+        TestCompressionArgsU64, TestCompressionArgsU128, U128Bytes,
+        VerifySingleFileArgsU64, VerifySingleFileArgsU128,
+        archive_builder_build_u64, archive_builder_free_u64,
+        archive_builder_free_u128, archive_builder_new_u64,
+        archive_builder_new_u128, archive_builder_set_c_progress_u64,
+        archive_builder_set_c_progress_u128,
         archive_builder_set_compression_level_u64,
+        archive_builder_set_compression_level_u128,
         archive_builder_set_dictionary_size_u64,
-        archive_builder_set_worker_count_u64, archive_data_free,
+        archive_builder_set_dictionary_size_u128,
+        archive_builder_set_optimize_dictionary_u64,
+        archive_builder_set_optimize_dictionary_u128,
+        archive_builder_set_worker_count_u64,
+        archive_builder_set_worker_count_u128, archive_data_free,
         build_ssmc_prefix_u64, build_ssmc_prefix_u128,
         create_file_manifest_and_chunks_u64, decompress_chunk_c,
         free_file_header, free_file_manifest_and_chunks_u64,
         free_processed_file_data_ffi,
         free_parsed_ssmc_u64, free_parsed_ssmc_u128,
+        free_seek_chunks_u64, free_seek_chunks_u128,
         free_serialized_output_u64, free_serialized_output_u128,
-        free_ssmc_prefix, lookup_chunk_location_u64,
+        free_ssmc_prefix, get_seek_chunks_u64, get_seek_chunks_u128,
+        lookup_chunk_location_u64,
         lookup_chunk_location_u128, parse_file_header_ffi,
         parse_format_data_ffi, parse_ssmc_prefix_u64, parse_ssmc_prefix_u128,
         process_file_in_memory_ffi,
         serialize_uncompressed_data_u64, serialize_uncompressed_data_u128,
+        test_compression_u64, test_compression_u128, verify_single_file_u64,
+        verify_single_file_u128,
     },
 };
 
@@ -1150,7 +1167,10 @@ fn round_trip_files() -> Vec<(String, Vec<u8>)> {
 
 /// Builds the whole archive for `files` with the Rust API: the prefix,
 /// then the compressed data.
-fn rust_round_trip_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+fn rust_round_trip_archive(
+    files: &[(String, Vec<u8>)],
+    optimize_dictionary: bool,
+) -> Vec<u8> {
     let file_manifest = DashMap::new();
     let mut store: ChunkStore<u64> = HashMap::new();
 
@@ -1193,7 +1213,8 @@ fn rust_round_trip_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
     builder
         .compression_level(COMPRESSION_LEVEL)
         .dictionary_size(DICTIONARY_SIZE)
-        .worker_threads(WORKER_COUNT);
+        .worker_threads(WORKER_COUNT)
+        .optimize_dictionary(optimize_dictionary);
     let comp = builder.build().unwrap();
 
     let mut archive = build_ssmc_prefix(
@@ -1271,9 +1292,13 @@ unsafe extern "C" fn builder_write(
 
 /// Builds the whole archive for `files` through the C exports, the way a C
 /// host would: process and chunk each file, serialize, compress, then build
-/// the prefix and put it in front of the compressed data.
+/// the prefix and put it in front of the compressed data. `configure` runs
+/// after the standard settings, just before the build.
 #[expect(clippy::too_many_lines, reason = "one step per C call, in order")]
-fn ffi_round_trip_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
+fn ffi_round_trip_archive(
+    files: &[(String, Vec<u8>)],
+    configure: impl FnOnce(*mut ArchiveBuilderU64),
+) -> Vec<u8> {
     let names: Vec<CString> = files
         .iter()
         .map(|(name, _)| CString::new(name.as_str()).unwrap())
@@ -1410,6 +1435,7 @@ fn ffi_round_trip_archive(files: &[(String, Vec<u8>)]) -> Vec<u8> {
         archive_builder_set_worker_count_u64(builder, WORKER_COUNT)
     };
     assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+    configure(builder);
 
     let mut comp = ptr::null_mut();
     // SAFETY: `builder` came from `archive_builder_new_u64` and hasn't been
@@ -1530,8 +1556,8 @@ fn ffi_round_trip_archive_matches_rust_api() {
     let files = round_trip_files();
 
     assert_bytes_eq(
-        &ffi_round_trip_archive(&files),
-        &rust_round_trip_archive(&files),
+        &ffi_round_trip_archive(&files, |_| {}),
+        &rust_round_trip_archive(&files, false),
         "archive built through the C exports",
     );
 }
@@ -1540,7 +1566,7 @@ fn ffi_round_trip_archive_matches_rust_api() {
 #[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
 fn ffi_round_trip_extracts_original_files() {
     let mut files = round_trip_files();
-    let archive = ffi_round_trip_archive(&files);
+    let archive = ffi_round_trip_archive(&files, |_| {});
 
     // The table of contents is sorted by name.
     files.sort_by(|a, b| a.0.cmp(&b.0));
@@ -1552,4 +1578,667 @@ fn ffi_round_trip_extracts_original_files() {
     for ((name, data), (_, original)) in extracted.iter().zip(&files) {
         assert_bytes_eq(data, original, name);
     }
+}
+
+// Seeking
+
+const SEEK_HASHES_U64: [u64; 3] = [1, u64::MAX, 7];
+const SEEK_HASHES_U128: [u128; 3] = [1, u128::MAX, 7];
+
+/// `get_seek_chunks` as a C host calls it.
+type GetSeek<F> = unsafe extern "C" fn(
+    *const FFIFileManifestParent<F>,
+    u64,
+    u64,
+    *mut *mut FFISeekInfoArray<F>,
+) -> FFIStatus;
+
+/// The first entry of `FILES` is a 4-byte chunk then a 3-byte chunk.
+fn assert_seek_matches_rust<F, H>(
+    hashes: [H; 3],
+    get_seek: GetSeek<F>,
+    free: unsafe extern "C" fn(*mut FFISeekInfoArray<F>),
+)
+where
+    F: Copy + From<H>,
+    H: Copy + Debug + Eq + Hash + From<F>,
+{
+    let input = host_input::<H, F>(hashes);
+    let chunk_metadata = chunk_metadata(hashes, FILES[0].1);
+    let manifest = FileManifestParent {
+        chunk_count: chunk_metadata.len() as u64,
+        chunk_metadata,
+    };
+
+    // Whole file, inside a chunk, across chunks, the last chunk, empty
+    // reads at the start and at the end.
+    for (offset, length) in [(0, 7), (1, 2), (3, 2), (4, 3), (0, 0), (7, 0)] {
+        let mut out = ptr::null_mut();
+        // SAFETY: `input` owns the manifest for the whole call and `out` is
+        // a local.
+        let status = unsafe {
+            get_seek(&raw const input.manifests[0], offset, length, &raw mut out)
+        };
+        assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+
+        // SAFETY: `out` came from the successful call above.
+        let array = unsafe { &*out };
+        // SAFETY: the library wrote `chunks_len` entries at `chunks`, which
+        // is non-null even for an empty result.
+        let ffi = unsafe { slice::from_raw_parts(array.chunks, array.chunks_len) };
+        let ffi: Vec<(H, u64, u64)> = ffi
+            .iter()
+            .map(|c| (H::from(c.hash), c.read_start, c.read_end))
+            .collect();
+        let rust: Vec<(H, u64, u64)> =
+            get_seek_chunks(&manifest, offset, length)
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.hash, c.start_offset, c.end_offset))
+                .collect();
+        assert_eq!(ffi, rust, "{length} bytes at {offset}");
+
+        // SAFETY: `out` came from the call above and is freed once.
+        unsafe { free(out) };
+    }
+}
+
+#[test]
+fn get_seek_chunks_u64_matches_rust_api() {
+    assert_seek_matches_rust::<u64, u64>(
+        SEEK_HASHES_U64,
+        get_seek_chunks_u64,
+        free_seek_chunks_u64,
+    );
+}
+
+#[test]
+fn get_seek_chunks_u128_matches_rust_api() {
+    assert_seek_matches_rust::<U128Bytes, u128>(
+        SEEK_HASHES_U128,
+        get_seek_chunks_u128,
+        free_seek_chunks_u128,
+    );
+}
+
+#[test]
+fn get_seek_chunks_rejects_a_read_past_the_end() {
+    let input = host_input::<u64, u64>(SEEK_HASHES_U64);
+
+    for (offset, length) in [(5, 3), (8, 0), (u64::MAX, 2)] {
+        let mut out = ptr::null_mut();
+        // SAFETY: `input` owns the manifest for the whole call and `out` is
+        // a local.
+        let status = unsafe {
+            get_seek_chunks_u64(
+                &raw const input.manifests[0],
+                offset,
+                length,
+                &raw mut out,
+            )
+        };
+        assert_eq!(status_code(status), status_code(FFIStatus::SeekOutOfBounds));
+        assert!(out.is_null(), "nothing to free after {offset}+{length}");
+    }
+}
+
+#[test]
+fn free_seek_chunks_accepts_null() {
+    // SAFETY: `free_seek_chunks_u64` returns early for a null pointer.
+    unsafe { free_seek_chunks_u64(ptr::null_mut()) };
+    // SAFETY: `free_seek_chunks_u128` returns early for a null pointer.
+    unsafe { free_seek_chunks_u128(ptr::null_mut()) };
+}
+
+// Callback hosts that follow the ownership contract
+
+/// Copies the chunks for `hashes` out of `store` the way the
+/// `verify_single_file_*` and `test_compression_*` contract requires: the
+/// array and every buffer come from Rust's allocator, and the library frees
+/// them.
+fn owned_chunks<H: Eq + Hash>(
+    store: &ChunkStore<H>,
+    hashes: impl Iterator<Item = H>,
+) -> FFIChunkDataArray {
+    let chunks: Vec<FFIVecBytes> = hashes
+        .map(|hash| {
+            let (ptr, len, cap) = into_raw_parts(store[&hash].clone());
+            FFIVecBytes { ptr, len, cap }
+        })
+        .collect();
+    let (ptr, len, cap) = into_raw_parts(chunks);
+    FFIChunkDataArray { ptr, len, cap }
+}
+
+/// Reads the 16-byte little-endian hashes the u128 exports pass callbacks.
+///
+/// # Safety
+///
+/// `hashes` must point to `len` hashes, `16 * len` readable bytes.
+unsafe fn read_u128_hashes(hashes: *const u8, len: usize) -> Vec<u128> {
+    // SAFETY: the caller guarantees `16 * len` readable bytes.
+    let bytes = unsafe { slice::from_raw_parts(hashes, len * 16) };
+    let (hashes, _) = bytes.as_chunks::<16>();
+    hashes.iter().map(|hash| u128::from_le_bytes(*hash)).collect()
+}
+
+// Verifying a file
+
+struct VerifyHost<H> {
+    chunks: ChunkStore<H>,
+    progress: AtomicU64,
+}
+
+impl<H: Copy + Eq + Hash> VerifyHost<H> {
+    fn new(hashes: [H; 3]) -> Self {
+        Self {
+            chunks: hashes
+                .into_iter()
+                .zip(CHUNKS)
+                .map(|(hash, chunk)| (hash, chunk.to_vec()))
+                .collect(),
+            progress: AtomicU64::new(0),
+        }
+    }
+}
+
+unsafe extern "C" fn verify_get_chunks_u64(
+    user_data: *mut c_void,
+    hashes: *const u64,
+    hashes_len: usize,
+) -> FFIChunkDataArray {
+    // SAFETY: these tests pass a `VerifyHost<u64>` as `user_data`.
+    let host = unsafe { &*user_data.cast::<VerifyHost<u64>>() };
+    // SAFETY: the library passes `hashes_len` hashes.
+    let hashes = unsafe { slice::from_raw_parts(hashes, hashes_len) };
+    owned_chunks(&host.chunks, hashes.iter().copied())
+}
+
+unsafe extern "C" fn verify_get_chunks_u128(
+    user_data: *mut c_void,
+    hashes: *const u8,
+    hashes_len: usize,
+) -> FFIChunkDataArray {
+    // SAFETY: these tests pass a `VerifyHost<u128>` as `user_data`.
+    let host = unsafe { &*user_data.cast::<VerifyHost<u128>>() };
+    // SAFETY: the library passes `hashes_len` 16-byte hashes.
+    let hashes = unsafe { read_u128_hashes(hashes, hashes_len) };
+    owned_chunks(&host.chunks, hashes.into_iter())
+}
+
+unsafe extern "C" fn verify_progress<H>(user_data: *mut c_void, bytes: u64) {
+    // SAFETY: these tests pass a `VerifyHost<H>` as `user_data`.
+    let host = unsafe { &*user_data.cast::<VerifyHost<H>>() };
+    host.progress.fetch_add(bytes, Ordering::Relaxed);
+}
+
+/// The bytes of `FILES[index]` and their verification hash.
+fn file_and_hash(index: usize) -> (Vec<u8>, [u8; 64]) {
+    let data: Vec<u8> = FILES[index].1
+        .iter()
+        .flat_map(|&i| CHUNKS[i].iter().copied())
+        .collect();
+    let hash = Sha512::digest(&data).into();
+    (data, hash)
+}
+
+/// Verifies `FILES[index]` against `veri_hash` and returns the status and
+/// the progress reported.
+fn ffi_verify_u64(index: usize, veri_hash: &[u8; 64]) -> (i32, u64) {
+    let input = host_input::<u64, u64>(SEEK_HASHES_U64);
+    let host = VerifyHost::new(SEEK_HASHES_U64);
+    let args = VerifySingleFileArgsU64 {
+        filename: input.name_ptrs[index],
+        file_manifest_parent: &raw const input.manifests[index],
+        veri_hash_array_ptr: veri_hash.as_ptr(),
+        user_data: ptr::from_ref(&host).cast_mut().cast(),
+        get_chunks_cb: verify_get_chunks_u64,
+        progress_cb: verify_progress::<u64>,
+    };
+    // SAFETY: `args` points into `input`, `veri_hash` and `host`, which all
+    // outlive the call.
+    let status = unsafe { verify_single_file_u64(&raw const args) };
+    (status_code(status), host.progress.load(Ordering::Relaxed))
+}
+
+/// The u128 form of [`ffi_verify_u64`].
+fn ffi_verify_u128(index: usize, veri_hash: &[u8; 64]) -> (i32, u64) {
+    let input = host_input::<u128, U128Bytes>(SEEK_HASHES_U128);
+    let host = VerifyHost::new(SEEK_HASHES_U128);
+    let args = VerifySingleFileArgsU128 {
+        filename: input.name_ptrs[index],
+        file_manifest_parent: &raw const input.manifests[index],
+        veri_hash_array_ptr: veri_hash.as_ptr(),
+        user_data: ptr::from_ref(&host).cast_mut().cast(),
+        get_chunks_cb: verify_get_chunks_u128,
+        progress_cb: verify_progress::<u128>,
+    };
+    // SAFETY: `args` points into `input`, `veri_hash` and `host`, which all
+    // outlive the call.
+    let status = unsafe { verify_single_file_u128(&raw const args) };
+    (status_code(status), host.progress.load(Ordering::Relaxed))
+}
+
+#[test]
+fn verify_single_file_accepts_the_right_hash() {
+    for index in [0, 1, 2] {
+        let (data, hash) = file_and_hash(index);
+        let ok = status_code(FFIStatus::StatusOk);
+        let len = data.len() as u64;
+
+        assert_eq!(ffi_verify_u64(index, &hash), (ok, len), "u64 file {index}");
+        assert_eq!(ffi_verify_u128(index, &hash), (ok, len), "u128 file {index}");
+    }
+}
+
+#[test]
+fn verify_single_file_rejects_the_wrong_hash() {
+    let (_, mut hash) = file_and_hash(0);
+    hash[63] ^= 1;
+    let mismatch = status_code(FFIStatus::VerificationHashMismatch);
+
+    assert_eq!(ffi_verify_u64(0, &hash).0, mismatch);
+    assert_eq!(ffi_verify_u128(0, &hash).0, mismatch);
+}
+
+// Estimating compression
+
+/// The unique chunks of `round_trip_files`, their sorted hashes and their
+/// total size.
+fn compression_input<H>() -> (ChunkStore<H>, Vec<H>, u64)
+where
+    H: Hashable + Ord,
+{
+    let mut store = HashMap::new();
+    for (name, data) in round_trip_files() {
+        let processed = process_file_in_memory(
+            FileData { file_name: name, file_data: data },
+            WINDOW_SIZE,
+        )
+        .unwrap()
+        .unwrap();
+        let (_, chunks) = create_file_manifest_and_chunks::<H>(
+            &processed.file_data,
+            &processed.chunks,
+        );
+        store.extend(chunks);
+    }
+    let mut hashes: Vec<H> = store.keys().copied().collect();
+    hashes.sort_unstable();
+    let total = store.values().map(|chunk| chunk.len() as u64).sum();
+    (store, hashes, total)
+}
+
+/// What `test_compression` returns for the same input.
+fn rust_estimate<H>(store: ChunkStore<H>, hashes: &[H], total: u64) -> u64
+where
+    H: Hashable + Encode,
+{
+    let store = Arc::new(store);
+    let get_chunks = move |wanted: &[H]| {
+        Ok::<_, SpriteShrinkError>(
+            wanted.iter().map(|hash| store[hash].clone()).collect()
+        )
+    };
+    test_compression(
+        hashes,
+        total,
+        WORKER_COUNT,
+        usize::try_from(DICTIONARY_SIZE).unwrap(),
+        COMPRESSION_LEVEL,
+        get_chunks,
+    )
+    .unwrap() as u64
+}
+
+unsafe extern "C" fn estimate_get_chunks_u64(
+    user_data: *mut c_void,
+    hashes: *const u64,
+    hashes_len: usize,
+    out_chunks: *mut FFIChunkDataArray,
+) -> FFICallbackStatus {
+    // SAFETY: these tests pass a `ChunkStore<u64>` as `user_data`.
+    let store = unsafe { &*user_data.cast::<ChunkStore<u64>>() };
+    // SAFETY: the library passes `hashes_len` hashes.
+    let hashes = unsafe { slice::from_raw_parts(hashes, hashes_len) };
+    let chunks = owned_chunks(store, hashes.iter().copied());
+    // SAFETY: the library passes a pointer that's valid for writes.
+    unsafe { out_chunks.write(chunks) };
+    FFICallbackStatus::CallbackOk
+}
+
+unsafe extern "C" fn estimate_get_chunks_u128(
+    user_data: *mut c_void,
+    hashes: *const u8,
+    hashes_len: usize,
+    out_chunks: *mut FFIChunkDataArray,
+) -> FFICallbackStatus {
+    // SAFETY: these tests pass a `ChunkStore<u128>` as `user_data`.
+    let store = unsafe { &*user_data.cast::<ChunkStore<u128>>() };
+    // SAFETY: the library passes `hashes_len` 16-byte hashes.
+    let hashes = unsafe { read_u128_hashes(hashes, hashes_len) };
+    let chunks = owned_chunks(store, hashes.into_iter());
+    // SAFETY: the library passes a pointer that's valid for writes.
+    unsafe { out_chunks.write(chunks) };
+    FFICallbackStatus::CallbackOk
+}
+
+unsafe extern "C" fn chunks_fail<T>(
+    _user_data: *mut c_void,
+    _hashes: *const T,
+    _hashes_len: usize,
+    _out_chunks: *mut FFIChunkDataArray,
+) -> FFICallbackStatus {
+    FFICallbackStatus::Error
+}
+
+unsafe extern "C" fn chunks_cancel<T>(
+    _user_data: *mut c_void,
+    _hashes: *const T,
+    _hashes_len: usize,
+    _out_chunks: *mut FFIChunkDataArray,
+) -> FFICallbackStatus {
+    FFICallbackStatus::Cancelled
+}
+
+/// Runs `test_compression_u64` with `get_chunks_cb` over `store`.
+fn ffi_estimate_u64(
+    store: &mut ChunkStore<u64>,
+    hashes: &[u64],
+    total: u64,
+    get_chunks_cb: unsafe extern "C" fn(
+        *mut c_void,
+        *const u64,
+        usize,
+        *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+) -> (i32, u64) {
+    let args = TestCompressionArgsU64 {
+        total_data_size: total,
+        sorted_hashes_array_ptr: hashes.as_ptr(),
+        sorted_hashes_len: hashes.len(),
+        worker_count: WORKER_COUNT,
+        dictionary_size: usize::try_from(DICTIONARY_SIZE).unwrap(),
+        compression_level: COMPRESSION_LEVEL,
+        user_data: ptr::from_mut(store).cast(),
+        get_chunks_cb,
+    };
+    let mut size = 0;
+    // SAFETY: `args` points into `hashes` and `store`, which outlive the
+    // call, and `size` is a local.
+    let status = unsafe { test_compression_u64(&raw const args, &raw mut size) };
+    (status_code(status), size)
+}
+
+/// The u128 form of [`ffi_estimate_u64`].
+fn ffi_estimate_u128(
+    store: &mut ChunkStore<u128>,
+    hashes: &[u128],
+    total: u64,
+    get_chunks_cb: unsafe extern "C" fn(
+        *mut c_void,
+        *const u8,
+        usize,
+        *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+) -> (i32, u64) {
+    let hash_bytes: Vec<u8> =
+        hashes.iter().flat_map(|hash| hash.to_le_bytes()).collect();
+    let args = TestCompressionArgsU128 {
+        total_data_size: total,
+        sorted_hashes_array_ptr: hash_bytes.as_ptr(),
+        sorted_hashes_len: hashes.len(),
+        worker_count: WORKER_COUNT,
+        dictionary_size: usize::try_from(DICTIONARY_SIZE).unwrap(),
+        compression_level: COMPRESSION_LEVEL,
+        user_data: ptr::from_mut(store).cast(),
+        get_chunks_cb,
+    };
+    let mut size = 0;
+    // SAFETY: `args` points into `hash_bytes` and `store`, which outlive the
+    // call, and `size` is a local.
+    let status = unsafe { test_compression_u128(&raw const args, &raw mut size) };
+    (status_code(status), size)
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn test_compression_u64_matches_rust_api() {
+    let (mut store, hashes, total) = compression_input::<u64>();
+    let expected = rust_estimate(store.clone(), &hashes, total);
+
+    let (status, size) =
+        ffi_estimate_u64(&mut store, &hashes, total, estimate_get_chunks_u64);
+
+    assert_eq!(status, status_code(FFIStatus::StatusOk));
+    assert_eq!(size, expected);
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn test_compression_u128_matches_rust_api() {
+    let (mut store, hashes, total) = compression_input::<u128>();
+    let expected = rust_estimate(store.clone(), &hashes, total);
+
+    let (status, size) =
+        ffi_estimate_u128(&mut store, &hashes, total, estimate_get_chunks_u128);
+
+    assert_eq!(status, status_code(FFIStatus::StatusOk));
+    assert_eq!(size, expected);
+}
+
+#[test]
+fn test_compression_reports_a_failing_callback() {
+    let mut store: ChunkStore<u64> = HashMap::new();
+    let (status, _) = ffi_estimate_u64(&mut store, &[1, 2], 8, chunks_fail::<u64>);
+    assert_eq!(status, status_code(FFIStatus::CallbackError));
+
+    let mut store: ChunkStore<u128> = HashMap::new();
+    let (status, _) = ffi_estimate_u128(&mut store, &[1, 2], 8, chunks_fail::<u8>);
+    assert_eq!(status, status_code(FFIStatus::CallbackError));
+}
+
+#[test]
+fn test_compression_reports_a_cancelling_callback() {
+    let mut store: ChunkStore<u64> = HashMap::new();
+    let (status, _) = ffi_estimate_u64(&mut store, &[1, 2], 8, chunks_cancel::<u64>);
+    assert_eq!(status, status_code(FFIStatus::StatusCancelled));
+
+    let mut store: ChunkStore<u128> = HashMap::new();
+    let (status, _) =
+        ffi_estimate_u128(&mut store, &[1, 2], 8, chunks_cancel::<u8>);
+    assert_eq!(status, status_code(FFIStatus::StatusCancelled));
+}
+
+// Configuring and releasing a builder
+
+unsafe extern "C" fn free_nothing(
+    _user_data: *mut c_void,
+    _chunks: FFIChunkDataArray,
+) {}
+
+unsafe extern "C" fn write_nothing(
+    _user_data: *mut c_void,
+    _data: *const u8,
+    _data_len: usize,
+) -> FFICallbackStatus {
+    FFICallbackStatus::Error
+}
+
+extern "C" fn ignore_progress(_progress: FFIProgress, _user_data: *mut c_void) {}
+
+fn assert_ok(status: FFIStatus) {
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+}
+
+#[test]
+fn a_u64_builder_can_be_configured_and_freed_without_building() {
+    let input = host_input::<u64, u64>(SEEK_HASHES_U64);
+    let hashes = SEEK_HASHES_U64;
+    let args = ArchiveBuilderArgsU64 {
+        manifest_array_ptr: input.manifests.as_ptr(),
+        manifest_len: input.manifests.len(),
+        sorted_hashes_array_ptr: hashes.as_ptr(),
+        sorted_hashes_len: hashes.len(),
+        file_count: u32::try_from(input.manifests.len()).unwrap(),
+        total_size: 12,
+        user_data: ptr::null_mut(),
+        get_chunks_cb: chunks_fail::<u64>,
+        free_chunks_cb: free_nothing,
+        write_comp_data_cb: write_nothing,
+    };
+    let mut builder: *mut ArchiveBuilderU64 = ptr::null_mut();
+
+    // SAFETY: `args` points into `input` and `hashes`, which outlive the
+    // builder, and `builder` is a local.
+    assert_ok(unsafe {
+        archive_builder_new_u64(&raw const args, &raw mut builder)
+    });
+    // SAFETY: `builder` came from `archive_builder_new_u64` and isn't freed
+    // until the end of this test.
+    assert_ok(unsafe { archive_builder_set_compression_level_u64(builder, 3) });
+    // SAFETY: `builder` came from `archive_builder_new_u64` and isn't freed
+    // until the end of this test.
+    assert_ok(unsafe { archive_builder_set_dictionary_size_u64(builder, 1024) });
+    // SAFETY: `builder` came from `archive_builder_new_u64` and isn't freed
+    // until the end of this test.
+    assert_ok(unsafe { archive_builder_set_worker_count_u64(builder, 2) });
+    // SAFETY: `builder` came from `archive_builder_new_u64` and isn't freed
+    // until the end of this test.
+    assert_ok(unsafe { archive_builder_set_optimize_dictionary_u64(builder, true) });
+    // SAFETY: `builder` came from `archive_builder_new_u64` and isn't freed
+    // until the end of this test. `ignore_progress` never reads the null
+    // `user_data`, and this builder is never built, so it isn't called.
+    assert_ok(unsafe {
+        archive_builder_set_c_progress_u64(
+            builder,
+            ignore_progress,
+            ptr::null_mut(),
+        )
+    });
+    // SAFETY: `builder` hasn't been built, and is freed once, here.
+    unsafe { archive_builder_free_u64(builder) };
+}
+
+#[test]
+fn a_u128_builder_can_be_configured_and_freed_without_building() {
+    let input = host_input::<u128, U128Bytes>(SEEK_HASHES_U128);
+    let hashes: Vec<u8> = SEEK_HASHES_U128
+        .iter()
+        .flat_map(|hash| hash.to_le_bytes())
+        .collect();
+    let args = ArchiveBuilderArgsU128 {
+        manifest_array_ptr: input.manifests.as_ptr(),
+        manifest_len: input.manifests.len(),
+        sorted_hashes_array_ptr: hashes.as_ptr(),
+        sorted_hashes_len: SEEK_HASHES_U128.len(),
+        file_count: u32::try_from(input.manifests.len()).unwrap(),
+        total_size: 12,
+        user_data: ptr::null_mut(),
+        get_chunks_cb: chunks_fail::<u8>,
+        free_chunks_cb: free_nothing,
+        write_comp_data_cb: write_nothing,
+    };
+    let mut builder: *mut ArchiveBuilderU128 = ptr::null_mut();
+
+    // SAFETY: `args` points into `input` and `hashes`, which outlive the
+    // builder, and `builder` is a local.
+    assert_ok(unsafe {
+        archive_builder_new_u128(&raw const args, &raw mut builder)
+    });
+    // SAFETY: `builder` came from `archive_builder_new_u128` and isn't freed
+    // until the end of this test.
+    assert_ok(unsafe { archive_builder_set_compression_level_u128(builder, 3) });
+    // SAFETY: `builder` came from `archive_builder_new_u128` and isn't freed
+    // until the end of this test.
+    assert_ok(unsafe { archive_builder_set_dictionary_size_u128(builder, 1024) });
+    // SAFETY: `builder` came from `archive_builder_new_u128` and isn't freed
+    // until the end of this test.
+    assert_ok(unsafe { archive_builder_set_worker_count_u128(builder, 2) });
+    // SAFETY: `builder` came from `archive_builder_new_u128` and isn't freed
+    // until the end of this test.
+    assert_ok(unsafe { archive_builder_set_optimize_dictionary_u128(builder, true) });
+    // SAFETY: `builder` came from `archive_builder_new_u128` and isn't freed
+    // until the end of this test. `ignore_progress` never reads the null
+    // `user_data`, and this builder is never built, so it isn't called.
+    assert_ok(unsafe {
+        archive_builder_set_c_progress_u128(
+            builder,
+            ignore_progress,
+            ptr::null_mut(),
+        )
+    });
+    // SAFETY: `builder` hasn't been built, and is freed once, here.
+    unsafe { archive_builder_free_u128(builder) };
+}
+
+#[test]
+fn archive_builder_free_accepts_null() {
+    // SAFETY: `archive_builder_free_u64` ignores a null pointer.
+    unsafe { archive_builder_free_u64(ptr::null_mut()) };
+    // SAFETY: `archive_builder_free_u128` ignores a null pointer.
+    unsafe { archive_builder_free_u128(ptr::null_mut()) };
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn the_optimize_dictionary_setter_changes_the_build_like_the_rust_api() {
+    let files = round_trip_files();
+
+    let archive = ffi_round_trip_archive(&files, |builder| {
+        // SAFETY: `builder` is the live builder the round trip passes in.
+        assert_ok(unsafe {
+            archive_builder_set_optimize_dictionary_u64(builder, true)
+        });
+    });
+
+    assert_bytes_eq(
+        &archive,
+        &rust_round_trip_archive(&files, true),
+        "archive built with an optimized dictionary",
+    );
+}
+
+/// `(progress type, total chunks)` for each progress report.
+type ProgressLog = Mutex<Vec<(i32, u64)>>;
+
+extern "C" fn record_progress(progress: FFIProgress, user_data: *mut c_void) {
+    // SAFETY: the test below passes a `ProgressLog` that outlives the build.
+    let log = unsafe { &*user_data.cast::<ProgressLog>() };
+    log.lock().unwrap().push((progress.ty as i32, progress.total_chunks));
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn the_progress_callback_reports_each_stage_of_a_build() {
+    let log: ProgressLog = Mutex::new(Vec::new());
+
+    ffi_round_trip_archive(&round_trip_files(), |builder| {
+        // SAFETY: `builder` is the live builder the round trip passes in,
+        // and `log` outlives the build.
+        assert_ok(unsafe {
+            archive_builder_set_c_progress_u64(
+                builder,
+                record_progress,
+                ptr::from_ref(&log).cast_mut().cast(),
+            )
+        });
+    });
+
+    let log = log.into_inner().unwrap();
+    let stage = |ty: FFIProgressType| ty as i32;
+    let of = |wanted: i32| log.iter().filter(|(ty, _)| *ty == wanted).count();
+    let compressing = log.iter()
+        .find(|(ty, _)| *ty == stage(FFIProgressType::Compressing))
+        .expect("a Compressing report");
+
+    assert_eq!(log[0].0, stage(FFIProgressType::GeneratingDictionary));
+    assert_eq!(log[1].0, stage(FFIProgressType::DictionaryDone));
+    assert_eq!(log[2], *compressing);
+    assert!(compressing.1 > 0);
+    assert_eq!(
+        of(stage(FFIProgressType::ChunkCompressed)) as u64,
+        compressing.1
+    );
+    assert_eq!(log[log.len() - 1].0, stage(FFIProgressType::Finalizing));
 }

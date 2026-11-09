@@ -1406,15 +1406,17 @@ pub struct FFIVecBytes {
 ///   never dereferences this pointer; it is only handed back to the callbacks.
 /// * `get_chunks_cb` – Callback invoked by the verifier when it needs to
 ///   retrieve the raw chunk data for a set of hash values.
-///   It must return an `FFIChunkDataArray` describing a contiguous buffer that
-///   contains the requested chunk data. The returned buffer is owned by the
-///   caller and must remain valid until the next callback invocation.
+///   It must return an `FFIChunkDataArray` with one `FFIVecBytes` per
+///   requested hash, in the order requested. The library takes ownership of
+///   the array and of every buffer in it and frees them with Rust's
+///   allocator, so all of them must come from that allocator, with `cap` set
+///   to the real capacity. Memory from C's `malloc` must not be returned.
 ///   The callback receives:
 ///   - `user_data`: the same pointer passed in this struct,
 ///   - `hashes`: pointer to an array of `u128` hash identifiers,
 ///   - `hashes_len`: length of the `hashes` array.
-/// * `progress_cb` – Optional progress callback. It is called periodically
-///   with the number of bytes processed so far.
+/// * `progress_cb` – Progress callback, which must not be null. It is called
+///   periodically with the number of bytes processed so far.
 ///
 /// # Safety
 ///
@@ -1462,16 +1464,18 @@ pub struct VerifySingleFileArgsU64{
 ///   never dereferences this pointer; it is only handed back to the callbacks.
 /// * `get_chunks_cb`: Callback invoked by the verifier when it needs to
 ///   retrieve the raw chunk data for a set of hash values.
-///   It must return an `FFIChunkDataArray` describing a contiguous buffer that
-///   contains the requested chunk data. The returned buffer is owned by the
-///   caller and must remain valid until the next callback invocation.
+///   It must return an `FFIChunkDataArray` with one `FFIVecBytes` per
+///   requested hash, in the order requested. The library takes ownership of
+///   the array and of every buffer in it and frees them with Rust's
+///   allocator, so all of them must come from that allocator, with `cap` set
+///   to the real capacity. Memory from C's `malloc` must not be returned.
 ///   The callback receives:
 ///   - `user_data`: the same pointer passed in this struct,
 ///   - `hashes`: pointer to an array of `u128` hash identifiers,
 ///   - `hashes_len`: length of the `hashes` array.
 ///
-/// * `progress_cb`: Optional progress callback. It is called periodically with
-///   the number of bytes processed so far.
+/// * `progress_cb`: Progress callback, which must not be null. It is called
+///   periodically with the number of bytes processed so far.
 ///
 /// # Safety
 ///
@@ -1604,7 +1608,11 @@ unsafe impl Sync for ThreadSafeUserData {}
 ///   - `hashes`: pointer to the requested hash slice,
 ///   - `hashes_len`: length of that slice,
 ///   - `out_chunks`: pointer to an `FFIChunkDataArray` that the callback must
-///     fill
+///     fill with one `FFIVecBytes` per requested hash, in the order requested.
+///     The library takes ownership of the array and of every buffer in it
+///     and frees them with Rust's allocator, so all of them must come from
+///     that allocator, with `cap` set to the real capacity. Memory from C's
+///     `malloc` must not be returned.
 #[repr(C)]
 pub struct TestCompressionArgs<H> {
     pub total_data_size: u64,
