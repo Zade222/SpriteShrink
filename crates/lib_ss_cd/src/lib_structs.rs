@@ -632,7 +632,9 @@ impl<'a, H: Copy + Eq> ReconstructionContext<'a, H> {
             }
             SectorType::Mode1 | SectorType::Mode1Exception |
                 SectorType::Mode2Form1 | SectorType::Mode2Form1Exception |
-                SectorType::Mode2Form2 | SectorType::Mode2Form2Exception =>
+                SectorType::Mode2Form2 | SectorType::Mode2Form2Exception |
+                SectorType::PregapMode1 | SectorType::PregapMode1Exception |
+                SectorType::PregapMode2 | SectorType::PregapMode2Exception =>
             {
                 self.manifest.build_stream_info(
                     sector_info

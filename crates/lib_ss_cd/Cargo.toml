@@ -39,6 +39,7 @@ cbindgen = "0.29"
 criterion = { version = "~0.8", default-features = false, features = ["cargo_bench_support"] }
 proptest = { version = "~1.12", default-features = false, features = ["std"] }
 tempfile = { version = "~3.27", default-features = false }
+zstd = { version = "~0.13", default-features = false }
 
 [[bench]]
 name = "sector_rebuild"

@@ -220,12 +220,14 @@ pub fn analyze_and_map_disc(
             }
 
 
+            // Mode 2 sectors keep their subheader at 16..24. Mode 1 sectors
+            // have user data there, and their 8 bytes are the reserved area.
             let subheader_val = if matches!(
                 analysis_result.sector_type,
                 SectorType::Mode2Form1 | SectorType::Mode2Form2 |
                 SectorType::Mode2Form1Exception |
                 SectorType::Mode2Form2Exception |
-                SectorType::PregapMode1Exception |
+                SectorType::PregapMode2 |
                 SectorType::PregapMode2Exception
             ) {
                 let mut sh = [0u8; 8];
@@ -275,8 +277,10 @@ pub fn analyze_and_map_disc(
 
             if let Some(data) = analysis_result.exception_data {
                 let excep_type = match analysis_result.sector_type {
-                    SectorType::Mode1Exception => ExceptionType::Mode1,
-                    SectorType::Mode2Form1Exception => ExceptionType::Mode2Form1,
+                    SectorType::Mode1Exception |
+                    SectorType::PregapMode1Exception => ExceptionType::Mode1,
+                    SectorType::Mode2Form1Exception |
+                    SectorType::PregapMode2Exception => ExceptionType::Mode2Form1,
                     SectorType::Mode2Form2Exception => ExceptionType::Mode2Form2,
                     _ => ExceptionType::None
                 };
