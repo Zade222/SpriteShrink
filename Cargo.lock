@@ -1443,6 +1443,7 @@ dependencies = [
  "serde",
  "sha2",
  "sprite_shrink",
+ "tempfile",
  "thiserror 2.0.12",
  "tracing",
  "xxhash-rust",
