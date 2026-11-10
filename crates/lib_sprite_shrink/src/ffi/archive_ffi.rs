@@ -376,9 +376,12 @@ pub unsafe extern "C" fn archive_builder_new_u128(
         Ok(())
     }};
 
+    /*The builder takes ownership of the decoded hashes. They're a new list,
+    not the host's array, so nothing else would keep them alive until the
+    build.*/
     let builder = ArchiveBuilder::new(
         //ser_file_manifest,
-        hashes_vec.as_slice(),
+        hashes_vec,
         args_int.total_size,
         get_chunks_closure,
         write_data_closure

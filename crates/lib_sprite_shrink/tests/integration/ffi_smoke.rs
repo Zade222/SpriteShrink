@@ -34,7 +34,7 @@ use sprite_shrink::{
         ArchiveBuilderArgsU64, ArchiveBuilderArgsU128, ArchiveBuilderU64,
         ArchiveBuilderU128, CreateFileManifestAndChunksArgs,
         FFICallbackStatus, FFIChunkDataArray, FFIChunkLocation, FFICompData,
-        FFIFileData,
+        FFIFileData, FFIFileManifestChunks,
         FFIFileManifestParent, FFIParsedSSMC, FFIProgress, FFIProgressType,
         FFISSAChunkMeta, FFISeekInfoArray,
         FFISerializedOutput, FFIStatus, FFITocEntry, FFIVecBytes,
@@ -237,7 +237,7 @@ unsafe fn read_toc(ptr: *const FFITocEntry, len: usize) -> Vec<SSMCTocEntry> {
 }
 
 /// Copies manifests the library wrote back into Rust types, converting
-/// each hash with `H::from`.
+/// each hash with `Into<H>`.
 ///
 /// # Safety
 ///
@@ -247,8 +247,7 @@ unsafe fn read_manifests<F, H>(
     len: usize,
 ) -> Vec<FileManifestParent<H>>
 where
-    F: Copy,
-    H: From<F>,
+    F: Copy + Into<H>,
 {
     // SAFETY: the caller guarantees `ptr` holds `len` manifests.
     let manifests = unsafe { slice::from_raw_parts(ptr, len) };
@@ -279,7 +278,7 @@ where
 }
 
 /// Copies what `out` points to back into Rust types, converting each hash
-/// with `H::from`.
+/// with `Into<H>`.
 ///
 /// # Safety
 ///
@@ -288,8 +287,8 @@ where
 unsafe fn read_output<F, H>(out: *const FFISerializedOutput<F>)
     -> SerializedData<H>
 where
-    F: Copy,
-    H: From<F> + Eq + Hash,
+    F: Copy + Into<H>,
+    H: Eq + Hash,
 {
     // SAFETY: the caller guarantees `out` is valid.
     let out = unsafe { &*out };
@@ -1168,14 +1167,16 @@ fn round_trip_files() -> Vec<(String, Vec<u8>)> {
     ]
 }
 
-/// Builds the whole archive for `files` with the Rust API: the prefix,
-/// then the compressed data.
-fn rust_round_trip_archive(
+/// What the Rust API gives for `files` before the archive builder: the
+/// serialized metadata and every chunk, keyed by hash.
+fn rust_serialize_files<H>(
     files: &[(String, Vec<u8>)],
-    optimize_dictionary: bool,
-) -> Vec<u8> {
+) -> (SerializedData<H>, ChunkStore<H>)
+where
+    H: Hashable + Ord,
+{
     let file_manifest = DashMap::new();
-    let mut store: ChunkStore<u64> = HashMap::new();
+    let mut store: ChunkStore<H> = HashMap::new();
 
     for (name, data) in files {
         let processed = process_file_in_memory(
@@ -1184,7 +1185,7 @@ fn rust_round_trip_archive(
         )
         .unwrap()
         .unwrap();
-        let (fmp, chunks) = create_file_manifest_and_chunks::<u64>(
+        let (fmp, chunks) = create_file_manifest_and_chunks::<H>(
             &processed.file_data,
             &processed.chunks,
         );
@@ -1192,15 +1193,24 @@ fn rust_round_trip_archive(
         store.extend(chunks);
     }
 
+    (serialize_uncompressed_data(&file_manifest), store)
+}
+
+/// Builds the whole archive for `files` with the Rust API: the prefix,
+/// then the compressed data.
+fn rust_round_trip_archive<H: HashExports>(
+    files: &[(String, Vec<u8>)],
+    optimize_dictionary: bool,
+) -> Vec<u8> {
+    let (ser, store) = rust_serialize_files::<H>(files);
+
     let total_size = store.values().map(|chunk| chunk.len() as u64).sum();
     let store = Arc::new(store);
-    let get_chunks = move |hashes: &[u64]| {
+    let get_chunks = move |hashes: &[H]| {
         Ok::<_, SpriteShrinkError>(
             hashes.iter().map(|hash| store[hash].clone()).collect()
         )
     };
-
-    let ser = serialize_uncompressed_data(&file_manifest);
 
     let written = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&written);
@@ -1224,7 +1234,7 @@ fn rust_round_trip_archive(
         &ser.archive_toc,
         &ser.ser_file_manifest,
         &comp,
-        HASH_TYPE_XXH3_64,
+        H::HASH_TYPE,
     )
     .unwrap();
     archive.extend_from_slice(&written.lock().unwrap());
@@ -1233,28 +1243,21 @@ fn rust_round_trip_archive(
 
 /// What the test host keeps for the archive builder's callbacks: the chunks
 /// it lends out, and the compressed data written back.
-struct BuildHost {
-    chunks: ChunkStore<u64>,
+struct BuildHost<H> {
+    chunks: ChunkStore<H>,
     written: Mutex<Vec<u8>>,
 }
 
-unsafe extern "C" fn builder_get_chunks_u64(
-    user_data: *mut c_void,
-    hashes: *const u64,
-    hashes_len: usize,
-    out_chunks: *mut FFIChunkDataArray,
-) -> FFICallbackStatus {
-    // SAFETY: the round trip passes a `BuildHost` as `user_data`.
-    let host = unsafe { &*user_data.cast::<BuildHost>() };
-    // SAFETY: the library passes `hashes_len` hashes.
-    let hashes = unsafe { slice::from_raw_parts(hashes, hashes_len) };
-
+/// Lends the builder the host's chunks for `hashes` without copying them.
+fn lend_chunks<H: Eq + Hash>(
+    host: &BuildHost<H>,
+    hashes: impl Iterator<Item = H>,
+) -> FFIChunkDataArray {
     // The library only reads these and copies them before calling
     // `builder_free_chunks`, so they point into the host's store.
     let chunks: Vec<FFIVecBytes> = hashes
-        .iter()
         .map(|hash| {
-            let chunk = &host.chunks[hash];
+            let chunk = &host.chunks[&hash];
             FFIVecBytes {
                 ptr: chunk.as_ptr().cast_mut(),
                 len: chunk.len(),
@@ -1263,9 +1266,40 @@ unsafe extern "C" fn builder_get_chunks_u64(
         })
         .collect();
     let (ptr, len, cap) = into_raw_parts(chunks);
+    FFIChunkDataArray { ptr, len, cap }
+}
+
+unsafe extern "C" fn builder_get_chunks_u64(
+    user_data: *mut c_void,
+    hashes: *const u64,
+    hashes_len: usize,
+    out_chunks: *mut FFIChunkDataArray,
+) -> FFICallbackStatus {
+    // SAFETY: the round trip passes a `BuildHost<u64>` as `user_data`.
+    let host = unsafe { &*user_data.cast::<BuildHost<u64>>() };
+    // SAFETY: the library passes `hashes_len` hashes.
+    let hashes = unsafe { slice::from_raw_parts(hashes, hashes_len) };
+    let chunks = lend_chunks(host, hashes.iter().copied());
 
     // SAFETY: the library passes a pointer that's valid for writes.
-    unsafe { out_chunks.write(FFIChunkDataArray { ptr, len, cap }) };
+    unsafe { out_chunks.write(chunks) };
+    FFICallbackStatus::CallbackOk
+}
+
+unsafe extern "C" fn builder_get_chunks_u128(
+    user_data: *mut c_void,
+    hashes: *const u8,
+    hashes_len: usize,
+    out_chunks: *mut FFIChunkDataArray,
+) -> FFICallbackStatus {
+    // SAFETY: the round trip passes a `BuildHost<u128>` as `user_data`.
+    let host = unsafe { &*user_data.cast::<BuildHost<u128>>() };
+    // SAFETY: the library passes `hashes_len` 16-byte hashes.
+    let hashes = unsafe { read_u128_hashes(hashes, hashes_len) };
+    let chunks = lend_chunks(host, hashes.into_iter());
+
+    // SAFETY: the library passes a pointer that's valid for writes.
+    unsafe { out_chunks.write(chunks) };
     FFICallbackStatus::CallbackOk
 }
 
@@ -1273,19 +1307,19 @@ unsafe extern "C" fn builder_free_chunks(
     _user_data: *mut c_void,
     chunks: FFIChunkDataArray,
 ) {
-    // SAFETY: `chunks` is the array `builder_get_chunks_u64` split with
+    // SAFETY: `chunks` is the array `lend_chunks` split with
     // `into_raw_parts`. Its entries point into the host's store, so only the
     // array itself is freed.
     drop(unsafe { Vec::from_raw_parts(chunks.ptr, chunks.len, chunks.cap) });
 }
 
-unsafe extern "C" fn builder_write(
+unsafe extern "C" fn builder_write<H>(
     user_data: *mut c_void,
     data: *const u8,
     data_len: usize,
 ) -> FFICallbackStatus {
-    // SAFETY: the round trip passes a `BuildHost` as `user_data`.
-    let host = unsafe { &*user_data.cast::<BuildHost>() };
+    // SAFETY: the round trip passes a `BuildHost<H>` as `user_data`.
+    let host = unsafe { &*user_data.cast::<BuildHost<H>>() };
     // SAFETY: the library passes `data_len` readable bytes at `data`.
     let data = unsafe { slice::from_raw_parts(data, data_len) };
 
@@ -1293,23 +1327,196 @@ unsafe extern "C" fn builder_write(
     FFICallbackStatus::CallbackOk
 }
 
-/// Builds the whole archive for `files` through the C exports, the way a C
-/// host would: process and chunk each file, serialize, compress, then build
-/// the prefix and put it in front of the compressed data. `configure` runs
-/// after the standard settings, just before the build.
-#[expect(clippy::too_many_lines, reason = "one step per C call, in order")]
-fn ffi_round_trip_archive(
+/// Signatures of the exports that come in a u64 and a u128 form.
+type CreateFn<F> = unsafe extern "C" fn(
+    *const CreateFileManifestAndChunksArgs,
+    *mut *mut FFIFileManifestChunks<F>,
+) -> FFIStatus;
+type FreeFn<T> = unsafe extern "C" fn(*mut T);
+type ArgsFn<A, O> = unsafe extern "C" fn(*const A, *mut *mut O) -> FFIStatus;
+type SetFn<B, V> = unsafe extern "C" fn(*mut B, V) -> FFIStatus;
+type BuildFn<B> =
+    unsafe extern "C" fn(*mut B, *mut *mut FFICompData) -> FFIStatus;
+
+/// One hash width's C exports, implemented on the Rust hash type, so one
+/// test body can drive either the u64 or the u128 path. Each export is an
+/// associated constant holding a function pointer.
+trait HashExports: Hashable + Ord + Debug + Display + Encode {
+    /// How the exports pass this hash in structs: `u64` or `U128Bytes`.
+    type Ffi: Copy + From<Self> + Into<Self>;
+    type SerializeArgs;
+    type BuilderArgs;
+    type Builder;
+
+    const HASH_TYPE: u8;
+    const CREATE: CreateFn<Self::Ffi>;
+    const FREE_CREATED: FreeFn<FFIFileManifestChunks<Self::Ffi>>;
+    const SERIALIZE: ArgsFn<Self::SerializeArgs, FFISerializedOutput<Self::Ffi>>;
+    const FREE_SERIALIZED: FreeFn<FFISerializedOutput<Self::Ffi>>;
+    const BUILDER_NEW: ArgsFn<Self::BuilderArgs, Self::Builder>;
+    const SET_LEVEL: SetFn<Self::Builder, i32>;
+    const SET_DICTIONARY_SIZE: SetFn<Self::Builder, u64>;
+    const SET_WORKERS: SetFn<Self::Builder, usize>;
+    const BUILD: BuildFn<Self::Builder>;
+    const BUILD_PREFIX: BuildPrefixFn<Self::Ffi>;
+
+    fn serialize_args(
+        manifests: &[FFIFileManifestParent<Self::Ffi>],
+        names: &[*const c_char],
+    ) -> Self::SerializeArgs;
+
+    /// Arguments for a builder fed from `ser` and `host`.
+    fn builder_args(
+        ser: &FFISerializedOutput<Self::Ffi>,
+        file_count: u32,
+        host: *mut BuildHost<Self>,
+    ) -> Self::BuilderArgs;
+}
+
+impl HashExports for u64 {
+    type Ffi = u64;
+    type SerializeArgs = SerializeUncompressedDataArgsU64;
+    type BuilderArgs = ArchiveBuilderArgsU64;
+    type Builder = ArchiveBuilderU64;
+
+    const HASH_TYPE: u8 = HASH_TYPE_XXH3_64;
+    const CREATE: CreateFn<u64> = create_file_manifest_and_chunks_u64;
+    const FREE_CREATED: FreeFn<FFIFileManifestChunks<u64>> =
+        free_file_manifest_and_chunks_u64;
+    const SERIALIZE: ArgsFn<
+        SerializeUncompressedDataArgsU64,
+        FFISerializedOutput<u64>,
+    > = serialize_uncompressed_data_u64;
+    const FREE_SERIALIZED: FreeFn<FFISerializedOutput<u64>> =
+        free_serialized_output_u64;
+    const BUILDER_NEW: ArgsFn<ArchiveBuilderArgsU64, ArchiveBuilderU64> =
+        archive_builder_new_u64;
+    const SET_LEVEL: SetFn<ArchiveBuilderU64, i32> =
+        archive_builder_set_compression_level_u64;
+    const SET_DICTIONARY_SIZE: SetFn<ArchiveBuilderU64, u64> =
+        archive_builder_set_dictionary_size_u64;
+    const SET_WORKERS: SetFn<ArchiveBuilderU64, usize> =
+        archive_builder_set_worker_count_u64;
+    const BUILD: BuildFn<ArchiveBuilderU64> = archive_builder_build_u64;
+    const BUILD_PREFIX: BuildPrefixFn<u64> = build_ssmc_prefix_u64;
+
+    fn serialize_args(
+        manifests: &[FFIFileManifestParent<u64>],
+        names: &[*const c_char],
+    ) -> SerializeUncompressedDataArgsU64 {
+        SerializeUncompressedDataArgsU64 {
+            manifest_array_ptr: manifests.as_ptr(),
+            filenames: names.as_ptr(),
+            manifest_len: manifests.len(),
+        }
+    }
+
+    fn builder_args(
+        ser: &FFISerializedOutput<u64>,
+        file_count: u32,
+        host: *mut BuildHost<u64>,
+    ) -> ArchiveBuilderArgsU64 {
+        // SAFETY: the caller passes a live host.
+        let total_size = unsafe { &*host }
+            .chunks
+            .values()
+            .map(|chunk| chunk.len() as u64)
+            .sum();
+        ArchiveBuilderArgsU64 {
+            manifest_array_ptr: ser.ser_manifest_ptr,
+            manifest_len: ser.ser_manifest_len,
+            sorted_hashes_array_ptr: ser.sorted_hashes_ptr,
+            sorted_hashes_len: ser.sorted_hashes_len,
+            file_count,
+            total_size,
+            user_data: host.cast(),
+            get_chunks_cb: builder_get_chunks_u64,
+            free_chunks_cb: builder_free_chunks,
+            write_comp_data_cb: builder_write::<u64>,
+        }
+    }
+}
+
+impl HashExports for u128 {
+    type Ffi = U128Bytes;
+    type SerializeArgs = SerializeUncompressedDataArgsU128;
+    type BuilderArgs = ArchiveBuilderArgsU128;
+    type Builder = ArchiveBuilderU128;
+
+    const HASH_TYPE: u8 = HASH_TYPE_XXH3_128;
+    const CREATE: CreateFn<U128Bytes> = create_file_manifest_and_chunks_u128;
+    const FREE_CREATED: FreeFn<FFIFileManifestChunks<U128Bytes>> =
+        free_file_manifest_and_chunks_u128;
+    const SERIALIZE: ArgsFn<
+        SerializeUncompressedDataArgsU128,
+        FFISerializedOutput<U128Bytes>,
+    > = serialize_uncompressed_data_u128;
+    const FREE_SERIALIZED: FreeFn<FFISerializedOutput<U128Bytes>> =
+        free_serialized_output_u128;
+    const BUILDER_NEW: ArgsFn<ArchiveBuilderArgsU128, ArchiveBuilderU128> =
+        archive_builder_new_u128;
+    const SET_LEVEL: SetFn<ArchiveBuilderU128, i32> =
+        archive_builder_set_compression_level_u128;
+    const SET_DICTIONARY_SIZE: SetFn<ArchiveBuilderU128, u64> =
+        archive_builder_set_dictionary_size_u128;
+    const SET_WORKERS: SetFn<ArchiveBuilderU128, usize> =
+        archive_builder_set_worker_count_u128;
+    const BUILD: BuildFn<ArchiveBuilderU128> = archive_builder_build_u128;
+    const BUILD_PREFIX: BuildPrefixFn<U128Bytes> = build_ssmc_prefix_u128;
+
+    fn serialize_args(
+        manifests: &[FFIFileManifestParent<U128Bytes>],
+        names: &[*const c_char],
+    ) -> SerializeUncompressedDataArgsU128 {
+        SerializeUncompressedDataArgsU128 {
+            manifest_array_ptr: manifests.as_ptr(),
+            filenames: names.as_ptr(),
+            manifest_len: manifests.len(),
+        }
+    }
+
+    fn builder_args(
+        ser: &FFISerializedOutput<U128Bytes>,
+        file_count: u32,
+        host: *mut BuildHost<u128>,
+    ) -> ArchiveBuilderArgsU128 {
+        // SAFETY: the caller passes a live host.
+        let total_size = unsafe { &*host }
+            .chunks
+            .values()
+            .map(|chunk| chunk.len() as u64)
+            .sum();
+        ArchiveBuilderArgsU128 {
+            manifest_array_ptr: ser.ser_manifest_ptr,
+            manifest_len: ser.ser_manifest_len,
+            // `U128Bytes` is `#[repr(C)]` around `[u8; 16]`, so the sorted
+            // hashes are already the 16 little-endian bytes per hash the
+            // builder reads.
+            sorted_hashes_array_ptr: ser.sorted_hashes_ptr.cast(),
+            sorted_hashes_len: ser.sorted_hashes_len,
+            file_count,
+            total_size,
+            user_data: host.cast(),
+            get_chunks_cb: builder_get_chunks_u128,
+            free_chunks_cb: builder_free_chunks,
+            write_comp_data_cb: builder_write::<u128>,
+        }
+    }
+}
+
+/// Runs the part of a C host's archive path that comes before the builder:
+/// process and chunk each file, then serialize. Hands `then` the serialized
+/// output and every chunk, keyed by hash, and frees everything afterwards.
+/// Nothing here calls zstd, so Miri can run it.
+fn ffi_serialize_files<K: HashExports, R>(
     files: &[(String, Vec<u8>)],
-    configure: impl FnOnce(*mut ArchiveBuilderU64),
-) -> Vec<u8> {
+    then: impl FnOnce(&FFISerializedOutput<K::Ffi>, ChunkStore<K>) -> R,
+) -> R {
     let names: Vec<CString> = files
         .iter()
         .map(|(name, _)| CString::new(name.as_str()).unwrap())
         .collect();
-    let mut host = BuildHost {
-        chunks: HashMap::new(),
-        written: Mutex::new(Vec::new()),
-    };
+    let mut chunks: ChunkStore<K> = HashMap::new();
     let mut file_chunks = Vec::new();
 
     for (name, (_, data)) in names.iter().zip(files) {
@@ -1324,7 +1531,7 @@ fn ffi_round_trip_archive(
         let status = unsafe {
             process_file_in_memory_ffi(file, WINDOW_SIZE, &raw mut processed)
         };
-        assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+        assert_ok(status);
 
         // SAFETY: `processed` came from the successful call above.
         let processed_ref = unsafe { &*processed };
@@ -1339,12 +1546,9 @@ fn ffi_round_trip_archive(
         // SAFETY: `args` points into `name` and `processed`, which are both
         // still live, and `manifest_chunks` is a local.
         let status = unsafe {
-            create_file_manifest_and_chunks_u64(
-                &raw const args,
-                &raw mut manifest_chunks,
-            )
+            K::CREATE(&raw const args, &raw mut manifest_chunks)
         };
-        assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+        assert_ok(status);
         // SAFETY: `processed` came from `process_file_in_memory_ffi` and is
         // freed once, here.
         unsafe { free_processed_file_data_ffi(processed) };
@@ -1365,16 +1569,16 @@ fn ffi_round_trip_archive(
             let bytes = unsafe {
                 slice::from_raw_parts(chunk.chunk_data, chunk.chunk_data_len)
             };
-            host.chunks.entry(chunk.hash).or_insert_with(|| bytes.to_vec());
+            chunks.entry(chunk.hash.into()).or_insert_with(|| bytes.to_vec());
         }
         file_chunks.push(manifest_chunks);
     }
 
-    let manifests: Vec<FFIFileManifestParent<u64>> = file_chunks
+    let manifests: Vec<FFIFileManifestParent<K::Ffi>> = file_chunks
         .iter()
         .map(|&manifest_chunks| {
-            // SAFETY: each pointer came from a successful
-            // `create_file_manifest_and_chunks_u64` call and isn't freed yet.
+            // SAFETY: each pointer came from a successful `K::CREATE` call
+            // and isn't freed yet.
             let fmp = unsafe { &(*manifest_chunks).fmp };
             FFIFileManifestParent {
                 chunk_metadata: fmp.chunk_metadata,
@@ -1385,97 +1589,84 @@ fn ffi_round_trip_archive(
         .collect();
     let name_ptrs: Vec<*const c_char> =
         names.iter().map(|name| name.as_ptr()).collect();
-    let ser_args = SerializeUncompressedDataArgsU64 {
-        manifest_array_ptr: manifests.as_ptr(),
-        filenames: name_ptrs.as_ptr(),
-        manifest_len: manifests.len(),
-    };
+    let ser_args = K::serialize_args(&manifests, &name_ptrs);
     let mut ser = ptr::null_mut();
     // SAFETY: `ser_args` points into `manifests` and `name_ptrs`, which
     // outlive the call, and `ser` is a local.
-    let status = unsafe {
-        serialize_uncompressed_data_u64(&raw const ser_args, &raw mut ser)
-    };
-    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
-    // SAFETY: `ser` came from the successful call above.
-    let ser_ref = unsafe { &*ser };
+    let status = unsafe { K::SERIALIZE(&raw const ser_args, &raw mut ser) };
+    assert_ok(status);
 
-    let builder_args = ArchiveBuilderArgsU64 {
-        manifest_array_ptr: ser_ref.ser_manifest_ptr,
-        manifest_len: ser_ref.ser_manifest_len,
-        sorted_hashes_array_ptr: ser_ref.sorted_hashes_ptr,
-        sorted_hashes_len: ser_ref.sorted_hashes_len,
-        file_count: u32::try_from(files.len()).unwrap(),
-        total_size: host.chunks.values().map(|chunk| chunk.len() as u64).sum(),
-        user_data: ptr::from_mut(&mut host).cast(),
-        get_chunks_cb: builder_get_chunks_u64,
-        free_chunks_cb: builder_free_chunks,
-        write_comp_data_cb: builder_write,
-    };
-    let mut builder = ptr::null_mut();
-    // SAFETY: `builder_args` points into `ser` and `host`, which outlive the
-    // builder, and `builder` is a local.
-    let status = unsafe {
-        archive_builder_new_u64(&raw const builder_args, &raw mut builder)
-    };
-    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+    // SAFETY: `ser` came from the successful call above and is freed only
+    // after `then` returns.
+    let result = then(unsafe { &*ser }, chunks);
 
-    // SAFETY: `builder` came from `archive_builder_new_u64` and hasn't been
-    // built or freed.
-    let status = unsafe {
-        archive_builder_set_compression_level_u64(builder, COMPRESSION_LEVEL)
-    };
-    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
-    // SAFETY: `builder` came from `archive_builder_new_u64` and hasn't been
-    // built or freed.
-    let status = unsafe {
-        archive_builder_set_dictionary_size_u64(builder, DICTIONARY_SIZE)
-    };
-    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
-    // SAFETY: `builder` came from `archive_builder_new_u64` and hasn't been
-    // built or freed.
-    let status = unsafe {
-        archive_builder_set_worker_count_u64(builder, WORKER_COUNT)
-    };
-    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
-    configure(builder);
-
-    let mut comp = ptr::null_mut();
-    // SAFETY: `builder` came from `archive_builder_new_u64` and hasn't been
-    // built or freed; building consumes it. `comp` is a local.
-    let status = unsafe { archive_builder_build_u64(builder, &raw mut comp) };
-    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
-
-    let mut prefix = ptr::null_mut();
-    // SAFETY: the TOC and manifests in `ser` both hold `toc_len` elements,
-    // `comp` came from the successful build above, and `prefix` is a local.
-    let status = unsafe {
-        build_ssmc_prefix_u64(
-            ser_ref.toc_ptr,
-            ser_ref.ser_manifest_ptr,
-            ser_ref.toc_len,
-            comp,
-            &raw mut prefix,
-        )
-    };
-    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
-
-    // SAFETY: `prefix` came from the successful call above.
-    let mut archive = unsafe { take_prefix(prefix) };
-    archive.extend_from_slice(&host.written.lock().unwrap());
-
-    // SAFETY: `comp` came from `archive_builder_build_u64` and is freed
-    // once, here.
-    unsafe { archive_data_free(comp) };
-    // SAFETY: `ser` came from `serialize_uncompressed_data_u64` and is freed
-    // once, here.
-    unsafe { free_serialized_output_u64(ser) };
+    // SAFETY: `ser` came from `K::SERIALIZE` and is freed once, here.
+    unsafe { K::FREE_SERIALIZED(ser) };
     for manifest_chunks in file_chunks {
-        // SAFETY: each pointer came from
-        // `create_file_manifest_and_chunks_u64` and is freed once, here.
-        unsafe { free_file_manifest_and_chunks_u64(manifest_chunks) };
+        // SAFETY: each pointer came from `K::CREATE` and is freed once,
+        // here.
+        unsafe { K::FREE_CREATED(manifest_chunks) };
     }
-    archive
+    result
+}
+
+/// Builds the whole archive for `files` through the C exports, the way a C
+/// host would: process and chunk each file, serialize, compress, then build
+/// the prefix and put it in front of the compressed data. `configure` runs
+/// after the standard settings, just before the build.
+fn ffi_round_trip_archive<K: HashExports>(
+    files: &[(String, Vec<u8>)],
+    configure: impl FnOnce(*mut K::Builder),
+) -> Vec<u8> {
+    ffi_serialize_files::<K, _>(files, |ser, chunks| {
+        let mut host = BuildHost { chunks, written: Mutex::new(Vec::new()) };
+        let file_count = u32::try_from(files.len()).unwrap();
+        let builder_args = K::builder_args(ser, file_count, &raw mut host);
+        let mut builder = ptr::null_mut();
+        // SAFETY: `builder_args` points into `ser` and `host`, which outlive
+        // the builder, and `builder` is a local.
+        assert_ok(unsafe {
+            K::BUILDER_NEW(&raw const builder_args, &raw mut builder)
+        });
+
+        // SAFETY: `builder` came from `K::BUILDER_NEW` and hasn't been built
+        // or freed.
+        assert_ok(unsafe { K::SET_LEVEL(builder, COMPRESSION_LEVEL) });
+        // SAFETY: `builder` came from `K::BUILDER_NEW` and hasn't been built
+        // or freed.
+        assert_ok(unsafe { K::SET_DICTIONARY_SIZE(builder, DICTIONARY_SIZE) });
+        // SAFETY: `builder` came from `K::BUILDER_NEW` and hasn't been built
+        // or freed.
+        assert_ok(unsafe { K::SET_WORKERS(builder, WORKER_COUNT) });
+        configure(builder);
+
+        let mut comp = ptr::null_mut();
+        // SAFETY: `builder` came from `K::BUILDER_NEW` and hasn't been built
+        // or freed; building consumes it. `comp` is a local.
+        assert_ok(unsafe { K::BUILD(builder, &raw mut comp) });
+
+        let mut prefix = ptr::null_mut();
+        // SAFETY: the TOC and manifests in `ser` both hold `toc_len`
+        // elements, `comp` came from the successful build above, and
+        // `prefix` is a local.
+        assert_ok(unsafe {
+            K::BUILD_PREFIX(
+                ser.toc_ptr,
+                ser.ser_manifest_ptr,
+                ser.toc_len,
+                comp,
+                &raw mut prefix,
+            )
+        });
+
+        // SAFETY: `prefix` came from the successful call above.
+        let mut archive = unsafe { take_prefix(prefix) };
+        archive.extend_from_slice(&host.written.lock().unwrap());
+
+        // SAFETY: `comp` came from `K::BUILD` and is freed once, here.
+        unsafe { archive_data_free(comp) };
+        archive
+    })
 }
 
 /// Rebuilds every file in `archive` through the C read exports, the way a
@@ -1553,23 +1744,73 @@ fn ffi_extract(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
     files
 }
 
-#[test]
-#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
-fn ffi_round_trip_archive_matches_rust_api() {
+fn assert_round_trip_matches_rust<K: HashExports>() {
     let files = round_trip_files();
 
     assert_bytes_eq(
-        &ffi_round_trip_archive(&files, |_| {}),
-        &rust_round_trip_archive(&files, false),
+        &ffi_round_trip_archive::<K>(&files, |_| {}),
+        &rust_round_trip_archive::<K>(&files, false),
         "archive built through the C exports",
     );
 }
 
 #[test]
 #[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn ffi_round_trip_archive_u64_matches_rust_api() {
+    assert_round_trip_matches_rust::<u64>();
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn ffi_round_trip_archive_u128_matches_rust_api() {
+    assert_round_trip_matches_rust::<u128>();
+}
+
+/// Checks the C path up to the builder against the Rust API. This is the
+/// part of the round trip Miri can run.
+fn assert_serialized_files_match_rust<K: HashExports>() {
+    let files = round_trip_files();
+    let (rust, rust_chunks) = rust_serialize_files::<K>(&files);
+
+    ffi_serialize_files::<K, _>(&files, |ser, chunks| {
+        // SAFETY: `ser` came from a successful serialize call and is freed
+        // only after this closure returns.
+        let ffi: SerializedData<K> = unsafe { read_output(ptr::from_ref(ser)) };
+        assert_eq!(ffi.archive_toc, rust.archive_toc);
+        assert_eq!(
+            encode(&ffi.ser_file_manifest),
+            encode(&rust.ser_file_manifest)
+        );
+        assert_eq!(ffi.sorted_hashes, rust.sorted_hashes);
+        assert_eq!(chunks, rust_chunks);
+    });
+}
+
+#[test]
+fn ffi_serialized_files_u64_match_rust_api() {
+    assert_serialized_files_match_rust::<u64>();
+}
+
+#[test]
+fn ffi_serialized_files_u128_match_rust_api() {
+    assert_serialized_files_match_rust::<u128>();
+}
+
+#[test]
+fn u128_bytes_round_trip_as_little_endian() {
+    for value in [0, 1, 1 << 64, u128::MAX, 0x0f0e_0d0c_0b0a_0908_0706_0504_0302_0100]
+    {
+        let bytes = U128Bytes::from(value);
+        assert_eq!(bytes.bytes, value.to_le_bytes(), "{value:#x}");
+        assert_eq!(u128::from(bytes), value, "{value:#x}");
+    }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
 fn ffi_round_trip_extracts_original_files() {
     let mut files = round_trip_files();
-    let archive = ffi_round_trip_archive(&files, |_| {});
+    let archive = ffi_round_trip_archive::<u64>(&files, |_| {});
 
     // The table of contents is sorted by name.
     files.sort_by(|a, b| a.0.cmp(&b.0));
@@ -2206,7 +2447,7 @@ fn archive_builder_free_accepts_null() {
 fn the_optimize_dictionary_setter_changes_the_build_like_the_rust_api() {
     let files = round_trip_files();
 
-    let archive = ffi_round_trip_archive(&files, |builder| {
+    let archive = ffi_round_trip_archive::<u64>(&files, |builder| {
         // SAFETY: `builder` is the live builder the round trip passes in.
         assert_ok(unsafe {
             archive_builder_set_optimize_dictionary_u64(builder, true)
@@ -2215,7 +2456,7 @@ fn the_optimize_dictionary_setter_changes_the_build_like_the_rust_api() {
 
     assert_bytes_eq(
         &archive,
-        &rust_round_trip_archive(&files, true),
+        &rust_round_trip_archive::<u64>(&files, true),
         "archive built with an optimized dictionary",
     );
 }
@@ -2234,7 +2475,7 @@ extern "C" fn record_progress(progress: FFIProgress, user_data: *mut c_void) {
 fn the_progress_callback_reports_each_stage_of_a_build() {
     let log: ProgressLog = Mutex::new(Vec::new());
 
-    ffi_round_trip_archive(&round_trip_files(), |builder| {
+    ffi_round_trip_archive::<u64>(&round_trip_files(), |builder| {
         // SAFETY: `builder` is the live builder the round trip passes in,
         // and `log` outlives the build.
         assert_ok(unsafe {

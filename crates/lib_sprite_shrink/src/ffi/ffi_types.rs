@@ -171,7 +171,9 @@ pub struct ArchiveBuilderArgsU64 {
 ///   [`FFIFileManifestParentU128`]  structs.
 /// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
 /// * `sorted_hashes_array_ptr`: Pointer to a sorted array of all unique `u128`
-///   chunk hashes. Each element is a [u8; 16] in little-endian order.
+///   chunk hashes. Each element is a [u8; 16] in little-endian order. The
+///   library keeps its own copy, so the array can be freed once
+///   `archive_builder_new_u128` returns.
 /// * `sorted_hashes_len`: The number of hashes in the
 ///   `sorted_hashes_array_ptr` array.
 /// * `file_count`: The total number of files being added to the archive.

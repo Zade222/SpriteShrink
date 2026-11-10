@@ -7,6 +7,7 @@
 //! archive into a single byte vector ready for storage.
 
 use std::{
+    borrow::Cow,
     {collections::{
         VecDeque},
     },
@@ -83,9 +84,19 @@ unsafe impl Sync for FFIUserData {}
 //C style progress callback function pointer
 type CProgressCallback = extern "C" fn(FFIProgress, *mut c_void);
 
-pub struct ArchiveBuilder<'a, E, H, R, W> {
+pub struct ArchiveBuilder<'a, E, H, R, W>
+where
+    H: Clone,
+{
     //Required parameters
-    sorted_hashes: &'a [H],
+    /// The chunks to compress, in write order. Borrowed from the caller, or
+    /// owned when the caller had to build the list (the u128 FFI decodes it
+    /// from bytes).
+    ///
+    /// Only ever read. Calling `to_mut` or `into_owned` on a borrowed list
+    /// copies every hash, 8 or 16 bytes per unique chunk, and keeps the copy
+    /// for the whole build. Take `&sorted_hashes` instead.
+    sorted_hashes: Cow<'a, [H]>,
     total_size: u64,
     get_chunk_data: R,
     write_comp_data: W,
@@ -610,16 +621,29 @@ where
     R: Fn(&[H]) -> Result<Vec<Vec<u8>>, E>,
     W: FnMut(&[u8]) -> Result<(), E>,
 {
+    /// Creates a builder with the default settings.
+    ///
+    /// # Arguments
+    ///
+    /// * `sorted_hashes`: The chunks to compress, in the order to write
+    ///   them. A slice or `&Vec` is borrowed and never copied; a `Vec` is
+    ///   moved in and freed with the builder.
+    /// * `total_size`: The combined size in bytes of the uncompressed
+    ///   chunks.
+    /// * `get_chunk_data`: Returns the data of the chunks it's given, in the
+    ///   same order.
+    /// * `write_comp_data`: Receives each compressed chunk, in
+    ///   `sorted_hashes` order.
     pub fn new(
         //ser_file_manifest: Vec<FileManifestParent<H>>,
-        sorted_hashes: &'a [H],
+        sorted_hashes: impl Into<Cow<'a, [H]>>,
         total_size: u64,
         get_chunk_data: R,
         write_comp_data: W,
     ) -> Self {
         Self {
             //ser_file_manifest,
-            sorted_hashes,
+            sorted_hashes: sorted_hashes.into(),
             total_size,
             get_chunk_data,
             write_comp_data,
@@ -750,6 +774,10 @@ where
             c_progress_callback,
             _error_type
         } = self;
+
+        /*Borrowed or owned, the build only reads the hashes, so borrow them
+        as a slice rather than taking ownership, which could copy them.*/
+        let sorted_hashes: &[H] = &sorted_hashes;
 
         //Every report goes to both progress callbacks, if they're set.
         let report_progress = {
