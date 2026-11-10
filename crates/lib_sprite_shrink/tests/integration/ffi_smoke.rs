@@ -12,7 +12,7 @@ use std::{
     ffi::{CStr, CString, c_char, c_void},
     fmt::{Debug, Display},
     hash::Hash,
-    mem::ManuallyDrop,
+    mem::{ManuallyDrop, MaybeUninit},
     ptr, slice,
     sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}},
 };
@@ -41,7 +41,8 @@ use sprite_shrink::{
         SerializeUncompressedDataArgsU64, SerializeUncompressedDataArgsU128,
         TestCompressionArgsU64, TestCompressionArgsU128, U128Bytes,
         VerifySingleFileArgsU64, VerifySingleFileArgsU128,
-        archive_builder_build_u64, archive_builder_free_u64,
+        archive_builder_build_u64, archive_builder_build_u128,
+        archive_builder_free_u64,
         archive_builder_free_u128, archive_builder_new_u64,
         archive_builder_new_u128, archive_builder_set_c_progress_u64,
         archive_builder_set_c_progress_u128,
@@ -54,8 +55,10 @@ use sprite_shrink::{
         archive_builder_set_worker_count_u64,
         archive_builder_set_worker_count_u128, archive_data_free,
         build_ssmc_prefix_u64, build_ssmc_prefix_u128,
-        create_file_manifest_and_chunks_u64, decompress_chunk_c,
+        create_file_manifest_and_chunks_u64,
+        create_file_manifest_and_chunks_u128, decompress_chunk_c,
         free_file_header, free_file_manifest_and_chunks_u64,
+        free_file_manifest_and_chunks_u128,
         free_processed_file_data_ffi,
         free_parsed_ssmc_u64, free_parsed_ssmc_u128,
         free_seek_chunks_u64, free_seek_chunks_u128,
@@ -2071,11 +2074,13 @@ fn assert_ok(status: FFIStatus) {
     assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
 }
 
-#[test]
-fn a_u64_builder_can_be_configured_and_freed_without_building() {
-    let input = host_input::<u64, u64>(SEEK_HASHES_U64);
-    let hashes = SEEK_HASHES_U64;
-    let args = ArchiveBuilderArgsU64 {
+/// Arguments for a u64 builder that's configured but never built, so its
+/// callbacks don't run.
+fn unbuilt_builder_args_u64(
+    input: &HostInput<u64>,
+    hashes: &[u64],
+) -> ArchiveBuilderArgsU64 {
+    ArchiveBuilderArgsU64 {
         manifest_array_ptr: input.manifests.as_ptr(),
         manifest_len: input.manifests.len(),
         sorted_hashes_array_ptr: hashes.as_ptr(),
@@ -2086,7 +2091,34 @@ fn a_u64_builder_can_be_configured_and_freed_without_building() {
         get_chunks_cb: chunks_fail::<u64>,
         free_chunks_cb: free_nothing,
         write_comp_data_cb: write_nothing,
-    };
+    }
+}
+
+/// The u128 form of [`unbuilt_builder_args_u64`]. `hashes` holds 16
+/// little-endian bytes per hash.
+fn unbuilt_builder_args_u128(
+    input: &HostInput<U128Bytes>,
+    hashes: &[u8],
+) -> ArchiveBuilderArgsU128 {
+    ArchiveBuilderArgsU128 {
+        manifest_array_ptr: input.manifests.as_ptr(),
+        manifest_len: input.manifests.len(),
+        sorted_hashes_array_ptr: hashes.as_ptr(),
+        sorted_hashes_len: hashes.len() / size_of::<u128>(),
+        file_count: u32::try_from(input.manifests.len()).unwrap(),
+        total_size: 12,
+        user_data: ptr::null_mut(),
+        get_chunks_cb: chunks_fail::<u8>,
+        free_chunks_cb: free_nothing,
+        write_comp_data_cb: write_nothing,
+    }
+}
+
+#[test]
+fn a_u64_builder_can_be_configured_and_freed_without_building() {
+    let input = host_input::<u64, u64>(SEEK_HASHES_U64);
+    let hashes = SEEK_HASHES_U64;
+    let args = unbuilt_builder_args_u64(&input, &hashes);
     let mut builder: *mut ArchiveBuilderU64 = ptr::null_mut();
 
     // SAFETY: `args` points into `input` and `hashes`, which outlive the
@@ -2127,18 +2159,7 @@ fn a_u128_builder_can_be_configured_and_freed_without_building() {
         .iter()
         .flat_map(|hash| hash.to_le_bytes())
         .collect();
-    let args = ArchiveBuilderArgsU128 {
-        manifest_array_ptr: input.manifests.as_ptr(),
-        manifest_len: input.manifests.len(),
-        sorted_hashes_array_ptr: hashes.as_ptr(),
-        sorted_hashes_len: SEEK_HASHES_U128.len(),
-        file_count: u32::try_from(input.manifests.len()).unwrap(),
-        total_size: 12,
-        user_data: ptr::null_mut(),
-        get_chunks_cb: chunks_fail::<u8>,
-        free_chunks_cb: free_nothing,
-        write_comp_data_cb: write_nothing,
-    };
+    let args = unbuilt_builder_args_u128(&input, &hashes);
     let mut builder: *mut ArchiveBuilderU128 = ptr::null_mut();
 
     // SAFETY: `args` points into `input` and `hashes`, which outlive the
@@ -2241,4 +2262,619 @@ fn the_progress_callback_reports_each_stage_of_a_build() {
         compressing.1
     );
     assert_eq!(log[log.len() - 1].0, stage(FFIProgressType::Finalizing));
+}
+
+// Null arguments
+//
+// A case table builds each struct with `Args { field: ptr::null(), ..args }`.
+// The struct isn't `Copy`, but `..args` only reads the remaining fields, and
+// those are all `Copy` pointers, so `args` stays usable for the next row.
+
+/// A null `chunk_metadata` is rejected at both of these lengths. A slice
+/// can't be built from a null pointer even for a length of 0.
+const NULL_METADATA_LENGTHS: [usize; 2] = [0, 3];
+
+fn manifest_without_metadata<F>(len: usize) -> FFIFileManifestParent<F> {
+    FFIFileManifestParent {
+        chunk_metadata: ptr::null(),
+        chunk_metadata_len: len,
+        chunk_metadata_cap: len,
+    }
+}
+
+fn assert_null_argument(what: &str, status: FFIStatus) {
+    assert_eq!(
+        status_code(status),
+        status_code(FFIStatus::NullArgument),
+        "null {what}"
+    );
+}
+
+/// Checks an export taking only an arguments struct: a null struct, then
+/// each row of `cases`, which has one field set to null.
+fn assert_args_rejected<A>(
+    export: unsafe extern "C" fn(*const A) -> FFIStatus,
+    cases: &[(&str, A)],
+) {
+    // SAFETY: the export checks the struct pointer before reading it.
+    assert_null_argument("args", unsafe { export(ptr::null()) });
+
+    for (what, args) in cases {
+        // SAFETY: `args` is live for the call, and the export returns at its
+        // null field without reading through any null pointer.
+        assert_null_argument(what, unsafe { export(ptr::from_ref(args)) });
+    }
+}
+
+/// Checks an export taking an arguments struct and an out-pointer: each of
+/// those null, then each row of `cases`, which has one field set to null.
+fn assert_args_and_out_rejected<A, O>(
+    export: unsafe extern "C" fn(*const A, *mut O) -> FFIStatus,
+    valid: &A,
+    cases: &[(&str, A)],
+) {
+    // Uninitialized is enough: every call here has to return before writing
+    // to it, and it's never read.
+    let mut out_slot = MaybeUninit::<O>::uninit();
+    let out = out_slot.as_mut_ptr();
+
+    // SAFETY: the export checks the struct pointer before reading it, and
+    // `out` is a local that it doesn't reach.
+    assert_null_argument("args", unsafe { export(ptr::null(), out) });
+    // SAFETY: `valid` is live for the call, and the export checks the
+    // out-pointer before using anything in it.
+    assert_null_argument("out_ptr", unsafe {
+        export(ptr::from_ref(valid), ptr::null_mut())
+    });
+
+    for (what, args) in cases {
+        // SAFETY: `args` is live for the call, and the export returns at its
+        // null field without writing to `out`.
+        assert_null_argument(what, unsafe { export(ptr::from_ref(args), out) });
+    }
+}
+
+/// Checks a builder setter with a null handle.
+fn assert_setter_rejects_null<B, V>(
+    what: &str,
+    set: unsafe extern "C" fn(*mut B, V) -> FFIStatus,
+    value: V,
+) {
+    // SAFETY: the setter checks the handle before using it.
+    assert_null_argument(what, unsafe { set(ptr::null_mut(), value) });
+}
+
+#[test]
+fn create_file_manifest_and_chunks_rejects_each_null_pointer() {
+    let name = c"file.bin";
+    let data = [0_u8; 4];
+    // Never read: every call here returns before looking at the chunks.
+    let args = CreateFileManifestAndChunksArgs {
+        file_name_ptr: name.as_ptr(),
+        file_data_array_ptr: data.as_ptr(),
+        file_data_len: data.len(),
+        chunks_array_ptr: ptr::dangling(),
+        chunks_len: 0,
+    };
+    let cases = [
+        (
+            "file name",
+            CreateFileManifestAndChunksArgs {
+                file_name_ptr: ptr::null(),
+                ..args
+            },
+        ),
+        (
+            "file data",
+            CreateFileManifestAndChunksArgs {
+                file_data_array_ptr: ptr::null(),
+                ..args
+            },
+        ),
+        (
+            "chunks",
+            CreateFileManifestAndChunksArgs {
+                chunks_array_ptr: ptr::null(),
+                ..args
+            },
+        ),
+    ];
+
+    assert_args_and_out_rejected(
+        create_file_manifest_and_chunks_u64,
+        &args,
+        &cases,
+    );
+    assert_args_and_out_rejected(
+        create_file_manifest_and_chunks_u128,
+        &args,
+        &cases,
+    );
+}
+
+#[test]
+fn process_file_in_memory_rejects_each_null_pointer() {
+    let name = c"file.bin";
+    let data = [0_u8; 4];
+    let file = FFIFileData {
+        filename: name.as_ptr(),
+        file_data: data.as_ptr(),
+        file_data_len: data.len(),
+    };
+    let mut out_slot = ptr::null_mut();
+    let out = &raw mut out_slot;
+
+    let calls = [
+        ("filename", FFIFileData { filename: ptr::null(), ..file }, out),
+        ("file data", FFIFileData { file_data: ptr::null(), ..file }, out),
+        ("out_ptr", FFIFileData { ..file }, ptr::null_mut()),
+    ];
+    for (what, file, out) in calls {
+        // SAFETY: one pointer is null, which the function checks before
+        // reading anything; the others point into live locals.
+        let status =
+            unsafe { process_file_in_memory_ffi(file, WINDOW_SIZE, out) };
+        assert_null_argument(what, status);
+    }
+    assert!(out_slot.is_null());
+}
+
+#[test]
+fn verify_single_file_u64_rejects_each_null_pointer() {
+    let input = host_input::<u64, u64>(SEEK_HASHES_U64);
+    let host = VerifyHost::new(SEEK_HASHES_U64);
+    let (_, veri_hash) = file_and_hash(0);
+    let args = VerifySingleFileArgsU64 {
+        filename: input.name_ptrs[0],
+        file_manifest_parent: &raw const input.manifests[0],
+        veri_hash_array_ptr: veri_hash.as_ptr(),
+        user_data: ptr::from_ref(&host).cast_mut().cast(),
+        get_chunks_cb: verify_get_chunks_u64,
+        progress_cb: verify_progress::<u64>,
+    };
+    let no_metadata = NULL_METADATA_LENGTHS.map(manifest_without_metadata);
+
+    assert_args_rejected(
+        verify_single_file_u64,
+        &[
+            ("filename", VerifySingleFileArgsU64 {
+                filename: ptr::null(),
+                ..args
+            }),
+            ("manifest", VerifySingleFileArgsU64 {
+                file_manifest_parent: ptr::null(),
+                ..args
+            }),
+            ("hash", VerifySingleFileArgsU64 {
+                veri_hash_array_ptr: ptr::null(),
+                ..args
+            }),
+            ("chunk metadata, empty", VerifySingleFileArgsU64 {
+                file_manifest_parent: &raw const no_metadata[0],
+                ..args
+            }),
+            ("chunk metadata", VerifySingleFileArgsU64 {
+                file_manifest_parent: &raw const no_metadata[1],
+                ..args
+            }),
+        ],
+    );
+    assert_eq!(host.progress.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn verify_single_file_u128_rejects_each_null_pointer() {
+    let input = host_input::<u128, U128Bytes>(SEEK_HASHES_U128);
+    let host = VerifyHost::new(SEEK_HASHES_U128);
+    let (_, veri_hash) = file_and_hash(0);
+    let args = VerifySingleFileArgsU128 {
+        filename: input.name_ptrs[0],
+        file_manifest_parent: &raw const input.manifests[0],
+        veri_hash_array_ptr: veri_hash.as_ptr(),
+        user_data: ptr::from_ref(&host).cast_mut().cast(),
+        get_chunks_cb: verify_get_chunks_u128,
+        progress_cb: verify_progress::<u128>,
+    };
+    let no_metadata = NULL_METADATA_LENGTHS.map(manifest_without_metadata);
+
+    assert_args_rejected(
+        verify_single_file_u128,
+        &[
+            ("filename", VerifySingleFileArgsU128 {
+                filename: ptr::null(),
+                ..args
+            }),
+            ("manifest", VerifySingleFileArgsU128 {
+                file_manifest_parent: ptr::null(),
+                ..args
+            }),
+            ("hash", VerifySingleFileArgsU128 {
+                veri_hash_array_ptr: ptr::null(),
+                ..args
+            }),
+            ("chunk metadata, empty", VerifySingleFileArgsU128 {
+                file_manifest_parent: &raw const no_metadata[0],
+                ..args
+            }),
+            ("chunk metadata", VerifySingleFileArgsU128 {
+                file_manifest_parent: &raw const no_metadata[1],
+                ..args
+            }),
+        ],
+    );
+    assert_eq!(host.progress.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn test_compression_rejects_each_null_pointer() {
+    let hashes = SEEK_HASHES_U64;
+    let args = TestCompressionArgsU64 {
+        total_data_size: 12,
+        sorted_hashes_array_ptr: hashes.as_ptr(),
+        sorted_hashes_len: hashes.len(),
+        worker_count: WORKER_COUNT,
+        dictionary_size: 1024,
+        compression_level: COMPRESSION_LEVEL,
+        user_data: ptr::null_mut(),
+        get_chunks_cb: chunks_fail::<u64>,
+    };
+    assert_args_and_out_rejected(
+        test_compression_u64,
+        &args,
+        &[("hashes", TestCompressionArgsU64 {
+            sorted_hashes_array_ptr: ptr::null(),
+            ..args
+        })],
+    );
+
+    let hash_bytes = [0_u8; 16];
+    let args = TestCompressionArgsU128 {
+        total_data_size: 12,
+        sorted_hashes_array_ptr: hash_bytes.as_ptr(),
+        sorted_hashes_len: 1,
+        worker_count: WORKER_COUNT,
+        dictionary_size: 1024,
+        compression_level: COMPRESSION_LEVEL,
+        user_data: ptr::null_mut(),
+        get_chunks_cb: chunks_fail::<u8>,
+    };
+    assert_args_and_out_rejected(
+        test_compression_u128,
+        &args,
+        &[("hashes", TestCompressionArgsU128 {
+            sorted_hashes_array_ptr: ptr::null(),
+            ..args
+        })],
+    );
+}
+
+fn assert_get_seek_rejects_null<F>(
+    get_seek: GetSeek<F>,
+    input: &HostInput<F>,
+) {
+    let mut out_slot = ptr::null_mut();
+    let out = &raw mut out_slot;
+    let manifest = &raw const input.manifests[0];
+
+    let calls = [
+        ("manifest", ptr::null(), out),
+        ("out_ptr", manifest, ptr::null_mut()),
+    ];
+    for (what, manifest, out) in calls {
+        // SAFETY: one pointer is null, which the function checks before
+        // using either; the other points into `input` or a local.
+        assert_null_argument(what, unsafe { get_seek(manifest, 0, 1, out) });
+    }
+
+    for len in NULL_METADATA_LENGTHS {
+        let manifest = manifest_without_metadata::<F>(len);
+        // SAFETY: `manifest` and `out` are locals. The function rejects the
+        // null `chunk_metadata` before reading through it.
+        let status = unsafe { get_seek(&raw const manifest, 0, 1, out) };
+        assert_null_argument("chunk metadata", status);
+    }
+    assert!(out_slot.is_null());
+}
+
+#[test]
+fn get_seek_chunks_rejects_each_null_pointer() {
+    assert_get_seek_rejects_null(
+        get_seek_chunks_u64,
+        &host_input::<u64, u64>(SEEK_HASHES_U64),
+    );
+    assert_get_seek_rejects_null(
+        get_seek_chunks_u128,
+        &host_input::<u128, U128Bytes>(SEEK_HASHES_U128),
+    );
+}
+
+#[test]
+fn lookup_chunk_location_rejects_each_null_pointer() {
+    let map: HashMap<u64, ChunkLocation> = HashMap::new();
+    let map = ptr::from_ref(&map).cast::<c_void>();
+    let key = [0_u8; 16];
+    let mut location = FFIChunkLocation { offset: 0, length: 0 };
+    let out = &raw mut location;
+
+    for (what, map, out) in [
+        ("map", ptr::null(), out),
+        ("location", map, ptr::null_mut()),
+    ] {
+        // SAFETY: one pointer is null, which the function checks before
+        // using either.
+        let status = unsafe { lookup_chunk_location_u64(map, 1, out) };
+        assert_null_argument(what, status);
+
+        // SAFETY: one of `map` and `out` is null, which the function checks
+        // before using either, and `key` is 16 readable bytes.
+        let status = unsafe {
+            lookup_chunk_location_u128(map, key.as_ptr(), out)
+        };
+        assert_null_argument(what, status);
+    }
+}
+
+#[test]
+fn decompress_chunk_rejects_each_null_pointer() {
+    let compressed = [0_u8; 4];
+    let dictionary = [0_u8; 4];
+    let mut decompressed = [0_u8; 4];
+    let (comp, dict) = (compressed.as_ptr(), dictionary.as_ptr());
+    let out = decompressed.as_mut_ptr();
+
+    let calls = [
+        ("compressed data", ptr::null(), dict, out),
+        ("dictionary", comp, ptr::null(), out),
+        ("output buffer", comp, dict, ptr::null_mut()),
+    ];
+    for (what, comp, dict, out) in calls {
+        // SAFETY: one pointer is null, which the function checks before
+        // reading anything; the others point to 4 bytes in live locals.
+        let status = unsafe { decompress_chunk_c(comp, 4, dict, 4, out, 4) };
+        assert_null_argument(what, status);
+    }
+}
+
+#[test]
+fn serialize_rejects_each_null_pointer() {
+    let input = host_input::<u64, u64>(SEEK_HASHES_U64);
+    let args = SerializeUncompressedDataArgsU64 {
+        manifest_array_ptr: input.manifests.as_ptr(),
+        filenames: input.name_ptrs.as_ptr(),
+        manifest_len: input.manifests.len(),
+    };
+    assert_args_and_out_rejected(
+        serialize_uncompressed_data_u64,
+        &args,
+        &[
+            ("manifests", SerializeUncompressedDataArgsU64 {
+                manifest_array_ptr: ptr::null(),
+                ..args
+            }),
+            ("filenames", SerializeUncompressedDataArgsU64 {
+                filenames: ptr::null(),
+                ..args
+            }),
+        ],
+    );
+
+    let input = host_input::<u128, U128Bytes>(SEEK_HASHES_U128);
+    let args = SerializeUncompressedDataArgsU128 {
+        manifest_array_ptr: input.manifests.as_ptr(),
+        filenames: input.name_ptrs.as_ptr(),
+        manifest_len: input.manifests.len(),
+    };
+    assert_args_and_out_rejected(
+        serialize_uncompressed_data_u128,
+        &args,
+        &[
+            ("manifests", SerializeUncompressedDataArgsU128 {
+                manifest_array_ptr: ptr::null(),
+                ..args
+            }),
+            ("filenames", SerializeUncompressedDataArgsU128 {
+                filenames: ptr::null(),
+                ..args
+            }),
+        ],
+    );
+}
+
+#[test]
+fn serialize_rejects_null_chunk_metadata() {
+    for len in NULL_METADATA_LENGTHS {
+        let mut input = host_input::<u64, u64>(SEEK_HASHES_U64);
+        input.manifests[1] = manifest_without_metadata(len);
+        let (status, out) = ffi_serialize_u64(&input, |_| {});
+        assert_null_argument("chunk metadata", status);
+        assert!(out.is_null());
+
+        let mut input = host_input::<u128, U128Bytes>(SEEK_HASHES_U128);
+        input.manifests[1] = manifest_without_metadata(len);
+        let (status, out) = ffi_serialize_u128(&input, |_| {});
+        assert_null_argument("chunk metadata", status);
+        assert!(out.is_null());
+    }
+}
+
+#[test]
+fn build_ssmc_prefix_rejects_null_chunk_metadata() {
+    for len in NULL_METADATA_LENGTHS {
+        let mut input = host_input::<u64, u64>(SEEK_HASHES_U64);
+        input.manifests[1] = manifest_without_metadata(len);
+        let (status, out) =
+            ffi_build_prefix(build_ssmc_prefix_u64, &input, |_, _| {});
+        assert_null_argument("chunk metadata", status);
+        assert!(out.is_null());
+
+        let mut input = host_input::<u128, U128Bytes>(SEEK_HASHES_U128);
+        input.manifests[1] = manifest_without_metadata(len);
+        let (status, out) =
+            ffi_build_prefix(build_ssmc_prefix_u128, &input, |_, _| {});
+        assert_null_argument("chunk metadata", status);
+        assert!(out.is_null());
+    }
+}
+
+#[test]
+fn archive_builder_new_rejects_each_null_pointer() {
+    let input = host_input::<u64, u64>(SEEK_HASHES_U64);
+    let args = unbuilt_builder_args_u64(&input, &SEEK_HASHES_U64);
+    assert_args_and_out_rejected(
+        archive_builder_new_u64,
+        &args,
+        &[
+            ("manifests", ArchiveBuilderArgsU64 {
+                manifest_array_ptr: ptr::null(),
+                ..args
+            }),
+            ("hashes", ArchiveBuilderArgsU64 {
+                sorted_hashes_array_ptr: ptr::null(),
+                ..args
+            }),
+        ],
+    );
+
+    let input = host_input::<u128, U128Bytes>(SEEK_HASHES_U128);
+    let hash_bytes = [0_u8; 16];
+    let args = unbuilt_builder_args_u128(&input, &hash_bytes);
+    assert_args_and_out_rejected(
+        archive_builder_new_u128,
+        &args,
+        &[
+            ("manifests", ArchiveBuilderArgsU128 {
+                manifest_array_ptr: ptr::null(),
+                ..args
+            }),
+            ("hashes", ArchiveBuilderArgsU128 {
+                sorted_hashes_array_ptr: ptr::null(),
+                ..args
+            }),
+        ],
+    );
+}
+
+#[test]
+fn archive_builder_setters_reject_a_null_handle() {
+    assert_setter_rejects_null(
+        "level",
+        archive_builder_set_compression_level_u64,
+        3,
+    );
+    assert_setter_rejects_null(
+        "level",
+        archive_builder_set_compression_level_u128,
+        3,
+    );
+    assert_setter_rejects_null(
+        "dictionary size",
+        archive_builder_set_dictionary_size_u64,
+        1024,
+    );
+    assert_setter_rejects_null(
+        "dictionary size",
+        archive_builder_set_dictionary_size_u128,
+        1024,
+    );
+    assert_setter_rejects_null(
+        "workers",
+        archive_builder_set_worker_count_u64,
+        2,
+    );
+    assert_setter_rejects_null(
+        "workers",
+        archive_builder_set_worker_count_u128,
+        2,
+    );
+    assert_setter_rejects_null(
+        "optimize",
+        archive_builder_set_optimize_dictionary_u64,
+        true,
+    );
+    assert_setter_rejects_null(
+        "optimize",
+        archive_builder_set_optimize_dictionary_u128,
+        true,
+    );
+
+    // SAFETY: the setter checks the handle before storing the callback.
+    let status = unsafe {
+        archive_builder_set_c_progress_u64(
+            ptr::null_mut(),
+            ignore_progress,
+            ptr::null_mut(),
+        )
+    };
+    assert_null_argument("progress", status);
+    // SAFETY: the setter checks the handle before storing the callback.
+    let status = unsafe {
+        archive_builder_set_c_progress_u128(
+            ptr::null_mut(),
+            ignore_progress,
+            ptr::null_mut(),
+        )
+    };
+    assert_null_argument("progress", status);
+}
+
+#[test]
+fn archive_builder_build_rejects_each_null_pointer_and_keeps_the_builder() {
+    let input = host_input::<u64, u64>(SEEK_HASHES_U64);
+    let args = unbuilt_builder_args_u64(&input, &SEEK_HASHES_U64);
+    let mut builder: *mut ArchiveBuilderU64 = ptr::null_mut();
+    // SAFETY: `args` points into `input`, which outlives the builder, and
+    // `builder` is a local.
+    assert_ok(unsafe {
+        archive_builder_new_u64(&raw const args, &raw mut builder)
+    });
+    let mut out = ptr::null_mut();
+    // SAFETY: the null handle is checked before anything else, and `out` is
+    // a local.
+    let status = unsafe {
+        archive_builder_build_u64(ptr::null_mut(), &raw mut out)
+    };
+    assert_null_argument("handle", status);
+    // SAFETY: `builder` is live, and the null out-pointer is checked before
+    // the handle is consumed.
+    let status = unsafe { archive_builder_build_u64(builder, ptr::null_mut()) };
+    assert_null_argument("out_ptr", status);
+    // SAFETY: the rejected build didn't consume `builder`, so it's freed
+    // once, here. Miri reports a double free if the build did consume it.
+    unsafe { archive_builder_free_u64(builder) };
+
+    let input = host_input::<u128, U128Bytes>(SEEK_HASHES_U128);
+    let hash_bytes = [0_u8; 16];
+    let args = unbuilt_builder_args_u128(&input, &hash_bytes);
+    let mut builder: *mut ArchiveBuilderU128 = ptr::null_mut();
+    // SAFETY: `args` points into `input` and `hash_bytes`, which outlive the
+    // builder, and `builder` is a local.
+    assert_ok(unsafe {
+        archive_builder_new_u128(&raw const args, &raw mut builder)
+    });
+    // SAFETY: the null handle is checked before anything else, and `out` is
+    // a local.
+    let status = unsafe {
+        archive_builder_build_u128(ptr::null_mut(), &raw mut out)
+    };
+    assert_null_argument("handle", status);
+    // SAFETY: `builder` is live, and the null out-pointer is checked before
+    // the handle is consumed.
+    let status = unsafe { archive_builder_build_u128(builder, ptr::null_mut()) };
+    assert_null_argument("out_ptr", status);
+    // SAFETY: the rejected build didn't consume `builder`, so it's freed
+    // once, here. Miri reports a double free if the build did consume it.
+    unsafe { archive_builder_free_u128(builder) };
+    assert!(out.is_null());
+}
+
+#[test]
+fn remaining_frees_accept_null() {
+    // SAFETY: `free_file_manifest_and_chunks_u64` returns early on null.
+    unsafe { free_file_manifest_and_chunks_u64(ptr::null_mut()) };
+    // SAFETY: `free_file_manifest_and_chunks_u128` returns early on null.
+    unsafe { free_file_manifest_and_chunks_u128(ptr::null_mut()) };
+    // SAFETY: `free_processed_file_data_ffi` returns early on null.
+    unsafe { free_processed_file_data_ffi(ptr::null_mut()) };
+    // SAFETY: `archive_data_free` returns early on null.
+    unsafe { archive_data_free(ptr::null_mut()) };
 }

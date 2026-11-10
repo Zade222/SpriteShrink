@@ -21,7 +21,7 @@ use std::{
 use libc::c_char;
 
 use crate::ffi::ffi_error_handling::{
-    FFICallbackStatus
+    FFICallbackStatus, FFIResult
 };
 
 use crate::lib_error_handling::{
@@ -613,11 +613,10 @@ impl<H> From<(
 ///
 /// # Fields
 ///
-/// * `filename`: A pointer to a null-terminated C string representing the
-///   original name of the file.
 /// * `chunk_metadata`: A pointer to a contiguous array of [`FFISSAChunkMeta`]
 ///   structs. This array is sorted by the chunk's original offset, ensuring
-///   correct file reconstruction.
+///   correct file reconstruction. It must not be null, even when
+///   `chunk_metadata_len` is 0.
 /// * `chunk_metadata_len`: The total number of `FFISSAChunkMeta` structs in
 ///   the `chunk_metadata` array.
 ///
@@ -674,81 +673,66 @@ impl<H> From<(
     }
 }
 
-/// Converts a reference to an FFI-safe `FFIFileManifestParent` into the
-/// Rust-native `FileManifestParent` struct.
+/// Borrows the chunk metadata of a manifest received from a C caller.
 ///
-/// This is a crucial conversion for functions that receive manifest data from a
-/// C caller. It safely handles the reconstruction of Rust-native types, such
-/// as `String` and `Vec`, from the raw pointers provided in the FFI struct.
+/// # Errors
 ///
-/// # Safety
+/// Returns `FFIResult::NullArgument` if `chunk_metadata` is null, whatever
+/// the length, because a slice can't be built from a null pointer.
+fn chunk_metadata_slice<H>(
+    fmp: &FFIFileManifestParent<H>
+) -> Result<&[FFISSAChunkMeta<H>], FFIResult> {
+    if fmp.chunk_metadata.is_null() {
+        return Err(FFIResult::NullArgument);
+    }
+
+    // SAFETY: the pointer isn't null, and every export that takes a manifest
+    // requires its `chunk_metadata` to hold `chunk_metadata_len` readable
+    // elements for the duration of the call.
+    Ok(unsafe {
+        slice::from_raw_parts(fmp.chunk_metadata, fmp.chunk_metadata_len)
+    })
+}
+
+/// Copies an `FFIFileManifestParent` received from a C caller into the
+/// Rust-native `FileManifestParent`.
 ///
-/// This implementation contains an `unsafe` block because it dereferences raw
-/// pointers (`fmp.filename` and `fmp.chunk_metadata`). The caller must ensure
-/// that the `FFIFileManifestParent` instance contains valid, non-null pointers
-/// that are readable for their specified lengths for the duration of this
-/// conversion.
-impl<H> From<&FFIFileManifestParent<H>> for FileManifestParent<H>
+/// # Errors
+///
+/// Returns `FFIResult::NullArgument` if `chunk_metadata` is null.
+impl<H> TryFrom<&FFIFileManifestParent<H>> for FileManifestParent<H>
 where
     H: Copy,
 {
-    fn from(fmp: &FFIFileManifestParent<H>) -> Self {
-        unsafe{
-            /*Reconstruct the slice of chunk metadata from the raw pointer
-            and length.*/
-            let chunk_metadata_slice = slice::from_raw_parts(
-                fmp.chunk_metadata,
-                fmp.chunk_metadata_len
-            );
+    type Error = FFIResult;
 
-            /*Convert each FFI-safe `FFISSAChunkMeta` in the slice to its
-            Rust-native `SSAChunkMeta` equivalent and collect them into a Vec.*/
-            let chunk_metadata = chunk_metadata_slice
-                .iter()
-                .map(SSAChunkMeta::from)
-                .collect();
+    fn try_from(fmp: &FFIFileManifestParent<H>) -> Result<Self, FFIResult> {
+        let chunk_metadata = chunk_metadata_slice(fmp)?
+            .iter()
+            .map(SSAChunkMeta::from)
+            .collect();
 
-            //Construct the final Rust-native `FileManifestParent` struct.
-            FileManifestParent {
-                chunk_metadata,
-                chunk_count: fmp.chunk_metadata_len as u64
-            }
-        }
+        Ok(FileManifestParent {
+            chunk_metadata,
+            chunk_count: fmp.chunk_metadata_len as u64
+        })
     }
 }
 
-/// Converts an FFI-safe file manifest with a `[u8; 16]` hash into the internal
-/// Rust-native `FileManifestParent<u128>`.
+/// Copies an `FFIFileManifestParent` with `U128Bytes` hashes received from a
+/// C caller into the Rust-native `FileManifestParent<u128>`, reading each
+/// hash as little-endian.
 ///
-/// This implementation is a key part of the FFI boundary, allowing the core
-/// library to work with `u128` hash types while the C-compatible layer uses
-/// fixed-size byte arrays. It reconstructs the fully-owned Rust struct from
-/// the raw pointers and byte-array-based hashes provided by the FFI struct.
+/// # Errors
 ///
-/// The conversion process involves:
-/// 1.  Safely creating a Rust `String` from the raw C-string pointer for the
-///     filename.
-/// 2.  Reconstructing a slice of the FFI-safe chunk metadata.
-/// 3.  Iterating through the metadata slice and converting each `U128Bytes`
-///     struct [u8; 16] array hash into a `u128` value using
-///     `u128::from_le_bytes`, creating a `Vec` of internal
-///     `SSAChunkMeta<u128>` structs.
-///
-/// # Safety
-///
-/// This implementation is `unsafe` because it dereferences raw pointers
-/// received from C. The caller must ensure that the
-/// `FFIFileManifestParent` reference and all the pointers it contains
-/// (`filename` and `chunk_metadata`) are valid, non-null, and point to memory
-/// that is readable for their specified lengths for the duration of this call.
-impl From<&FFIFileManifestParent<U128Bytes>> for FileManifestParent<u128> {
-    fn from(fmp: &FFIFileManifestParent<U128Bytes>) -> Self {
-        let chunk_metadata_slice = unsafe {
-            slice::from_raw_parts(
-                fmp.chunk_metadata,
-                fmp.chunk_metadata_len)
-        };
-        let chunk_metadata = chunk_metadata_slice
+/// Returns `FFIResult::NullArgument` if `chunk_metadata` is null.
+impl TryFrom<&FFIFileManifestParent<U128Bytes>> for FileManifestParent<u128> {
+    type Error = FFIResult;
+
+    fn try_from(
+        fmp: &FFIFileManifestParent<U128Bytes>
+    ) -> Result<Self, FFIResult> {
+        let chunk_metadata = chunk_metadata_slice(fmp)?
             .iter()
             .map(|meta| crate::lib_structs::SSAChunkMeta {
                 hash: u128::from_le_bytes(meta.hash.bytes),
@@ -757,10 +741,10 @@ impl From<&FFIFileManifestParent<U128Bytes>> for FileManifestParent<u128> {
             })
             .collect();
 
-        FileManifestParent {
+        Ok(FileManifestParent {
             chunk_metadata,
             chunk_count: fmp.chunk_metadata_len as u64,
-        }
+        })
     }
 }
 

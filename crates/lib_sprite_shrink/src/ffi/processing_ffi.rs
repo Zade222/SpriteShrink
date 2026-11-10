@@ -38,7 +38,7 @@ use crate::processing::{
     create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory,
     verify_single_file, test_compression};
 use crate::lib_structs::{
-    FileData, FileManifestParent, SSAChunkMeta
+    FileData, FileManifestParent
 };
 
 /// Creates a file manifest and a list of data chunks via an FFI‑safe interface
@@ -621,45 +621,34 @@ pub unsafe extern "C" fn verify_single_file_u64(
 
     let args_int = unsafe{&*args};
 
-    if args_int.file_manifest_parent.is_null() ||
+    if args_int.filename.is_null() ||
+        args_int.file_manifest_parent.is_null() ||
         args_int.veri_hash_array_ptr.is_null() {
             return FFIResult::NullArgument;
     }
 
-    let(fmp, veri_hash, filename) = unsafe {
-        /*Dereference the main struct pointer and convert using from.*/
-        let ffi_fmp = &*args_int.file_manifest_parent;
-
-        let chunk_metadata_slice = slice::from_raw_parts(
-            ffi_fmp.chunk_metadata,
-            ffi_fmp.chunk_metadata_len
-        );
-
-        let chunk_metadata = chunk_metadata_slice
-            .iter()
-            .map(|meta| SSAChunkMeta {
-                hash: meta.hash,
-                offset: meta.offset,
-                length: meta.length,
-            })
-            .collect();
-
-        let fmp = FileManifestParent {
-            chunk_metadata,
-            chunk_count: ffi_fmp.chunk_metadata_len as u64,
-        };
-
-        /*Prepare and reconstruct veri_hash, which is the fourth
-        parameter of the original verify_single_file
-        function, from C input.*/
-        let veri_hash: [u8; 64] = *(args_int.veri_hash_array_ptr as *const [u8; 64]);
-
-        let filename = std::ffi::CStr::from_ptr(args_int.filename)
-            .to_string_lossy()
-            .into_owned();
-
-        (fmp, veri_hash, filename)
+    // SAFETY: `file_manifest_parent` was checked for null above, and the
+    // caller guarantees it points to a valid manifest.
+    let ffi_fmp = unsafe { &*args_int.file_manifest_parent };
+    let fmp = match FileManifestParent::<u64>::try_from(ffi_fmp) {
+        Ok(fmp) => fmp,
+        Err(status) => return status,
     };
+
+    /*Prepare and reconstruct veri_hash, which is the fourth parameter of the
+    original verify_single_file function, from C input.*/
+    // SAFETY: `veri_hash_array_ptr` was checked for null above, and the
+    // caller guarantees it points to 64 readable bytes. `[u8; 64]` has an
+    // alignment of 1, so any address is aligned for it.
+    let veri_hash = unsafe {
+        *args_int.veri_hash_array_ptr.cast::<[u8; 64]>()
+    };
+
+    // SAFETY: `filename` was checked for null above, and the caller
+    // guarantees it's a null-terminated string.
+    let filename = unsafe { std::ffi::CStr::from_ptr(args_int.filename) }
+        .to_string_lossy()
+        .into_owned();
 
     let get_chunks_cb = args_int.get_chunks_cb;
     let progress_cb = args_int.progress_cb;
@@ -742,45 +731,34 @@ pub unsafe extern "C" fn verify_single_file_u128(
 
     let args_int = unsafe{&*args};
 
-    if args_int.file_manifest_parent.is_null() ||
+    if args_int.filename.is_null() ||
+        args_int.file_manifest_parent.is_null() ||
         args_int.veri_hash_array_ptr.is_null() {
             return FFIResult::NullArgument;
     }
 
-    let(fmp, veri_hash, filename) = unsafe {
-        /*Dereference the main struct pointer and convert using from.*/
-        let ffi_fmp = &*args_int.file_manifest_parent;
-
-        let chunk_metadata_slice = slice::from_raw_parts(
-            ffi_fmp.chunk_metadata,
-            ffi_fmp.chunk_metadata_len
-        );
-
-        let chunk_metadata = chunk_metadata_slice
-            .iter()
-            .map(|meta| SSAChunkMeta {
-                hash: meta.hash.into(),
-                offset: meta.offset,
-                length: meta.length,
-            })
-            .collect();
-
-        let fmp = FileManifestParent {
-            chunk_metadata,
-            chunk_count: ffi_fmp.chunk_metadata_len as u64,
-        };
-
-        /*Prepare and reconstruct veri_hash, which is the fourth
-        parameter of the original verify_single_file
-        function, from C input.*/
-        let veri_hash: [u8; 64] = *(args_int.veri_hash_array_ptr as *const [u8; 64]);
-
-        let filename = std::ffi::CStr::from_ptr(args_int.filename)
-            .to_string_lossy()
-            .into_owned();
-
-        (fmp, veri_hash, filename)
+    // SAFETY: `file_manifest_parent` was checked for null above, and the
+    // caller guarantees it points to a valid manifest.
+    let ffi_fmp = unsafe { &*args_int.file_manifest_parent };
+    let fmp = match FileManifestParent::<u128>::try_from(ffi_fmp) {
+        Ok(fmp) => fmp,
+        Err(status) => return status,
     };
+
+    /*Prepare and reconstruct veri_hash, which is the fourth parameter of the
+    original verify_single_file function, from C input.*/
+    // SAFETY: `veri_hash_array_ptr` was checked for null above, and the
+    // caller guarantees it points to 64 readable bytes. `[u8; 64]` has an
+    // alignment of 1, so any address is aligned for it.
+    let veri_hash = unsafe {
+        *args_int.veri_hash_array_ptr.cast::<[u8; 64]>()
+    };
+
+    // SAFETY: `filename` was checked for null above, and the caller
+    // guarantees it's a null-terminated string.
+    let filename = unsafe { std::ffi::CStr::from_ptr(args_int.filename) }
+        .to_string_lossy()
+        .into_owned();
 
     let get_chunks_cb = args_int.get_chunks_cb;
     let progress_cb = args_int.progress_cb;
@@ -1038,9 +1016,12 @@ pub unsafe extern "C" fn get_seek_chunks_u64(
         return FFIResult::NullArgument;
     };
 
-    let fmp = unsafe{
-        /*Dereference the main struct pointer and convert using from.*/
-        FileManifestParent::<u64>::from(&*file_manifest_parent)
+    // SAFETY: `file_manifest_parent` was checked for null above, and the
+    // caller guarantees it points to a valid manifest.
+    let ffi_fmp = unsafe { &*file_manifest_parent };
+    let fmp = match FileManifestParent::<u64>::try_from(ffi_fmp) {
+        Ok(fmp) => fmp,
+        Err(status) => return status,
     };
 
     match get_seek_chunks::<u64>(
@@ -1106,9 +1087,12 @@ pub unsafe extern "C" fn get_seek_chunks_u128(
         return FFIResult::NullArgument;
     };
 
-    let fmp: FileManifestParent::<u128> = unsafe{
-        /*Dereference the main struct pointer and convert using from.*/
-        FileManifestParent::<u128>::from(&*file_manifest_parent)
+    // SAFETY: `file_manifest_parent` was checked for null above, and the
+    // caller guarantees it points to a valid manifest.
+    let ffi_fmp = unsafe { &*file_manifest_parent };
+    let fmp = match FileManifestParent::<u128>::try_from(ffi_fmp) {
+        Ok(fmp) => fmp,
+        Err(status) => return status,
     };
 
     match get_seek_chunks::<u128>(

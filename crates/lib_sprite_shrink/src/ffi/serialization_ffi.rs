@@ -39,7 +39,7 @@ use crate::serialization::{build_ssmc_prefix, serialize_uncompressed_data};
 ///
 /// # Errors
 ///
-/// * `NullArgument` if a filename pointer is null.
+/// * `NullArgument` if a filename or `chunk_metadata` pointer is null.
 /// * `InvalidString` if a filename isn't valid UTF-8.
 /// * `DuplicateFilename` if two manifests have the same name. Keying by
 ///   name would otherwise drop one of the files without an error.
@@ -54,7 +54,8 @@ unsafe fn read_file_manifest<F, H>(
     len: usize,
 ) -> Result<DashMap<String, FileManifestParent<H>>, FFIResult>
 where
-    for<'a> FileManifestParent<H>: From<&'a FFIFileManifestParent<F>>,
+    for<'a> FileManifestParent<H>:
+        TryFrom<&'a FFIFileManifestParent<F>, Error = FFIResult>,
 {
     // SAFETY: the caller guarantees `manifests` holds `len` elements.
     let ffi_manifests = unsafe { slice::from_raw_parts(manifests, len) };
@@ -74,10 +75,9 @@ where
             return Err(FFIResult::InvalidString);
         };
 
-        if file_manifest
-            .insert(filename.to_owned(), FileManifestParent::from(ffi_fmp))
-            .is_some()
-        {
+        let manifest = FileManifestParent::try_from(ffi_fmp)?;
+
+        if file_manifest.insert(filename.to_owned(), manifest).is_some() {
             return Err(FFIResult::DuplicateFilename);
         }
     }
@@ -164,7 +164,8 @@ where
 /// * `FFIResult::StatusOk` – The operation succeeded and `*out_ptr` now points to a
 ///   valid `FFISerializedOutputU64`.
 /// * `FFIResult::NullArgument` – `args`, `out_ptr`, the manifest or
-///   filename array inside `args`, or one of the filenames was null.
+///   filename array inside `args`, one of the filenames, or a manifest's
+///   `chunk_metadata` was null.
 /// * `FFIResult::InvalidString` – A filename isn't valid UTF-8.
 /// * `FFIResult::DuplicateFilename` – Two manifests have the same filename.
 #[unsafe(no_mangle)]
@@ -253,7 +254,8 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 /// * `FFIResult::StatusOk` – The operation succeeded and `*out_ptr` now points to a
 ///   valid `FFISerializedOutputU128`.
 /// * `FFIResult::NullArgument` – `args`, `out_ptr`, the manifest or
-///   filename array inside `args`, or one of the filenames was null.
+///   filename array inside `args`, one of the filenames, or a manifest's
+///   `chunk_metadata` was null.
 /// * `FFIResult::InvalidString` – A filename isn't valid UTF-8.
 /// * `FFIResult::DuplicateFilename` – Two manifests have the same filename.
 #[unsafe(no_mangle)]
@@ -510,7 +512,8 @@ unsafe fn build_ssmc_prefix_internal<F, H>(
     hash_type: u8,
 ) -> Result<FFIVecBytes, FFIResult>
 where
-    for<'a> FileManifestParent<H>: From<&'a FFIFileManifestParent<F>>,
+    for<'a> FileManifestParent<H>:
+        TryFrom<&'a FFIFileManifestParent<F>, Error = FFIResult>,
     H: Encode,
 {
     if toc.is_null() || manifests.is_null() || comp_data.is_null() {
@@ -523,12 +526,12 @@ where
 
     // SAFETY: `manifests` isn't null, and the caller guarantees it holds
     // `file_count` elements.
-    let manifests: Vec<FileManifestParent<H>> = unsafe {
+    let manifests = unsafe {
         slice::from_raw_parts(manifests, file_count)
     }
         .iter()
-        .map(FileManifestParent::from)
-        .collect();
+        .map(FileManifestParent::try_from)
+        .collect::<Result<Vec<FileManifestParent<H>>, FFIResult>>()?;
 
     // SAFETY: `comp_data` isn't null, and the caller guarantees it points to
     // a valid `FFICompData`.
@@ -562,7 +565,8 @@ where
 ///
 /// * `FFIResult::StatusOk` on success.
 /// * `FFIResult::NullArgument` if any pointer argument, a filename in
-///   `toc`, or a buffer in `comp_data` is null.
+///   `toc`, a manifest's `chunk_metadata`, or a buffer in `comp_data` is
+///   null.
 /// * `FFIResult::InvalidString` if a filename isn't valid UTF-8.
 /// * `FFIResult::InternalError` if the archive is too large for the
 ///   header's 32-bit fields.
@@ -633,7 +637,8 @@ pub unsafe extern "C" fn build_ssmc_prefix_u64(
 ///
 /// * `FFIResult::StatusOk` on success.
 /// * `FFIResult::NullArgument` if any pointer argument, a filename in
-///   `toc`, or a buffer in `comp_data` is null.
+///   `toc`, a manifest's `chunk_metadata`, or a buffer in `comp_data` is
+///   null.
 /// * `FFIResult::InvalidString` if a filename isn't valid UTF-8.
 /// * `FFIResult::InternalError` if the archive is too large for the
 ///   header's 32-bit fields.
