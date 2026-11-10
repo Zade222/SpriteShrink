@@ -168,11 +168,18 @@ impl From<SpriteShrinkError> for CliError {
 ///
 /// # Returns
 ///
-/// * `true` if the error is `CliError::Cancelled`.
-/// * `false` for all other `CliError` variants.
+/// * `true` for `CliError::Cancelled`, and for a library error that is
+///   itself a cancellation. Optical compression returns a cancelled FLAC
+///   step as `SpriteShrinkCDError::SpriteShrink(Cancelled)`.
+/// * `false` for all other errors.
 impl IsCancelled for CliError {
     fn is_cancelled(&self) -> bool {
-        matches!(self, CliError::Cancelled)
+        match self {
+            CliError::Cancelled => true,
+            CliError::SpriteShrinkError(err) => err.is_cancelled(),
+            CliError::SpriteShrinkCDError(err) => err.is_cancelled(),
+            _ => false,
+        }
     }
 }
 

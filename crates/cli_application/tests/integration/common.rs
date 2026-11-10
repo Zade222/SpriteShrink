@@ -12,12 +12,10 @@ pub fn cli_output(args: &[&str]) -> Output {
         .unwrap()
 }
 
-/// Whether the CLI reported an error. The CLI exits 0 even when it fails,
-/// so the output is checked as well as the status.
+/// Whether the CLI reported an error, which it does through a non-zero
+/// exit status.
 pub fn reported_error(output: &Output) -> bool {
     !output.status.success()
-        || String::from_utf8_lossy(&output.stdout).contains("encountered an error")
-        || String::from_utf8_lossy(&output.stderr).contains("encountered an error")
 }
 
 /// Runs the CLI and fails the test if it reports an error.

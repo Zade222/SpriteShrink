@@ -178,3 +178,71 @@ fn unknown_hash_type_stops_extraction_and_listing() {
     }
     assert!(fs::read_dir(&out_dir).unwrap().next().is_none());
 }
+
+/// Two small, unrelated ROMs in `dir/input`, returned as that folder.
+fn two_roms(dir: &Path) -> PathBuf {
+    let input_dir = dir.join("input");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::write(input_dir.join("a.bin"), tiled_bytes(0x5EED_3101, 4 * 1024))
+        .unwrap();
+    fs::write(input_dir.join("b.bin"), tiled_bytes(0x5EED_3102, 4 * 1024))
+        .unwrap();
+    input_dir
+}
+
+#[test]
+fn rejected_arguments_exit_with_failure() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+    let existing = tmp.path().join("existing.ssmc");
+    fs::write(&existing, b"keep me").unwrap();
+    let single = input_dir.join("a.bin");
+    let input = input_dir.to_str().unwrap();
+    let new_archive = tmp.path().join("new.ssmc");
+
+    let cases: [(&[&str], &str); 3] = [
+        (
+            &["-i", input, "-o", existing.to_str().unwrap()],
+            "File already exists",
+        ),
+        (
+            &["-i", single.to_str().unwrap(), "-o", new_archive.to_str().unwrap()],
+            "requires at least two input files",
+        ),
+        (
+            &["--mode", "optical", "-i", existing.to_str().unwrap(), "--list"],
+            "only applicable for compression",
+        ),
+    ];
+    for (args, message) in cases {
+        let printed = failure_output(args);
+        assert!(printed.contains(message), "sprite-shrink {args:?}:\n{printed}");
+    }
+    assert_eq!(fs::read(&existing).unwrap(), b"keep me");
+    assert!(!new_archive.exists());
+}
+
+#[test]
+fn a_failed_run_exits_with_failure() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+    let archive = tmp.path().join("roms.ssmc");
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+    run_cli(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+
+    // The archive holds 2 files, so index 3 fails after the arguments are
+    // accepted.
+    let printed = failure_output(&[
+        "-i", archive.to_str().unwrap(),
+        "-o", out_dir.to_str().unwrap(),
+        "-e", "3",
+    ]);
+    assert!(
+        printed.contains("requested index 3 is out of the valid range (1-2)"),
+        "output:\n{printed}"
+    );
+}

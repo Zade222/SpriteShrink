@@ -9,6 +9,7 @@
 
 use std::{
     fs::{self, create_dir_all},
+    process::ExitCode,
     sync::{
         Arc, atomic::{AtomicBool, Ordering}
     },
@@ -16,6 +17,7 @@ use std::{
 
 use clap::{CommandFactory, FromArgMatches};
 use ctrlc::set_handler;
+use sprite_shrink::IsCancelled;
 use tracing::{
     debug,
     error,
@@ -55,6 +57,10 @@ use dhat::Profiler;
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
+
+/// Exit status for a run the user cancelled: 128 plus SIGINT's number, which
+/// is what shells report for a command stopped with Ctrl+C.
+const EXIT_CANCELLED: u8 = 130;
 
 /// Dispatches the primary application logic based on parsed arguments.
 ///
@@ -243,6 +249,29 @@ fn setup_ctrlc_handler() -> Arc<AtomicBool> {
     running
 }
 
+/// Reports how `run` ended and picks the process's exit status: success,
+/// [`EXIT_CANCELLED`] for a cancellation (including one wrapped in a library
+/// error), or failure for any other error.
+fn finish(result: Result<(), CliError>) -> ExitCode {
+    match result {
+        Ok(()) => {
+            debug!("Application completed task successfully.");
+            ExitCode::SUCCESS
+        }
+        Err(e) if e.is_cancelled() => {
+            warn!("Operation cancelled by user.");
+            ExitCode::from(EXIT_CANCELLED)
+        }
+        Err(e) => {
+            error!("Application encountered an error and has exited. \
+                Error: {}", e
+            );
+            eprintln!("\nError: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// The main entry point for the command-line application.
 ///
 /// This function initializes the application by parsing and validating
@@ -254,11 +283,11 @@ fn setup_ctrlc_handler() -> Arc<AtomicBool> {
 /// # Returns
 ///
 /// A `Result` which is:
-/// - `Ok(())` if the entire application runs to completion without
-///   any unrecoverable errors.
-/// - `Err(CliError)` if a critical error occurs during argument
-///   parsing, validation, or the main execution flow.
-fn main() -> Result<(), CliError>{
+/// - `Ok(ExitCode)` once the selected operation has run, with the status
+///   [`finish`] picked: non-zero if the operation failed or was cancelled.
+/// - `Err(CliError)` if argument parsing, loading the config or starting
+///   logging fails. Rust prints the error and exits with status 1.
+fn main() -> Result<ExitCode, CliError>{
     #[cfg(feature = "dhat-heap")]
     let _dhat = Profiler::new_heap();
 
@@ -356,21 +385,52 @@ fn main() -> Result<(), CliError>{
     }
 
     //Begin application logic.
-    match run(&final_args, running){
-        Ok(_) => {
-            debug!("Application completed task successfully.");
-        },
-        Err(CliError::Cancelled) => {
-            warn!(
-                "Operation cancelled by user."
-            );
-        }
-        Err(e) => {
-            error!("Application encountered an error and has exited.\
-                Error: {}", e
-            );
-        }
-    };
+    Ok(finish(run(&final_args, running)))
+}
 
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use sprite_shrink::SpriteShrinkError;
+    use sprite_shrink_cd::SpriteShrinkCDError;
+
+    use super::*;
+
+    #[test]
+    fn a_finished_run_exits_successfully() {
+        assert_eq!(finish(Ok(())), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn a_cancelled_run_exits_with_the_cancel_status() {
+        let cancelled = [
+            CliError::Cancelled,
+            CliError::from(SpriteShrinkError::Cancelled),
+            CliError::from(SpriteShrinkCDError::from(
+                SpriteShrinkError::Cancelled,
+            )),
+        ];
+        for err in cancelled {
+            let shown = err.to_string();
+            assert_eq!(
+                finish(Err(err)),
+                ExitCode::from(EXIT_CANCELLED),
+                "{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_run_exits_with_failure() {
+        let failed = [
+            CliError::NoFilesFound(),
+            CliError::from(SpriteShrinkError::External("read".into())),
+            CliError::from(SpriteShrinkCDError::from(
+                SpriteShrinkError::External("read".into()),
+            )),
+        ];
+        for err in failed {
+            let shown = err.to_string();
+            assert_eq!(finish(Err(err)), ExitCode::FAILURE, "{shown}");
+        }
+    }
 }
