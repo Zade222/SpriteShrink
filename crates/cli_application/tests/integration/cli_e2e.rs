@@ -179,6 +179,29 @@ fn unknown_hash_type_stops_extraction_and_listing() {
     assert!(fs::read_dir(&out_dir).unwrap().next().is_none());
 }
 
+#[test]
+fn unknown_format_id_is_reported_for_every_read_mode() {
+    let tmp = TempDir::new().unwrap();
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+    // `format_id` is the little-endian u16 at header bytes 20..22. The hash
+    // type byte is left valid, so a message naming it would be wrong.
+    let archive = patched_fixture(tmp.path(), 20, 7);
+    let archive = archive.to_str().unwrap();
+
+    let extract = ["-i", archive, "-o", out_dir.to_str().unwrap(), "-e", "1"];
+    let list = ["-i", archive, "--list"];
+    let metadata = ["-i", archive, "--metadata"];
+    for args in [&extract[..], &list[..], &metadata[..]] {
+        let printed = failure_output(args);
+        assert!(
+            printed.contains("Unsupported format ID 7 in the archive header"),
+            "sprite-shrink {args:?}:\n{printed}"
+        );
+    }
+    assert!(fs::read_dir(&out_dir).unwrap().next().is_none());
+}
+
 /// Two small, unrelated ROMs in `dir/input`, returned as that folder.
 fn two_roms(dir: &Path) -> PathBuf {
     let input_dir = dir.join("input");

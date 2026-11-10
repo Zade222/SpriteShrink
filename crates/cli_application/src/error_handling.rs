@@ -135,7 +135,7 @@ pub enum CliError {
     #[error("Invalid mode specified. {0}")]
     InvalidMode(String),
 
-    #[error("Invalid or unsupported format id in archive. {0}")]
+    #[error("Unsupported format ID {0} in the archive header")]
     InvalidFormatID(u16),
 }
 
