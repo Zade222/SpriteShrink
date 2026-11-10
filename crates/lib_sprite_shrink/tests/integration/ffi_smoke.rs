@@ -1426,6 +1426,12 @@ type ArgsFn<A, O> = unsafe extern "C" fn(*const A, *mut *mut O) -> FFIStatus;
 type SetFn<B, V> = unsafe extern "C" fn(*mut B, V) -> FFIStatus;
 type BuildFn<B> =
     unsafe extern "C" fn(*mut B, *mut *mut FFICompData) -> FFIStatus;
+type ParsePrefixFn<F> = unsafe extern "C" fn(
+    *const u8,
+    usize,
+    *mut *mut FFIParsedSSMC<F>,
+) -> FFIStatus;
+type LookupFn<H> = fn(*const c_void, H) -> (FFIStatus, FFIChunkLocation);
 
 /// One hash width's C exports, implemented on the Rust hash type, so one
 /// test body can drive either the u64 or the u128 path. Each export is an
@@ -1448,6 +1454,9 @@ trait HashExports: Hashable + Ord + Debug + Display + Encode {
     const SET_WORKERS: SetFn<Self::Builder, usize>;
     const BUILD: BuildFn<Self::Builder>;
     const BUILD_PREFIX: BuildPrefixFn<Self::Ffi>;
+    const PARSE_PREFIX: ParsePrefixFn<Self::Ffi>;
+    const FREE_PARSED: FreeFn<FFIParsedSSMC<Self::Ffi>>;
+    const LOOKUP: LookupFn<Self>;
 
     fn serialize_args(
         manifests: &[FFIFileManifestParent<Self::Ffi>],
@@ -1489,6 +1498,9 @@ impl HashExports for u64 {
         archive_builder_set_worker_count_u64;
     const BUILD: BuildFn<ArchiveBuilderU64> = archive_builder_build_u64;
     const BUILD_PREFIX: BuildPrefixFn<u64> = build_ssmc_prefix_u64;
+    const PARSE_PREFIX: ParsePrefixFn<u64> = parse_ssmc_prefix_u64;
+    const FREE_PARSED: FreeFn<FFIParsedSSMC<u64>> = free_parsed_ssmc_u64;
+    const LOOKUP: LookupFn<u64> = lookup_u64;
 
     fn serialize_args(
         manifests: &[FFIFileManifestParent<u64>],
@@ -1554,6 +1566,10 @@ impl HashExports for u128 {
         archive_builder_set_worker_count_u128;
     const BUILD: BuildFn<ArchiveBuilderU128> = archive_builder_build_u128;
     const BUILD_PREFIX: BuildPrefixFn<U128Bytes> = build_ssmc_prefix_u128;
+    const PARSE_PREFIX: ParsePrefixFn<U128Bytes> = parse_ssmc_prefix_u128;
+    const FREE_PARSED: FreeFn<FFIParsedSSMC<U128Bytes>> =
+        free_parsed_ssmc_u128;
+    const LOOKUP: LookupFn<u128> = lookup_u128;
 
     fn serialize_args(
         manifests: &[FFIFileManifestParent<U128Bytes>],
@@ -1787,9 +1803,14 @@ fn ffi_round_trip_archive<K: HashExports>(
 
 /// Rebuilds every file in `archive` through the C read exports, the way a
 /// C host would, in table of contents order.
-fn ffi_extract(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
-    let (status, parsed) =
-        ffi_parse_prefix_u64(&archive[..ffi_prefix_len(archive)]);
+fn ffi_extract<K: HashExports>(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
+    let prefix = &archive[..ffi_prefix_len(archive)];
+    let mut parsed = ptr::null_mut();
+    // SAFETY: `prefix` is `prefix.len()` readable bytes and `parsed` is a
+    // local.
+    let status = unsafe {
+        K::PARSE_PREFIX(prefix.as_ptr(), prefix.len(), &raw mut parsed)
+    };
     assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
     // SAFETY: `parsed` came from the successful call above.
     let parsed_ref = unsafe { &*parsed };
@@ -1799,7 +1820,7 @@ fn ffi_extract(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
     let toc = unsafe { read_toc(parsed_ref.toc_ptr, parsed_ref.toc_len) };
     // SAFETY: the library wrote `manifests_len` manifests at
     // `manifests_ptr`, and `parsed` hasn't been freed.
-    let manifests: Vec<FileManifestParent<u64>> = unsafe {
+    let manifests: Vec<FileManifestParent<K>> = unsafe {
         read_manifests(parsed_ref.manifests_ptr, parsed_ref.manifests_len)
     };
     // SAFETY: the library wrote `dictionary_len` bytes at `dictionary_ptr`,
@@ -1820,7 +1841,7 @@ fn ffi_extract(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
 
             for meta in manifest.chunk_metadata {
                 let (status, location) =
-                    lookup_u64(parsed_ref.chunk_index, meta.hash);
+                    K::LOOKUP(parsed_ref.chunk_index, meta.hash);
                 assert_eq!(
                     status_code(status),
                     status_code(FFIStatus::StatusOk)
@@ -1854,9 +1875,9 @@ fn ffi_extract(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
         })
         .collect();
 
-    // SAFETY: `parsed` came from `parse_ssmc_prefix_u64` and is freed once,
-    // here.
-    unsafe { free_parsed_ssmc_u64(parsed) };
+    // SAFETY: `parsed` came from `K::PARSE_PREFIX` and is freed once, here,
+    // by the same width's free.
+    unsafe { K::FREE_PARSED(parsed) };
     files
 }
 
@@ -1922,15 +1943,13 @@ fn u128_bytes_round_trip_as_little_endian() {
     }
 }
 
-#[test]
-#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
-fn ffi_round_trip_extracts_original_files() {
+fn assert_round_trip_extracts_original_files<K: HashExports>() {
     let mut files = round_trip_files();
-    let archive = ffi_round_trip_archive::<u64>(&files, |_| {});
+    let archive = ffi_round_trip_archive::<K>(&files, |_| {});
 
     // The table of contents is sorted by name.
     files.sort_by(|a, b| a.0.cmp(&b.0));
-    let extracted = ffi_extract(&archive);
+    let extracted = ffi_extract::<K>(&archive);
     let names = |set: &[(String, Vec<u8>)]| -> Vec<String> {
         set.iter().map(|(name, _)| name.clone()).collect()
     };
@@ -1938,6 +1957,18 @@ fn ffi_round_trip_extracts_original_files() {
     for ((name, data), (_, original)) in extracted.iter().zip(&files) {
         assert_bytes_eq(data, original, name);
     }
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn ffi_round_trip_u64_extracts_original_files() {
+    assert_round_trip_extracts_original_files::<u64>();
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn ffi_round_trip_u128_extracts_original_files() {
+    assert_round_trip_extracts_original_files::<u128>();
 }
 
 // Seeking
