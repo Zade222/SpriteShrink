@@ -57,34 +57,36 @@ pub fn get_file_header(file_path: &Path) -> Result<FileHeader, CliError> {
     Ok(header)
 }
 
-/// Retrieves the maximum valid ROM index from an archive.
+/// Parses an `--extract` range such as `1,3,5-7` into zero-based positions
+/// in the table of contents of an archive holding `file_count` files.
 ///
-/// This function reads the archive's header to find the total number of
-/// files, which determines the highest possible ROM index. It is used to
-/// validate user-provided indices before extraction to ensure they are
-/// within a valid range. The maximum index is 255.
+/// The user's indices are 1-based, as `--list` prints them, and `u32` like
+/// the header's file count.
 ///
-/// # Arguments
+/// # Errors
 ///
-/// * `file_path`: A `Path` pointing to the archive file.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(u8)` containing the max ROM index, which is the file count.
-/// - `Err(CliError)` if the header cannot be read or if the file
-///   count exceeds the supported limit of 255.
-pub fn get_max_rom_index(file_path: &Path)
-    -> Result<u8, CliError>
+/// - `CliError::RangeParse` if `range` isn't a list of numbers and ranges.
+/// - `CliError::InvalidRomIndex` if an index is 0 or greater than
+///   `file_count`.
+pub fn parse_rom_indices(range: &str, file_count: u32)
+    -> Result<Vec<usize>, CliError>
 {
-    let header = get_file_header(file_path)?;
+    let indices = range_parser::parse::<u32>(range)?;
 
-    header.file_count.try_into().map_err(|_| {
-        CliError::InternalError(
-            "The number of files in the archive exceeds the supported limit of\
-                255.".to_string(),
-        )
-    })
+    if indices.contains(&0) {
+        return Err(CliError::InvalidRomIndex(
+            "ROM indexes start at 1, so 0 names no file.".to_string()
+        ));
+    }
+    if let Some(&max) = indices.iter().max() && max > file_count {
+        return Err(CliError::InvalidRomIndex(format!(
+            "One or more ROM indexes are invalid. The requested index \
+            {max} is out of the valid range (1-{file_count})."
+        )));
+    }
+
+    /*Every index is now at least 1, so `index - 1` can't underflow.*/
+    Ok(indices.into_iter().map(|index| (index - 1) as usize).collect())
 }
 
 /// Reads and parses every part of an SSMC archive's metadata.
@@ -195,4 +197,60 @@ where
     bitcode::decode(&enc_toc_data).map_err(|e| {
         CliError::InternalError(format!("Failed to decode TOC: {}", e))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indices_become_zero_based_positions() {
+        assert_eq!(parse_rom_indices("1", 1).unwrap(), [0]);
+        assert_eq!(
+            parse_rom_indices("1,3-5", 5).unwrap(),
+            [0, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn indices_past_255_are_accepted() {
+        assert_eq!(parse_rom_indices("255-256", 256).unwrap(), [254, 255]);
+        assert_eq!(
+            parse_rom_indices("70000", 70_000).unwrap(),
+            [69_999]
+        );
+    }
+
+    #[test]
+    fn index_zero_is_rejected() {
+        for range in ["0", "0-2", "2,0"] {
+            let err = parse_rom_indices(range, 3).unwrap_err();
+            assert!(
+                matches!(err, CliError::InvalidRomIndex(_)),
+                "{range}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_index_past_the_file_count_is_rejected() {
+        let err = parse_rom_indices("2-4", 3).unwrap_err();
+        assert!(
+            err.to_string().contains("requested index 4 is out of the valid \
+                range (1-3)"),
+            "{err}"
+        );
+        assert!(matches!(
+            parse_rom_indices("1", 0),
+            Err(CliError::InvalidRomIndex(_))
+        ));
+    }
+
+    #[test]
+    fn a_malformed_range_is_a_parse_error() {
+        assert!(matches!(
+            parse_rom_indices("one", 3),
+            Err(CliError::RangeParse(_))
+        ));
+    }
 }

@@ -57,8 +57,8 @@ use crate::{
 /// * `file_path`: A `Path` pointing to the source archive file.
 /// * `out_dir`: A `Path` for the directory where extracted files will
 ///   be written.
-/// * `rom_indices`: A vector of `u8` indices specifying which files to
-///   extract from the archive.
+/// * `rom_indices`: Zero-based positions in the archive's table of contents
+///   of the files to extract, as `parse_rom_indices` returns them.
 /// * `args`: A reference to the main `Args` struct, used here to configure
 ///   the number of worker threads for parallel processing.
 ///
@@ -81,7 +81,7 @@ use crate::{
 pub fn run_extraction(
     file_path: &Path,
     out_dir: &Path,
-    rom_indices: &Vec<u8>,
+    rom_indices: &[usize],
     args: &Args,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError> {
@@ -115,7 +115,7 @@ fn dispatch_extraction<H>(
     file_path: &Path,
     out_dir: &Path,
     header: &FileHeader,
-    rom_indices: &Vec<u8>,
+    rom_indices: &[usize],
     args: &Args,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
@@ -190,8 +190,8 @@ where
 ///   written. If the directory does not exist, it will be created, unless
 ///   `args.force` is false and the directory does not exist, in which case
 ///   an `InvalidOutputPath` error is returned.
-/// * `rom_indices`: A vector of `u8` indices specifying which files to
-///   extract from the archive. These indices are 1-based.
+/// * `rom_indices`: Zero-based positions in the table of contents of the
+///   files to extract.
 /// * `prefix`: The archive's parsed metadata: TOC, manifest, dictionary,
 ///   and a chunk index holding absolute file offsets.
 /// * `args`: A reference to the main `Args` struct, used to check
@@ -224,7 +224,7 @@ where
 fn extract_ssmc_data<H>(
     file_path: &Path,
     out_dir: &Path,
-    rom_indices: &Vec<u8>,
+    rom_indices: &[usize],
     prefix: &ParsedSSMC<H>,
     args: &Args,
     running: Arc<AtomicBool>,
@@ -253,15 +253,15 @@ where
         create_dir_all(out_dir)?;
     }
 
-    for rom in rom_indices {
-        let fmp = file_manifest
-        .get((*rom - 1)  as usize)
+    for &index in rom_indices {
+        let (fmp, entry) = file_manifest
+        .get(index)
+        .zip(toc.get(index))
         .ok_or_else(|| CliError::InvalidRomIndex(
-            format!("ROM index {rom} is out of bounds.")
+            format!("ROM index {} is out of bounds.", index + 1)
         ))?;
 
-        let final_output_path = out_dir.join(
-            toc[(*rom as usize) - 1].filename.clone());
+        let final_output_path = out_dir.join(&entry.filename);
 
         let tmp_output_path = final_output_path.with_extension("tmp");
 
@@ -319,7 +319,7 @@ where
         //The file is fully written, rename it to final name.
         rename(&tmp_output_path, final_output_path)?;
 
-        debug!("{} extracted successfully", toc[(*rom as usize) - 1].filename);
+        debug!("{} extracted successfully", entry.filename);
     }
 
     Ok(())
@@ -329,7 +329,7 @@ where
 fn extract_ssmd_data<H> (
     file_path: &Path,
     out_dir: &Path,
-    disc_indices: &[u8],
+    disc_indices: &[usize],
     prefix: ParsedSSMD<H>,
     args: &Args,
     running: Arc<AtomicBool>,
@@ -364,16 +364,15 @@ where
     let archive_file = File::open(file_path)?;
 
     println!("Beginning extraction loop...");
-    for disc in disc_indices {
-        let dm = disc_manifests
-            .get((*disc - 1) as usize)
+    for &index in disc_indices {
+        let (dm, entry) = disc_manifests
+            .get(index)
+            .zip(toc.get(index))
             .ok_or_else(|| CliError::InvalidRomIndex(
-                format!("Disc index {disc} is out of bounds.")
+                format!("Disc index {} is out of bounds.", index + 1)
             ))?;
 
-        let final_output_path = out_dir.join(
-            toc[(*disc as usize) - 1].filename.clone()
-        );
+        let final_output_path = out_dir.join(&entry.filename);
 
         let tmp_output_path = final_output_path.with_extension("tmp");
 
@@ -394,9 +393,7 @@ where
             &mut writer
         )?;
 
-        let bin_filename = toc[(*disc as usize) - 1].filename.clone();
-
-        let cue_content = generate_cue_string(dm, &bin_filename)
+        let cue_content = generate_cue_string(dm, &entry.filename)
             .map_err(|e| CliError::InternalError(
                 format!("Failed to generate CUE sheet: {}", e)
             ))?;
@@ -408,7 +405,7 @@ where
         let mut cue_file = File::create(&cue_path)?;
         cue_file.write_all(cue_content.as_bytes())?;
 
-        debug!("{} extracted successfully", toc[(*disc as usize) - 1].filename);
+        debug!("{} extracted successfully", entry.filename);
     }
 
     Ok(())

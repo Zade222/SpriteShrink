@@ -269,3 +269,65 @@ fn a_failed_run_exits_with_failure() {
         "output:\n{printed}"
     );
 }
+
+#[test]
+fn rom_index_zero_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+    let archive = tmp.path().join("roms.ssmc");
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+    run_cli(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+
+    // Indices are 1-based, so 0 names no file, alone or in a range.
+    for range in ["0", "0-1"] {
+        let printed = failure_output(&[
+            "-i", archive.to_str().unwrap(),
+            "-o", out_dir.to_str().unwrap(),
+            "-e", range,
+        ]);
+        assert!(
+            printed.contains("ROM indexes start at 1"),
+            "-e {range}:\n{printed}"
+        );
+    }
+    assert!(fs::read_dir(&out_dir).unwrap().next().is_none());
+}
+
+#[test]
+fn files_past_index_255_can_be_extracted() {
+    const FILE_COUNT: u32 = 256;
+    let tmp = TempDir::new().unwrap();
+    let input_dir = tmp.path().join("input");
+    let archive = tmp.path().join("many.ssmc");
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // Zero-padded names keep the table of contents in this order, so file
+    // `n` is at index `n`.
+    for n in 1..=FILE_COUNT {
+        let data = tiled_bytes(0x5EED_4000 + u64::from(n), 256);
+        fs::write(input_dir.join(format!("{n:03}.bin")), data).unwrap();
+    }
+    run_cli(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+
+    run_cli(&[
+        "-i", archive.to_str().unwrap(),
+        "-o", out_dir.to_str().unwrap(),
+        "-e", "1,255-256",
+    ]);
+    for n in [1, 255, 256] {
+        let name = format!("{n:03}.bin");
+        let extracted = fs::read(out_dir.join(&name)).unwrap();
+        let original = fs::read(input_dir.join(&name)).unwrap();
+        assert_bytes_eq(&extracted, &original, &name);
+    }
+    assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 3);
+}

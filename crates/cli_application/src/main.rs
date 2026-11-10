@@ -33,7 +33,7 @@ use modes::{
 };
 
 mod archive_parser;
-use archive_parser::{get_max_rom_index};
+use archive_parser::{get_file_header, parse_rom_indices};
 mod arg_handling;
 use arg_handling::{merge_config_and_args, validate_args, Args};
 mod auto_tune;
@@ -119,21 +119,8 @@ fn run(
                 CliError::NoFilesFound
             )?;
 
-            let indices: Vec<u8> = range_parser::parse::<u8>(
-                extract_str
-            )?;
-
-            if let Some(max_arg_index) = indices.iter().max().cloned() {
-                let file_max_index: u8 = get_max_rom_index(file_path)?;
-
-                if file_max_index < max_arg_index {
-                    return Err(CliError::InvalidRomIndex(format!(
-                    "One or more ROM indexes are invalid. The requested index \
-                        {max_arg_index} is out of the valid range \
-                        (1-{file_max_index})."
-                    )));
-                }
-            }
+            let file_count = get_file_header(file_path)?.file_count;
+            let indices = parse_rom_indices(extract_str, file_count)?;
 
             let output_path = args.output.as_ref().ok_or_else(|| {
                 CliError::MissingFlag("Output path (-o, --output) is required \
