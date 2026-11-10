@@ -15,6 +15,7 @@ use fastcdc::v2020::Chunk;
 use crate::ffi::ffi_error_handling::{
     FFIResult
 };
+use crate::ffi::ffi_ownership::copy_host_chunks;
 use crate::ffi::ffi_types::{
     CreateFileManifestAndChunksArgs, FFIChunk, FFIChunkDataArray,
     ChunkIndexMap, FFIChunkLocation,
@@ -599,8 +600,9 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
 ///
 /// * All pointer arguments **must** be non‑null and point to valid memory that
 ///   lives at least for the duration of the call.
-/// * The `get_chunks_cb` must not unwind across the FFI boundary and must return a
-///   correctly‑populated `FFIChunkDataArray`.
+/// * The callbacks must not unwind across the FFI boundary. `get_chunks_cb`
+///   must fill `out_chunks` and `free_chunks_cb` must free it, as
+///   `VerifySingleFileArgsU64` describes.
 ///
 /// If any pointer is null, the function returns `FFIResult::NullArgument`.
 ///
@@ -651,31 +653,34 @@ pub unsafe extern "C" fn verify_single_file_u64(
         .into_owned();
 
     let get_chunks_cb = args_int.get_chunks_cb;
+    let free_chunks_cb = args_int.free_chunks_cb;
     let progress_cb = args_int.progress_cb;
     let user_data_addr = args_int.user_data as usize;
 
     let get_chunks_closure = move |hashes: &[u64]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
-        let ffi_chunks_array = unsafe {
-            get_chunks_cb(
-                user_data_addr as *mut c_void,
-                hashes.as_ptr(),
-                hashes.len()
-            )};
-
-        let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len
-        )};
-
-        let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
-        }).collect();
-
-        let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len,
-            ffi_chunks_array.cap)};
-        Ok(chunks)
+        let user_data = user_data_addr as *mut c_void;
+        let get = |out_chunks: *mut FFIChunkDataArray| {
+            /*SAFETY: `VerifySingleFileArgsU64` requires `get_chunks_cb` and
+            `user_data` to stay valid for the whole call, and this closure
+            only runs during it. The hash pointer covers `hashes.len()`
+            hashes until the callback returns, and `out_chunks` points to
+            `copy_host_chunks`' local array, valid for writes.*/
+            unsafe {
+                get_chunks_cb(
+                    user_data,
+                    hashes.as_ptr(),
+                    hashes.len(),
+                    out_chunks,
+                )
+            }
+        };
+        /*SAFETY: `VerifySingleFileArgsU64` requires `get_chunks_cb` to fill
+        the array with one readable buffer per hash, all valid until
+        `free_chunks_cb` takes them back, and `free_chunks_cb` to accept
+        that array with `user_data`.*/
+        unsafe {
+            copy_host_chunks(hashes.len(), get, free_chunks_cb, user_data)
+        }
     };
 
     let progress_closure = move |bytes_processed: u64| {
@@ -709,8 +714,9 @@ pub unsafe extern "C" fn verify_single_file_u64(
 ///
 /// * All pointer arguments **must** be non‑null and point to valid memory that
 ///   lives at least for the duration of the call.
-/// * The `get_chunks_cb` must not unwind across the FFI boundary and must
-///   return a correctly‑populated `FFIChunkDataArray`.
+/// * The callbacks must not unwind across the FFI boundary. `get_chunks_cb`
+///   must fill `out_chunks` and `free_chunks_cb` must free it, as
+///   `VerifySingleFileArgsU128` describes.
 ///
 /// If any pointer is null, the function returns `FFIResult::NullArgument`.
 ///
@@ -761,36 +767,38 @@ pub unsafe extern "C" fn verify_single_file_u128(
         .into_owned();
 
     let get_chunks_cb = args_int.get_chunks_cb;
+    let free_chunks_cb = args_int.free_chunks_cb;
     let progress_cb = args_int.progress_cb;
     let user_data_addr = args_int.user_data as usize;
 
     let get_chunks_closure = move |hashes: &[u128]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
+        let user_data = user_data_addr as *mut c_void;
         let ffi_hash_bytes: Vec<u8> = hashes
             .iter()
             .flat_map(|h| h.to_le_bytes())
             .collect();
-
-        let ffi_chunks_array = unsafe {
-            (get_chunks_cb)(
-                user_data_addr as *mut c_void,
-                ffi_hash_bytes.as_ptr(),
-                hashes.len()
-            )};
-
-        let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len
-        )};
-
-        let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
-        }).collect();
-
-        let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len,
-            ffi_chunks_array.cap)};
-        Ok(chunks)
+        let get = |out_chunks: *mut FFIChunkDataArray| {
+            /*SAFETY: `VerifySingleFileArgsU128` requires `get_chunks_cb` and
+            `user_data` to stay valid for the whole call, and this closure
+            only runs during it. The hash pointer covers `hashes.len()`
+            hashes until the callback returns, and `out_chunks` points to
+            `copy_host_chunks`' local array, valid for writes.*/
+            unsafe {
+                get_chunks_cb(
+                    user_data,
+                    ffi_hash_bytes.as_ptr(),
+                    hashes.len(),
+                    out_chunks,
+                )
+            }
+        };
+        /*SAFETY: `VerifySingleFileArgsU128` requires `get_chunks_cb` to fill
+        the array with one readable buffer per hash, all valid until
+        `free_chunks_cb` takes them back, and `free_chunks_cb` to accept
+        that array with `user_data`.*/
+        unsafe {
+            copy_host_chunks(hashes.len(), get, free_chunks_cb, user_data)
+        }
     };
 
     let progress_closure = move |bytes_processed: u64| {
@@ -846,33 +854,33 @@ pub unsafe extern "C" fn test_compression_u64(
     };
 
     let get_chunks_cb = args_int.get_chunks_cb;
+    let free_chunks_cb = args_int.free_chunks_cb;
     let user_data_addr = args_int.user_data as usize;
 
     let get_chunks_closure = move |hashes: &[u64]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
-        let mut ffi_chunks_array = FFIChunkDataArray { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
-        let status = unsafe {
-            (get_chunks_cb)(
-                user_data_addr as *mut c_void,
-                hashes.as_ptr(),
-                hashes.len(),
-                & mut ffi_chunks_array
-            )
+        let user_data = user_data_addr as *mut c_void;
+        let get = |out_chunks: *mut FFIChunkDataArray| {
+            /*SAFETY: `TestCompressionArgsU64` requires `get_chunks_cb` and
+            `user_data` to stay valid for the whole call, and this closure
+            only runs during it. The hash pointer covers `hashes.len()`
+            hashes until the callback returns, and `out_chunks` points to
+            `copy_host_chunks`' local array, valid for writes.*/
+            unsafe {
+                get_chunks_cb(
+                    user_data,
+                    hashes.as_ptr(),
+                    hashes.len(),
+                    out_chunks,
+                )
+            }
         };
-        Result::from(status)?;
-        let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len
-        )};
-
-        let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
-        }).collect();
-
-        let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len,
-            ffi_chunks_array.cap)};
-        Ok(chunks)
+        /*SAFETY: `TestCompressionArgsU64` requires `get_chunks_cb` to fill
+        the array with one readable buffer per hash, all valid until
+        `free_chunks_cb` takes them back, and `free_chunks_cb` to accept
+        that array with `user_data`.*/
+        unsafe {
+            copy_host_chunks(hashes.len(), get, free_chunks_cb, user_data)
+        }
     };
 
     match test_compression(
@@ -938,40 +946,37 @@ pub unsafe extern "C" fn test_compression_u128(
         .collect();
 
     let get_chunks_cb = args_int.get_chunks_cb;
+    let free_chunks_cb = args_int.free_chunks_cb;
     let user_data_addr = args_int.user_data as usize;
 
     let get_chunks_closure = move |hashes: &[u128]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
-        let ffi_hash_bytes: Vec<u8> = hashes.iter().flat_map(|h| h.to_le_bytes()).collect();
-
-        let mut ffi_chunks_array = FFIChunkDataArray {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0
+        let user_data = user_data_addr as *mut c_void;
+        let ffi_hash_bytes: Vec<u8> = hashes
+            .iter()
+            .flat_map(|h| h.to_le_bytes())
+            .collect();
+        let get = |out_chunks: *mut FFIChunkDataArray| {
+            /*SAFETY: `TestCompressionArgsU128` requires `get_chunks_cb` and
+            `user_data` to stay valid for the whole call, and this closure
+            only runs during it. The hash pointer covers `hashes.len()`
+            hashes until the callback returns, and `out_chunks` points to
+            `copy_host_chunks`' local array, valid for writes.*/
+            unsafe {
+                get_chunks_cb(
+                    user_data,
+                    ffi_hash_bytes.as_ptr(),
+                    hashes.len(),
+                    out_chunks,
+                )
+            }
         };
-
-        let status = unsafe {
-            (get_chunks_cb)(
-                user_data_addr as *mut c_void,
-                ffi_hash_bytes.as_ptr(),
-                hashes.len(),
-                & mut ffi_chunks_array
-            )
-        };
-        Result::from(status)?;
-        let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len
-        )};
-
-        let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
-        }).collect();
-
-        let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len,
-            ffi_chunks_array.cap)};
-        Ok(chunks)
+        /*SAFETY: `TestCompressionArgsU128` requires `get_chunks_cb` to fill
+        the array with one readable buffer per hash, all valid until
+        `free_chunks_cb` takes them back, and `free_chunks_cb` to accept
+        that array with `user_data`.*/
+        unsafe {
+            copy_host_chunks(hashes.len(), get, free_chunks_cb, user_data)
+        }
     };
 
     match test_compression(

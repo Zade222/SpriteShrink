@@ -118,9 +118,12 @@ pub struct ArchiveBuilderU128 { _private: [u8; 0] }
 /// * `user_data`: An opaque `void` pointer passed back to the C callbacks,
 ///   allowing the C side to maintain state.
 /// * `get_chunks_cb`: A C function pointer that the builder calls to request
-///   raw data for a set of hashes.
+///   raw data for a set of hashes. The array it fills and its buffers must
+///   stay valid until `free_chunks_cb` is called with them.
 /// * `free_chunks_cb`: A C function pointer to free the data array returned by
-///   `get_chunks_cb`.
+///   `get_chunks_cb`. Called once with each array `get_chunks_cb` filled
+///   successfully, after the library has copied it, on the same thread. It
+///   isn't called when `get_chunks_cb` fails or leaves the array null.
 /// * `write_comp_data_cb`: A C function pointer that the builder calls to
 ///   write out the compressed archive data, once per chunk in order. Every
 ///   chunk has been written when the build function returns, so a host
@@ -183,9 +186,12 @@ pub struct ArchiveBuilderArgsU64 {
 /// * `user_data`: An opaque `void` pointer passed back to the C callbacks,
 ///   allowing the C side to maintain state.
 /// * `get_chunks_cb`: A C function pointer that the builder calls to request
-///   raw data for a set of hashes.
+///   raw data for a set of hashes. The array it fills and its buffers must
+///   stay valid until `free_chunks_cb` is called with them.
 /// * `free_chunks_cb`: A C function pointer to free the data array returned by
-///   `get_chunks_cb`.
+///   `get_chunks_cb`. Called once with each array `get_chunks_cb` filled
+///   successfully, after the library has copied it, on the same thread. It
+///   isn't called when `get_chunks_cb` fails or leaves the array null.
 /// * `write_comp_data_cb`: A C function pointer that the builder calls to
 ///   write out the compressed archive data, once per chunk in order. Every
 ///   chunk has been written when the build function returns, so a host
@@ -390,21 +396,9 @@ pub struct FFIChunk{
 ///
 /// # Memory Management
 ///
-/// The memory management contract for this struct is context-dependent,
-/// as it is used in different patterns across the FFI layer.
-///
-/// 1.  Rust Takes Ownership: In some functions (e.g., serialization),
-///     the C caller allocates memory for this struct and its contents, and
-///     Rust takes ownership, freeing the memory when it's done.
-/// 2.  Caller Retains Ownership: In other functions (e.g., archive
-///     building), the C caller allocates the memory and also remains
-///     responsible for freeing it, usually via a dedicated `free_...`
-///     callback provided to Rust.
-///
-/// **Warning:** Always refer to the documentation of the specific FFI
-/// function you are calling to understand the correct memory management
-/// policy. Assuming the wrong model will lead to memory leaks or
-/// double-free errors.
+/// The host allocates the array and its buffers with any allocator and
+/// keeps ownership. The library only reads and copies them, then hands the
+/// array back through the export's `free_chunks_cb`.
 #[repr(C)]
 pub struct FFIChunkDataArray {
     pub ptr: *mut FFIVecBytes,
@@ -1337,33 +1331,25 @@ pub struct FFIUserData(pub *mut c_void);
 
 /// Represents a C-compatible, heap-allocated byte vector.
 ///
-/// This struct is used to pass ownership of a dynamically sized byte array
-/// from C to Rust. It is a fundamental building block for more complex data
-/// structures, such as `FFIChunkDataArray`, which represents an array of these
-/// byte vectors.
+/// It is a building block for more complex data structures, such as
+/// `FFIChunkDataArray`, which represents an array of these byte vectors.
 ///
 /// # Fields
 ///
 /// * `ptr`: A raw pointer to the beginning of the heap-allocated byte array.
 /// * `len`: The number of bytes in the array pointed to by `ptr`.
+/// * `cap`: The allocated capacity, in bytes.
 ///
 /// # Memory Management
 ///
-/// The memory management contract for this struct is context-dependent,
-/// as it is used in different patterns across the FFI layer.
+/// Whoever allocated the bytes frees them:
 ///
-/// 1.  **Rust Takes Ownership**: In some functions (e.g., serialization),
-///     the C caller allocates memory for this struct and its contents, and
-///     Rust takes ownership, freeing the memory when it's done.
-/// 2.  Caller Retains Ownership: In other functions (e.g.,
-///     archive building), the C caller allocates the memory and also remains
-///     responsible for freeing it, usually via a dedicated `free_...`
-///     callback provided to Rust.
-///
-/// **Warning:** Always refer to the documentation of the specific FFI
-/// function you are calling to understand the correct memory management
-/// policy. Assuming the wrong model will lead to memory leaks or
-   /// double-free errors.
+/// 1.  Library-allocated, such as the prefix from `build_ssmc_prefix_u64`:
+///     the host frees it with the matching export, such as
+///     `free_ssmc_prefix`.
+/// 2.  Host-allocated, in an `FFIChunkDataArray` from a chunk callback: the
+///     library only reads and copies the bytes, and the host frees them in
+///     its `free_chunks_cb`.
 #[repr(C)]
 pub struct FFIVecBytes {
     pub ptr: *mut u8,
@@ -1391,17 +1377,17 @@ pub struct FFIVecBytes {
 ///   It can be used by the caller to store context (e.g., a Rust
 ///   `Arc<Mutex<…>>` or a raw pointer to a C struct). The parent application
 ///   never dereferences this pointer; it is only handed back to the callbacks.
-/// * `get_chunks_cb` – Callback invoked by the verifier when it needs to
-///   retrieve the raw chunk data for a set of hash values.
-///   It must return an `FFIChunkDataArray` with one `FFIVecBytes` per
-///   requested hash, in the order requested. The library takes ownership of
-///   the array and of every buffer in it and frees them with Rust's
-///   allocator, so all of them must come from that allocator, with `cap` set
-///   to the real capacity. Memory from C's `malloc` must not be returned.
-///   The callback receives:
-///   - `user_data`: the same pointer passed in this struct,
-///   - `hashes`: pointer to an array of `u128` hash identifiers,
-///   - `hashes_len`: length of the `hashes` array.
+/// * `get_chunks_cb` – Called to fetch the raw data for a batch of hashes.
+///   It receives `user_data`, a pointer to `hashes_len` `u64` hashes, and
+///   `out_chunks`. On success it fills `out_chunks` with one `FFIVecBytes`
+///   per hash, in the order asked, and returns `CallbackOk`. The library
+///   only reads the buffers and copies them, so they can come from any
+///   allocator. The array and its buffers must stay valid until
+///   `free_chunks_cb` is called with them. Return `Error` or `Cancelled` to stop the verification.
+/// * `free_chunks_cb` – Called once with each array `get_chunks_cb` filled
+///   successfully, after the library has copied it, on the same thread.
+///   It frees the array and its buffers however the host allocated them.
+///   It isn't called when `get_chunks_cb` fails or leaves the array null.
 /// * `progress_cb` – Progress callback, which must not be null. It is called
 ///   periodically with the number of bytes processed so far.
 ///
@@ -1413,6 +1399,7 @@ pub struct FFIVecBytes {
 /// callbacks themselves must also obey the FFI safety contract: they may not
 /// unwind across the FFI boundary and must not dereference any pointers other
 /// than those provided to them.
+#[repr(C)]
 pub struct VerifySingleFileArgsU64{
     pub filename: *const c_char,
     pub file_manifest_parent: *const FFIFileManifestParentU64,
@@ -1421,8 +1408,13 @@ pub struct VerifySingleFileArgsU64{
     pub get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
         hashes: *const u64,
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+    pub free_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        chunks: FFIChunkDataArray,
+    ),
     pub progress_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
         bytes_processed: u64
@@ -1449,18 +1441,18 @@ pub struct VerifySingleFileArgsU64{
 ///   It can be used by the caller to store context (e.g., a Rust
 ///   `Arc<Mutex<…>>` or a raw pointer to a C struct). The parent application
 ///   never dereferences this pointer; it is only handed back to the callbacks.
-/// * `get_chunks_cb`: Callback invoked by the verifier when it needs to
-///   retrieve the raw chunk data for a set of hash values.
-///   It must return an `FFIChunkDataArray` with one `FFIVecBytes` per
-///   requested hash, in the order requested. The library takes ownership of
-///   the array and of every buffer in it and frees them with Rust's
-///   allocator, so all of them must come from that allocator, with `cap` set
-///   to the real capacity. Memory from C's `malloc` must not be returned.
-///   The callback receives:
-///   - `user_data`: the same pointer passed in this struct,
-///   - `hashes`: pointer to an array of `u128` hash identifiers,
-///   - `hashes_len`: length of the `hashes` array.
-///
+/// * `get_chunks_cb`: Called to fetch the raw data for a batch of hashes.
+///   It receives `user_data`, a pointer to `hashes_len` hashes, each 16
+///   little-endian bytes, and
+///   `out_chunks`. On success it fills `out_chunks` with one `FFIVecBytes`
+///   per hash, in the order asked, and returns `CallbackOk`. The library
+///   only reads the buffers and copies them, so they can come from any
+///   allocator. The array and its buffers must stay valid until
+///   `free_chunks_cb` is called with them. Return `Error` or `Cancelled` to stop the verification.
+/// * `free_chunks_cb`: Called once with each array `get_chunks_cb` filled
+///   successfully, after the library has copied it, on the same thread.
+///   It frees the array and its buffers however the host allocated them.
+///   It isn't called when `get_chunks_cb` fails or leaves the array null.
 /// * `progress_cb`: Progress callback, which must not be null. It is called
 ///   periodically with the number of bytes processed so far.
 ///
@@ -1481,8 +1473,13 @@ pub struct VerifySingleFileArgsU128{
     pub get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
         hashes: *const u8,
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+    pub free_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        chunks: FFIChunkDataArray,
+    ),
     pub progress_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
         bytes_processed: u64
@@ -1588,18 +1585,17 @@ unsafe impl Sync for ThreadSafeUserData {}
 ///   worker threads. When testing a maximum value of 7 is used.
 /// * `user_data`: Opaque user‑supplied context that will be passed back to
 ///   the `get_chunks_cb` callback.
-/// * `get_chunks_cb`: A C-style callback function pointer to retrieve raw
-///   chunk data.
-///   The callback receives:
-///   - `user_data`: the opaque pointer supplied above,
-///   - `hashes`: pointer to the requested hash slice,
-///   - `hashes_len`: length of that slice,
-///   - `out_chunks`: pointer to an `FFIChunkDataArray` that the callback must
-///     fill with one `FFIVecBytes` per requested hash, in the order requested.
-///     The library takes ownership of the array and of every buffer in it
-///     and frees them with Rust's allocator, so all of them must come from
-///     that allocator, with `cap` set to the real capacity. Memory from C's
-///     `malloc` must not be returned.
+/// * `get_chunks_cb`: Called to fetch the raw data for a batch of hashes.
+///   It receives `user_data`, a pointer to `hashes_len` hashes, and
+///   `out_chunks`. On success it fills `out_chunks` with one `FFIVecBytes`
+///   per hash, in the order asked, and returns `CallbackOk`. The library
+///   only reads the buffers and copies them, so they can come from any
+///   allocator. The array and its buffers must stay valid until
+///   `free_chunks_cb` is called with them. Return `Error` or `Cancelled` to stop the estimate.
+/// * `free_chunks_cb`: Called once with each array `get_chunks_cb` filled
+///   successfully, after the library has copied it, on the same thread.
+///   It frees the array and its buffers however the host allocated them.
+///   It isn't called when `get_chunks_cb` fails or leaves the array null.
 #[repr(C)]
 pub struct TestCompressionArgs<H> {
     pub total_data_size: u64,
@@ -1615,6 +1611,10 @@ pub struct TestCompressionArgs<H> {
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
+    pub free_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        chunks: FFIChunkDataArray,
+    ),
 }
 
 /// Bundles all parameters for calling the `test_compression_u64` function.
@@ -1638,6 +1638,8 @@ pub struct TestCompressionArgs<H> {
 ///   `get_chunks_cb` callback, allowing the C side to maintain state.
 /// * `get_chunks_cb`: A C function pointer that the test runner calls to
 ///   request the raw data for a set of hashes.
+/// * `free_chunks_cb`: A C function pointer that frees each array
+///   `get_chunks_cb` filled, once the library has copied it.
 ///
 /// # Safety
 ///
@@ -1668,6 +1670,8 @@ pub type TestCompressionArgsU64 = TestCompressionArgs<u64>;
 ///   `get_chunks_cb` callback, allowing the C side to maintain state.
 /// * `get_chunks_cb`: A C function pointer that the test runner calls to
 ///   request the raw data for a set of hashes.
+/// * `free_chunks_cb`: A C function pointer that frees each array
+///   `get_chunks_cb` filled, once the library has copied it.
 ///
 /// # Safety
 ///

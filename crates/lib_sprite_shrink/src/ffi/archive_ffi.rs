@@ -15,6 +15,7 @@ use crate::archive::{ArchiveBuilder, decompress_chunk};
 use crate::ffi::ffi_error_handling::{
     FFIResult
 };
+use crate::ffi::ffi_ownership::copy_host_chunks;
 use crate::ffi::ffi_types::{
     ArchiveBuilderU64, ArchiveBuilderU128,
     ArchiveBuilderArgsU64, ArchiveBuilderArgsU128,
@@ -166,40 +167,30 @@ pub unsafe extern "C" fn archive_builder_new_u64(
     move |
         hashes: &[u64]
     | -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
-        let mut ffi_chunks_array = FFIChunkDataArray {
-            ptr: std::ptr::null_mut(), len: 0, cap: 0
+        let user_data = user_data_addr as *mut c_void;
+        let get = |out_chunks: *mut FFIChunkDataArray| {
+            /*SAFETY: `ArchiveBuilderArgsU64` requires `get_chunks_cb` and
+            `user_data` to stay valid for the builder's whole lifetime, and
+            this closure only runs while the builder builds. The hash pointer
+            covers `hashes.len()` hashes until the callback returns, and
+            `out_chunks` points to `copy_host_chunks`' local array, valid for
+            writes.*/
+            unsafe {
+                parent_get_cb(
+                    user_data,
+                    hashes.as_ptr(),
+                    hashes.len(),
+                    out_chunks,
+                )
+            }
         };
-        let status = unsafe {
-            parent_get_cb(
-                user_data_addr as *mut c_void,
-                hashes.as_ptr(),
-                hashes.len(),
-                &mut ffi_chunks_array
-            )
-        };
-        Result::from(status)?;
-
-        if ffi_chunks_array.ptr.is_null() {
-            return Ok(Vec::new());
+        /*SAFETY: `ArchiveBuilderArgsU64` requires `get_chunks_cb` to fill the
+        array with readable buffers that stay valid until `free_chunks_cb`
+        takes them back, and `free_chunks_cb` to accept that array with
+        `user_data`.*/
+        unsafe {
+            copy_host_chunks(hashes.len(), get, parent_free_cb, user_data)
         }
-
-        let chunks = unsafe{
-            let ffi_chunks_slice = slice::from_raw_parts(
-                ffi_chunks_array.ptr,
-                ffi_chunks_array.len
-            );
-
-            let rust_chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-                let c_chunk_slice = slice::from_raw_parts(c.ptr, c.len);
-                c_chunk_slice.to_vec()
-            }).collect();
-
-            parent_free_cb(user_data_addr as *mut c_void, ffi_chunks_array);
-
-            rust_chunks
-        };
-
-        Ok(chunks)
     }};
 
     let write_data_closure = {
@@ -319,48 +310,34 @@ pub unsafe extern "C" fn archive_builder_new_u128(
     move |
         hashes: &[u128]
     | -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
+        let user_data = user_data_addr as *mut c_void;
         let ffi_hash_bytes: Vec<u8> = hashes
             .iter()
             .flat_map(|h| h.to_le_bytes())
             .collect();
-
-        let mut ffi_chunks_array = FFIChunkDataArray {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0,
+        let get = |out_chunks: *mut FFIChunkDataArray| {
+            /*SAFETY: `ArchiveBuilderArgsU128` requires `get_chunks_cb` and
+            `user_data` to stay valid for the builder's whole lifetime, and
+            this closure only runs while the builder builds. The hash pointer
+            covers `hashes.len()` hashes until the callback returns, and
+            `out_chunks` points to `copy_host_chunks`' local array, valid for
+            writes.*/
+            unsafe {
+                parent_get_cb(
+                    user_data,
+                    ffi_hash_bytes.as_ptr(),
+                    hashes.len(),
+                    out_chunks,
+                )
+            }
         };
-
-        let status = unsafe {
-            (parent_get_cb)(
-                user_data_addr as *mut c_void,
-                ffi_hash_bytes.as_ptr(),
-                hashes.len(),
-                &mut ffi_chunks_array
-            )
-        };
-        Result::from(status)?;
-
-        if ffi_chunks_array.ptr.is_null() {
-            return Ok(Vec::new());
+        /*SAFETY: `ArchiveBuilderArgsU128` requires `get_chunks_cb` to fill the
+        array with readable buffers that stay valid until `free_chunks_cb`
+        takes them back, and `free_chunks_cb` to accept that array with
+        `user_data`.*/
+        unsafe {
+            copy_host_chunks(hashes.len(), get, parent_free_cb, user_data)
         }
-
-        let chunks = unsafe{
-            let ffi_chunks_slice = slice::from_raw_parts(
-                ffi_chunks_array.ptr,
-                ffi_chunks_array.len
-            );
-
-            let rust_chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-                let c_chunk_slice = slice::from_raw_parts(c.ptr, c.len);
-                c_chunk_slice.to_vec()
-            }).collect();
-
-            (parent_free_cb)(user_data_addr as *mut c_void, ffi_chunks_array);
-
-            rust_chunks
-        };
-
-        Ok(chunks)
     }};
 
     let write_data_closure = {
