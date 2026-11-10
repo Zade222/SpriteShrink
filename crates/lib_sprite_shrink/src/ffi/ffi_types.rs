@@ -108,7 +108,8 @@ pub struct ArchiveBuilderU128 { _private: [u8; 0] }
 ///   struct entries.
 /// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
 /// * `sorted_hashes_array_ptr`: Pointer to a sorted array of all unique `u64`
-///   chunk hashes.
+///   chunk hashes. The library keeps its own copy, so the array can be freed
+///   once `archive_builder_new_u64` returns.
 /// * `sorted_hashes_len`: The number of elements in the
 ///   `sorted_hashes_array_ptr` array.
 /// * `file_count`: The total number of files being added to the archive.

@@ -1365,9 +1365,10 @@ trait HashExports: Hashable + Ord + Debug + Display + Encode {
         names: &[*const c_char],
     ) -> Self::SerializeArgs;
 
-    /// Arguments for a builder fed from `ser` and `host`.
+    /// Arguments for a builder fed from `ser`, `hashes` and `host`.
     fn builder_args(
         ser: &FFISerializedOutput<Self::Ffi>,
+        hashes: &[Self::Ffi],
         file_count: u32,
         host: *mut BuildHost<Self>,
     ) -> Self::BuilderArgs;
@@ -1413,6 +1414,7 @@ impl HashExports for u64 {
 
     fn builder_args(
         ser: &FFISerializedOutput<u64>,
+        hashes: &[u64],
         file_count: u32,
         host: *mut BuildHost<u64>,
     ) -> ArchiveBuilderArgsU64 {
@@ -1425,8 +1427,8 @@ impl HashExports for u64 {
         ArchiveBuilderArgsU64 {
             manifest_array_ptr: ser.ser_manifest_ptr,
             manifest_len: ser.ser_manifest_len,
-            sorted_hashes_array_ptr: ser.sorted_hashes_ptr,
-            sorted_hashes_len: ser.sorted_hashes_len,
+            sorted_hashes_array_ptr: hashes.as_ptr(),
+            sorted_hashes_len: hashes.len(),
             file_count,
             total_size,
             user_data: host.cast(),
@@ -1477,6 +1479,7 @@ impl HashExports for u128 {
 
     fn builder_args(
         ser: &FFISerializedOutput<U128Bytes>,
+        hashes: &[U128Bytes],
         file_count: u32,
         host: *mut BuildHost<u128>,
     ) -> ArchiveBuilderArgsU128 {
@@ -1489,11 +1492,11 @@ impl HashExports for u128 {
         ArchiveBuilderArgsU128 {
             manifest_array_ptr: ser.ser_manifest_ptr,
             manifest_len: ser.ser_manifest_len,
-            // `U128Bytes` is `#[repr(C)]` around `[u8; 16]`, so the sorted
-            // hashes are already the 16 little-endian bytes per hash the
-            // builder reads.
-            sorted_hashes_array_ptr: ser.sorted_hashes_ptr.cast(),
-            sorted_hashes_len: ser.sorted_hashes_len,
+            // `U128Bytes` is `#[repr(C)]` around `[u8; 16]`, so the hashes
+            // are already the 16 little-endian bytes per hash the builder
+            // reads.
+            sorted_hashes_array_ptr: hashes.as_ptr().cast(),
+            sorted_hashes_len: hashes.len(),
             file_count,
             total_size,
             user_data: host.cast(),
@@ -1614,6 +1617,11 @@ fn ffi_serialize_files<K: HashExports, R>(
 /// host would: process and chunk each file, serialize, compress, then build
 /// the prefix and put it in front of the compressed data. `configure` runs
 /// after the standard settings, just before the build.
+///
+/// The builder gets its own copy of the sorted hashes, which is overwritten
+/// and freed as soon as the builder exists. The exports say a host may free
+/// that array once `new` returns, so a builder that kept reading it would
+/// build the wrong archive.
 fn ffi_round_trip_archive<K: HashExports>(
     files: &[(String, Vec<u8>)],
     configure: impl FnOnce(*mut K::Builder),
@@ -1621,13 +1629,27 @@ fn ffi_round_trip_archive<K: HashExports>(
     ffi_serialize_files::<K, _>(files, |ser, chunks| {
         let mut host = BuildHost { chunks, written: Mutex::new(Vec::new()) };
         let file_count = u32::try_from(files.len()).unwrap();
-        let builder_args = K::builder_args(ser, file_count, &raw mut host);
+        // SAFETY: the library wrote `sorted_hashes_len` hashes at
+        // `sorted_hashes_ptr`, and `ser` isn't freed until this closure
+        // returns.
+        let mut hashes = unsafe {
+            slice::from_raw_parts(ser.sorted_hashes_ptr, ser.sorted_hashes_len)
+        }
+        .to_vec();
+        let builder_args =
+            K::builder_args(ser, &hashes, file_count, &raw mut host);
         let mut builder = ptr::null_mut();
-        // SAFETY: `builder_args` points into `ser` and `host`, which outlive
-        // the builder, and `builder` is a local.
+        // SAFETY: `builder_args` points into `ser`, `hashes` and `host`. All
+        // three are live for the call, and `ser` and `host` outlive the
+        // builder, which is all the exports ask. `builder` is a local.
         assert_ok(unsafe {
             K::BUILDER_NEW(&raw const builder_args, &raw mut builder)
         });
+        // Every entry becomes the first hash, so a builder still reading
+        // this array would compress one chunk over and over.
+        let first = hashes[0];
+        hashes.fill(first);
+        drop(hashes);
 
         // SAFETY: `builder` came from `K::BUILDER_NEW` and hasn't been built
         // or freed.

@@ -145,10 +145,18 @@ pub unsafe extern "C" fn archive_builder_new_u64(
             return FFIResult::NullArgument;
     }
 
-    let sorted_hashes = unsafe{slice::from_raw_parts(
+    /*SAFETY: `sorted_hashes_array_ptr` was checked for null above, and
+    `ArchiveBuilderArgsU64` requires it to point to `sorted_hashes_len`
+    initialised `u64`s that stay valid for this call. The slice is copied
+    before returning, so nothing reads the host's array afterwards.*/
+    let host_hashes = unsafe{slice::from_raw_parts(
         args_int.sorted_hashes_array_ptr,
         args_int.sorted_hashes_len
     )};
+    /*The builder keeps its own copy. The host may free its array once this
+    function returns, but the builder reads the hashes again during the
+    build.*/
+    let sorted_hashes = host_hashes.to_vec();
 
     let user_data_addr = args_int.user_data as usize;
 
