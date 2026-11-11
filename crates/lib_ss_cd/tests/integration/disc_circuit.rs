@@ -391,6 +391,66 @@ fn the_disc_reads_back_byte_for_byte() {
     assert_reads_back(&archive(full_disc(), FULL_DISC_CUE));
 }
 
+/// Points the two lowest hashes in `index` at each other's stored data,
+/// which still decodes, but to the wrong bytes for its hash.
+fn swap_first_two(index: &mut HashMap<u64, ChunkLocation>) {
+    let mut hashes: Vec<u64> = index.keys().copied().collect();
+    hashes.sort_unstable();
+    let (a, b) = (hashes[0], hashes[1]);
+    let location_a = index[&a];
+    let location_b = index.insert(b, location_a).unwrap();
+    index.insert(a, location_b);
+}
+
+/// Reads every sector of `disc` with `get_sector_data`, asserts that none
+/// comes back different from the original, and returns the errors.
+fn failed_sector_reads(disc: &Archived) -> Vec<String> {
+    let reader = DiscReconstructor::new(
+        &disc.manifest,
+        &disc.indices,
+        &[],
+        &disc.file,
+        &disc.exception_blob,
+        &disc.subheader_table,
+    )
+    .unwrap();
+
+    let mut errors = Vec::new();
+    for (index, original) in disc.bin.chunks(SECTOR).enumerate() {
+        match reader.get_sector_data(u32::try_from(index).unwrap()) {
+            Ok(sector) => {
+                assert!(sector[..] == *original, "sector {index} read back wrong");
+            }
+            Err(e) => errors.push(e.to_string()),
+        }
+    }
+    errors
+}
+
+#[test]
+fn a_damaged_data_chunk_is_not_read_back() {
+    let mut disc = archive(full_disc(), FULL_DISC_CUE);
+    swap_first_two(&mut disc.indices.chunk_index);
+
+    let errors = failed_sector_reads(&disc);
+    assert!(!errors.is_empty(), "no sector read failed");
+    for e in &errors {
+        assert!(e.contains("Chunk failed its integrity check"), "{e}");
+    }
+}
+
+#[test]
+fn a_damaged_audio_block_is_not_read_back() {
+    let mut disc = archive(full_disc(), FULL_DISC_CUE);
+    swap_first_two(&mut disc.indices.audio_block_index);
+
+    let errors = failed_sector_reads(&disc);
+    assert!(!errors.is_empty(), "no sector read failed");
+    for e in &errors {
+        assert!(e.contains("Audio block failed its integrity check"), "{e}");
+    }
+}
+
 #[test]
 fn the_generated_cue_has_the_same_layout() {
     let disc = archive(full_disc(), FULL_DISC_CUE);

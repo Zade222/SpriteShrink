@@ -28,7 +28,7 @@ use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sprite_shrink::{
     ChunkLocation, FileHeader, FileRegion, Hashable,
-    decompress_chunk
+    decompress_chunk_checked
 };
 use zerocopy::{Immutable, IntoBytes, FromBytes};
 
@@ -298,6 +298,45 @@ where
         })
     }
 
+    /// Reads the compressed bytes stored at `location` in the archive.
+    fn read_stored(
+        &self,
+        location: ChunkLocation,
+    ) -> Result<Vec<u8>, SpriteShrinkCDError> {
+        let mut buf = vec![0u8; location.compressed_length as usize];
+        #[cfg(unix)]
+        self.archive_file.read_at(&mut buf, location.offset)?;
+        #[cfg(windows)]
+        self.archive_file.seek_read(&mut buf, location.offset)?;
+        Ok(buf)
+    }
+
+    /// Reads and decodes the audio block stored under `content_hash`, and
+    /// checks that it decodes to the PCM that hash was taken from. FLAC can
+    /// decode some damage without an error.
+    fn read_audio_block(
+        &self,
+        content_hash: H,
+    ) -> Result<Vec<u8>, SpriteShrinkCDError> {
+        let chunk_loc = self.indices.audio_block_index.get(&content_hash)
+            .ok_or_else(|| ReconstructionError::InternalError(
+                format!("Missing audio hash {content_hash}")
+            ))?;
+
+        let comp_data = self.read_stored(*chunk_loc)?;
+        let decomp = decompress_flac_block(&comp_data)
+            .map_err(|e| SpriteShrinkCDError::External(Box::new(e)))?;
+
+        let actual = H::from_bytes_with_seed(&decomp);
+        if actual != content_hash {
+            return Err(ReconstructionError::AudioBlockHashMismatch {
+                expected: content_hash.to_string(),
+                actual: actual.to_string(),
+            }.into());
+        }
+        Ok(decomp)
+    }
+
     /// Reads and reconstructs a specific sector by its index
     /// (0-based from start of disc).
     pub fn get_sector_data(
@@ -317,34 +356,12 @@ where
         );
         let mut sector_data = [0u8; 2352];
 
-        let read_chunk_data = |
-            offset: u64,
-            len: usize
-        | -> Result<Vec<u8>, SpriteShrinkCDError> {
-            let mut buf = vec![0u8; len];
-            #[cfg(unix)]
-            self.archive_file.read_at(&mut buf, offset)?;
-            #[cfg(windows)]
-            self.archive_file.seek_read(&mut buf, offset)?;
-            Ok(buf)
-        };
-
         match reconstruction_info {
             Some(ReconstructionInfo::FromBlock {
                 content_hash,
                 offset_in_block
             }) => {
-                let chunk_loc = self.indices.audio_block_index.get(&content_hash)
-                    .ok_or_else(|| ReconstructionError::InternalError(
-                        format!("Missing audio hash {}", content_hash)
-                    ))?;
-
-                let comp_data = read_chunk_data(
-                    chunk_loc.offset,
-                    chunk_loc.compressed_length as usize
-                )?;
-                let decomp = decompress_flac_block(&comp_data)
-                    .map_err(|e| SpriteShrinkCDError::External(Box::new(e)))?;
+                let decomp = self.read_audio_block(content_hash)?;
 
                 let start = offset_in_block as usize;
                 let end = start + 2352;
@@ -364,14 +381,12 @@ where
                         format!("Missing data hash {}", chunk.chunk_hash)
                     ))?;
 
-                    let comp_data = read_chunk_data(
-                        chunk_loc.offset,
-                        chunk_loc.compressed_length as usize
-                    )?;
-                    let decomp = decompress_chunk(
+                    let comp_data = self.read_stored(*chunk_loc)?;
+                    let decomp = decompress_chunk_checked(
                         &comp_data,
-                        self.dictionary
-                    ).map_err(|e| SpriteShrinkCDError::External(Box::new(e)))?;
+                        self.dictionary,
+                        chunk.chunk_hash
+                    )?;
 
                     let start = chunk.read_from_offset as usize;
                     let len = chunk.read_length as usize;

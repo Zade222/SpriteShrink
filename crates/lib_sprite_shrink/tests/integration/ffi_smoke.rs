@@ -57,6 +57,7 @@ use sprite_shrink::{
         build_ssmc_prefix_u64, build_ssmc_prefix_u128,
         create_file_manifest_and_chunks_u64,
         create_file_manifest_and_chunks_u128, decompress_chunk_c,
+        decompress_chunk_checked_c_u64, decompress_chunk_checked_c_u128,
         free_file_header, free_file_manifest_and_chunks_u64,
         free_file_manifest_and_chunks_u128,
         free_processed_file_data_ffi,
@@ -931,6 +932,71 @@ fn lookup_u128(map: *const c_void, hash: u128)
     (status, location)
 }
 
+/// Decompresses `compressed` into `out` with `decompress_chunk_c`, which
+/// ignores the hash.
+fn decompress_unchecked<H>(
+    compressed: &[u8],
+    dictionary: &[u8],
+    _hash: H,
+    out: &mut [u8],
+) -> FFIStatus {
+    // SAFETY: each pointer covers its slice's length, and `out` is a
+    // separate buffer valid for writes.
+    unsafe {
+        decompress_chunk_c(
+            compressed.as_ptr(),
+            compressed.len(),
+            dictionary.as_ptr(),
+            dictionary.len(),
+            out.as_mut_ptr(),
+            out.len(),
+        )
+    }
+}
+
+fn decompress_checked_u64(
+    compressed: &[u8],
+    dictionary: &[u8],
+    hash: u64,
+    out: &mut [u8],
+) -> FFIStatus {
+    // SAFETY: each pointer covers its slice's length, and `out` is a
+    // separate buffer valid for writes.
+    unsafe {
+        decompress_chunk_checked_c_u64(
+            compressed.as_ptr(),
+            compressed.len(),
+            dictionary.as_ptr(),
+            dictionary.len(),
+            hash,
+            out.as_mut_ptr(),
+            out.len(),
+        )
+    }
+}
+
+fn decompress_checked_u128(
+    compressed: &[u8],
+    dictionary: &[u8],
+    hash: u128,
+    out: &mut [u8],
+) -> FFIStatus {
+    let key = hash.to_le_bytes();
+    // SAFETY: each pointer covers its slice's length, `key` is 16 bytes,
+    // and `out` is a separate buffer valid for writes.
+    unsafe {
+        decompress_chunk_checked_c_u128(
+            compressed.as_ptr(),
+            compressed.len(),
+            dictionary.as_ptr(),
+            dictionary.len(),
+            key.as_ptr(),
+            out.as_mut_ptr(),
+            out.len(),
+        )
+    }
+}
+
 #[test]
 fn parse_ssmc_prefix_u64_matches_rust_api() {
     let archive = rust_archive([1_u64, u64::MAX, 7], HASH_TYPE_XXH3_64);
@@ -1432,6 +1498,7 @@ type ParsePrefixFn<F> = unsafe extern "C" fn(
     *mut *mut FFIParsedSSMC<F>,
 ) -> FFIStatus;
 type LookupFn<H> = fn(*const c_void, H) -> (FFIStatus, FFIChunkLocation);
+type DecompressFn<H> = fn(&[u8], &[u8], H, &mut [u8]) -> FFIStatus;
 
 /// One hash width's C exports, implemented on the Rust hash type, so one
 /// test body can drive either the u64 or the u128 path. Each export is an
@@ -1457,6 +1524,7 @@ trait HashExports: Hashable + Ord + Debug + Display + Encode {
     const PARSE_PREFIX: ParsePrefixFn<Self::Ffi>;
     const FREE_PARSED: FreeFn<FFIParsedSSMC<Self::Ffi>>;
     const LOOKUP: LookupFn<Self>;
+    const DECOMPRESS_CHECKED: DecompressFn<Self>;
 
     fn serialize_args(
         manifests: &[FFIFileManifestParent<Self::Ffi>],
@@ -1501,6 +1569,7 @@ impl HashExports for u64 {
     const PARSE_PREFIX: ParsePrefixFn<u64> = parse_ssmc_prefix_u64;
     const FREE_PARSED: FreeFn<FFIParsedSSMC<u64>> = free_parsed_ssmc_u64;
     const LOOKUP: LookupFn<u64> = lookup_u64;
+    const DECOMPRESS_CHECKED: DecompressFn<u64> = decompress_checked_u64;
 
     fn serialize_args(
         manifests: &[FFIFileManifestParent<u64>],
@@ -1570,6 +1639,7 @@ impl HashExports for u128 {
     const FREE_PARSED: FreeFn<FFIParsedSSMC<U128Bytes>> =
         free_parsed_ssmc_u128;
     const LOOKUP: LookupFn<u128> = lookup_u128;
+    const DECOMPRESS_CHECKED: DecompressFn<u128> = decompress_checked_u128;
 
     fn serialize_args(
         manifests: &[FFIFileManifestParent<U128Bytes>],
@@ -1802,8 +1872,18 @@ fn ffi_round_trip_archive<K: HashExports>(
 }
 
 /// Rebuilds every file in `archive` through the C read exports, the way a
-/// C host would, in table of contents order.
-fn ffi_extract<K: HashExports>(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
+/// C host would, in table of contents order, decompressing each chunk with
+/// `decompress`. Returns the first status other than `StatusOk` that
+/// `decompress` gives.
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "a prefix that fails to parse is a broken test, so it panics; \
+              the Err is only for the chunk statuses under test"
+)]
+fn ffi_extract<K: HashExports>(
+    archive: &[u8],
+    decompress: DecompressFn<K>,
+) -> Result<Vec<(String, Vec<u8>)>, i32> {
     let prefix = &archive[..ffi_prefix_len(archive)];
     let mut parsed = ptr::null_mut();
     // SAFETY: `prefix` is `prefix.len()` readable bytes and `parsed` is a
@@ -1832,7 +1912,8 @@ fn ffi_extract<K: HashExports>(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
         )
     };
 
-    let files = toc
+    // Collecting into a `Result` stops at the first chunk that fails.
+    let files: Result<Vec<_>, i32> = toc
         .into_iter()
         .zip(manifests)
         .map(|(entry, manifest)| {
@@ -1840,12 +1921,13 @@ fn ffi_extract<K: HashExports>(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
             let mut file = vec![0; size];
 
             for meta in manifest.chunk_metadata {
+                let ok = status_code(FFIStatus::StatusOk);
                 let (status, location) =
                     K::LOOKUP(parsed_ref.chunk_index, meta.hash);
-                assert_eq!(
-                    status_code(status),
-                    status_code(FFIStatus::StatusOk)
-                );
+                let status = status_code(status);
+                if status != ok {
+                    return Err(status);
+                }
 
                 let start = usize::try_from(location.offset).unwrap();
                 let end = start + usize::try_from(location.length).unwrap();
@@ -1854,24 +1936,14 @@ fn ffi_extract<K: HashExports>(archive: &[u8]) -> Vec<(String, Vec<u8>)> {
                 let out_end = out_start + usize::try_from(meta.length).unwrap();
                 let out = &mut file[out_start..out_end];
 
-                // SAFETY: each pointer covers its slice's length, and `out`
-                // is valid for writes.
-                let status = unsafe {
-                    decompress_chunk_c(
-                        compressed.as_ptr(),
-                        compressed.len(),
-                        dictionary.as_ptr(),
-                        dictionary.len(),
-                        out.as_mut_ptr(),
-                        out.len(),
-                    )
-                };
-                assert_eq!(
-                    status_code(status),
-                    status_code(FFIStatus::StatusOk)
+                let status = status_code(
+                    decompress(compressed, dictionary, meta.hash, out)
                 );
+                if status != ok {
+                    return Err(status);
+                }
             }
-            (entry.filename, file)
+            Ok((entry.filename, file))
         })
         .collect();
 
@@ -1949,13 +2021,92 @@ fn assert_round_trip_extracts_original_files<K: HashExports>() {
 
     // The table of contents is sorted by name.
     files.sort_by(|a, b| a.0.cmp(&b.0));
-    let extracted = ffi_extract::<K>(&archive);
     let names = |set: &[(String, Vec<u8>)]| -> Vec<String> {
         set.iter().map(|(name, _)| name.clone()).collect()
     };
-    assert_eq!(names(&extracted), names(&files));
-    for ((name, data), (_, original)) in extracted.iter().zip(&files) {
-        assert_bytes_eq(data, original, name);
+    for decompress in [decompress_unchecked, K::DECOMPRESS_CHECKED] {
+        let extracted = ffi_extract::<K>(&archive, decompress).unwrap();
+        assert_eq!(names(&extracted), names(&files));
+        for ((name, data), (_, original)) in extracted.iter().zip(&files) {
+            assert_bytes_eq(data, original, name);
+        }
+    }
+}
+
+/// Flips one bit at a time across the compressed chunks of an archive and
+/// extracts it with the checked decompress each time.
+fn assert_damaged_chunks_are_never_extracted<K: HashExports>() {
+    let mut files = round_trip_files();
+    let archive = ffi_round_trip_archive::<K>(&files, |_| {});
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let mut mismatches = 0;
+    // Every 7th byte, cycling through the bits, keeps the run short.
+    for (step, index) in (ffi_prefix_len(&archive)..archive.len())
+        .step_by(7)
+        .enumerate()
+    {
+        let mut damaged = archive.clone();
+        damaged[index] ^= 1 << (step % 8);
+        match ffi_extract::<K>(&damaged, K::DECOMPRESS_CHECKED) {
+            // A flip zstd decodes to the same bytes is harmless.
+            Ok(extracted) => assert_eq!(extracted, files, "byte {index}"),
+            Err(status) => {
+                if status == status_code(FFIStatus::VerificationHashMismatch)
+                {
+                    mismatches += 1;
+                }
+            }
+        }
+    }
+    assert!(mismatches > 0, "no flip reached the hash check");
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn ffi_damaged_chunks_are_never_extracted_u64() {
+    assert_damaged_chunks_are_never_extracted::<u64>();
+}
+
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn ffi_damaged_chunks_are_never_extracted_u128() {
+    assert_damaged_chunks_are_never_extracted::<u128>();
+}
+
+#[test]
+fn checked_decompress_rejects_each_null_pointer() {
+    let compressed = [0_u8; 4];
+    let dictionary = [0_u8; 4];
+    let key = [0_u8; 16];
+    let mut decompressed = [0_u8; 4];
+    let (comp, dict) = (compressed.as_ptr(), dictionary.as_ptr());
+    let out = decompressed.as_mut_ptr();
+
+    let calls = [
+        ("compressed data", ptr::null(), dict, key.as_ptr(), out),
+        ("dictionary", comp, ptr::null(), key.as_ptr(), out),
+        ("hash", comp, dict, ptr::null(), out),
+        ("output buffer", comp, dict, key.as_ptr(), ptr::null_mut()),
+    ];
+    for (what, comp, dict, key, out) in calls {
+        if !key.is_null() {
+            // SAFETY: one pointer is null, which the function checks before
+            // reading anything; the others point to live locals of the
+            // given lengths.
+            let status = unsafe {
+                decompress_chunk_checked_c_u64(comp, 4, dict, 4, 0, out, 4)
+            };
+            assert_null_argument(what, status);
+        }
+
+        // SAFETY: one pointer is null, which the function checks before
+        // reading anything; the others point to live locals of the given
+        // lengths, and `key` to 16 bytes.
+        let status = unsafe {
+            decompress_chunk_checked_c_u128(comp, 4, dict, 4, key, out, 4)
+        };
+        assert_null_argument(what, status);
     }
 }
 

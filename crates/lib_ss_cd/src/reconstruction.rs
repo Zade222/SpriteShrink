@@ -77,6 +77,10 @@ pub enum ReconstructionError {
     #[error("Subheader id {0} isn't in the subheader table")]
     UnknownSubheader(u16),
 
+    #[error("Audio block failed its integrity check (expected hash \
+        {expected}, got {actual}). The archive may be damaged.")]
+    AudioBlockHashMismatch { expected: String, actual: String },
+
     #[error("Reconstruction failure.")]
     ReconstructionFailure,
 }

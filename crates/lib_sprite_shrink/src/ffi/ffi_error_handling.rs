@@ -79,6 +79,9 @@ impl From<ArchiveError> for FFIStatus {
             ArchiveError::WorkerError(_) => FFIStatus::InternalError,
             ArchiveError::ProcessingError(e) => e.into(),
             ArchiveError::External(_) => FFIStatus::CallbackError,
+            ArchiveError::ChunkHashMismatch { .. } => {
+                FFIStatus::VerificationHashMismatch
+            }
             ArchiveError::Cancelled => FFIStatus::StatusCancelled,
         }
     }

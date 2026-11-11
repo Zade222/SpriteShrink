@@ -26,7 +26,7 @@ use sprite_shrink::{
     SSMC_UID,
     HashType,
     Hashable, FileHeader, ParsedSSMC,
-    decompress_chunk
+    decompress_chunk_checked
 };
 
 use sprite_shrink_cd::{
@@ -215,8 +215,8 @@ where
 /// - `CliError::InternalError` if a chunk hash is found in the manifest but
 ///   is missing from the chunk index, or if an unsupported hash type is
 ///   encountered.
-/// - `CliError::DataIntegrity` if a decompressed chunk's hash does not match
-///   the expected hash from the manifest.
+/// - `CliError::SpriteShrinkError` if a chunk doesn't decompress, or doesn't
+///   decompress to the bytes its hash says.
 /// - `CliError::Cancelled` if the `running` flag is set to `false` during
 ///   the extraction process.
 /// - Any `std::io::Error` that occurs during file creation, writing, or
@@ -290,21 +290,11 @@ where
                 chunk_location.compressed_length as usize
             )?;
 
-            let decomp_chunk_data = decompress_chunk(
-                    &comp_chunk_data,
-                    dictionary
+            let decomp_chunk_data = decompress_chunk_checked(
+                &comp_chunk_data,
+                dictionary,
+                scm.hash
             )?;
-
-            let decomp_chunk_hash = H::from_bytes_with_seed(
-                &decomp_chunk_data
-            );
-
-            if scm.hash != decomp_chunk_hash {
-                return Err(CliError::DataIntegrity(format!(
-                    "chunk hash mismatch (expected: {}, calculated: {})",
-                    scm.hash, decomp_chunk_hash
-                )));
-            };
 
             //Check if the user has cancelled the operation
             if !running.load(Ordering::SeqCst) {

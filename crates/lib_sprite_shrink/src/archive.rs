@@ -36,7 +36,7 @@ use crate::{IsCancelled, SpriteShrinkError,
 };
 
 use crate::processing::{
-    build_train_samples, gen_zstd_opt_dict, ProcessingError
+    build_train_samples, gen_zstd_opt_dict, Hashable, ProcessingError
 };
 
 #[derive(Error, Debug)]
@@ -73,6 +73,10 @@ pub enum ArchiveError {
 
     #[error("An error occurred in an external callback: {0}")]
     External(String),
+
+    #[error("Chunk failed its integrity check (expected hash {expected}, \
+        got {actual}). The archive may be damaged.")]
+    ChunkHashMismatch { expected: String, actual: String },
 
     #[error("Operation cancelled by user.")]
     Cancelled,
@@ -911,6 +915,11 @@ where
 /// This function will return an error if:
 /// * The ZSTD decoder cannot be created with the supplied dictionary, or
 /// * The decompression process fails while reading the compressed data.
+///
+/// The output is not checked against the chunk's hash. Chunks are written
+/// without a zstd checksum, so most damage to `comp_chunk_data` decodes to
+/// wrong bytes with no error. Use `decompress_chunk_checked` unless the
+/// caller checks the output itself.
 pub fn decompress_chunk(
     comp_chunk_data: &[u8],
     dictionary: &[u8]
@@ -926,6 +935,35 @@ pub fn decompress_chunk(
     decoder.read_to_end(&mut decompressed_chunk_data)?;
 
     Ok(decompressed_chunk_data)
+}
+
+/// Decompresses a chunk like `decompress_chunk`, then checks that the
+/// output hashes to `expected`, the hash the chunk is stored under.
+///
+/// The chunk's key is the hash of its uncompressed bytes, so this catches
+/// damage that zstd decodes without an error, including two frames that
+/// decode as one chunk.
+///
+/// # Errors
+///
+/// Returns the errors of `decompress_chunk`, or
+/// `ArchiveError::ChunkHashMismatch` (inside `SpriteShrinkError::Archive`)
+/// if the output doesn't hash to `expected`.
+pub fn decompress_chunk_checked<H: Hashable>(
+    comp_chunk_data: &[u8],
+    dictionary: &[u8],
+    expected: H,
+) -> Result<Vec<u8>, SpriteShrinkError> {
+    let data = decompress_chunk(comp_chunk_data, dictionary)?;
+    let actual = H::from_bytes_with_seed(&data);
+    if actual != expected {
+        return Err(ArchiveError::ChunkHashMismatch {
+            expected: format!("{expected:?}"),
+            actual: format!("{actual:?}"),
+        }
+        .into());
+    }
+    Ok(data)
 }
 
 #[cfg(test)]
@@ -1089,6 +1127,73 @@ mod tests {
             }
         }
         assert!(failures > 0, "no flipped bit was detected");
+    }
+
+    /// Whether `result` is the error for a chunk that failed its hash.
+    fn is_hash_mismatch(result: &Result<Vec<u8>, SpriteShrinkError>) -> bool {
+        matches!(
+            result,
+            Err(SpriteShrinkError::Archive(
+                ArchiveError::ChunkHashMismatch { .. }
+            ))
+        )
+    }
+
+    #[test]
+    fn a_checked_chunk_returns_its_bytes() {
+        let (payload, compressed) = compressed_payload();
+        let key = u64::from_bytes_with_seed(&payload);
+        assert_eq!(
+            decompress_chunk_checked(&compressed, dictionary(), key).unwrap(),
+            payload
+        );
+
+        let key = u128::from_bytes_with_seed(&payload);
+        assert_eq!(
+            decompress_chunk_checked(&compressed, dictionary(), key).unwrap(),
+            payload
+        );
+    }
+
+    #[test]
+    fn a_checked_chunk_fails_under_the_wrong_key() {
+        let (payload, compressed) = compressed_payload();
+        let key = u64::from_bytes_with_seed(&payload) ^ 1;
+        let result = decompress_chunk_checked(&compressed, dictionary(), key);
+        assert!(is_hash_mismatch(&result), "{result:?}");
+    }
+
+    #[test]
+    fn every_flipped_bit_fails_a_checked_chunk() {
+        // Unlike `decompress_chunk`, no flip decodes to wrong bytes without
+        // an error: zstd rejects it, or the hash doesn't match. A flip that
+        // still decodes to the right bytes is fine.
+        let (payload, compressed) = compressed_payload();
+        let key = u64::from_bytes_with_seed(&payload);
+        let mut mismatches = 0;
+        for index in 0..compressed.len() {
+            for bit in 0..8 {
+                let mut corrupted = compressed.clone();
+                corrupted[index] ^= 1 << bit;
+                let result =
+                    decompress_chunk_checked(&corrupted, dictionary(), key);
+                if let Ok(data) = &result {
+                    assert_eq!(data, &payload, "byte {index} bit {bit}");
+                }
+                mismatches += usize::from(is_hash_mismatch(&result));
+            }
+        }
+        assert!(mismatches > 0, "no flip reached the hash check");
+    }
+
+    #[test]
+    fn two_frames_fail_a_checked_chunk() {
+        // zstd decodes two frames back to back as one stream.
+        let (payload, compressed) = compressed_payload();
+        let key = u64::from_bytes_with_seed(&payload);
+        let doubled = [compressed.as_slice(), &compressed].concat();
+        let result = decompress_chunk_checked(&doubled, dictionary(), key);
+        assert!(is_hash_mismatch(&result), "{result:?}");
     }
 
     type ReadResult = Result<Vec<Vec<u8>>, SpriteShrinkError>;

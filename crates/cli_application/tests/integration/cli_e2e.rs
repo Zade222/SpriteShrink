@@ -159,6 +159,41 @@ fn library_errors_are_reported_with_their_detail() {
 }
 
 #[test]
+fn a_damaged_chunk_stops_extraction() {
+    let tmp = TempDir::new().unwrap();
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // The last chunk in the fixture ends at the end of the file. A flipped
+    // bit 140 bytes from the end still decodes, to the wrong bytes.
+    let fixture = fs::read(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures/compat/v2/roms.ssmc"),
+    )
+    .unwrap();
+    let offset = fixture.len() - 140;
+    let archive = patched_fixture(tmp.path(), offset, fixture[offset] ^ 1);
+
+    let printed = failure_output(&[
+        "-i", archive.to_str().unwrap(),
+        "-o", out_dir.to_str().unwrap(),
+        "-e", "1-3",
+    ]);
+    assert!(
+        printed.contains("Chunk failed its integrity check"),
+        "output:\n{printed}"
+    );
+
+    // The file being written is removed, not left half written.
+    let left: Vec<_> = fs::read_dir(&out_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .filter(|name| name.to_string_lossy().ends_with(".tmp"))
+        .collect();
+    assert_eq!(left, Vec::<std::ffi::OsString>::new());
+}
+
+#[test]
 fn unknown_hash_type_stops_extraction_and_listing() {
     let tmp = TempDir::new().unwrap();
     let out_dir = tmp.path().join("extract");
