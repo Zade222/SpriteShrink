@@ -73,6 +73,9 @@ pub enum CliError {
         in the input paths.")]
     NoCueFiles,
 
+    #[error("Files with duplicate file names aren't allowed.\n{0}")]
+    DuplicateNames(String),
+
     #[error("This operation requires at least two input files.")]
     NotEnoughFiles,
 

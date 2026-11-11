@@ -9,6 +9,7 @@
 
 use std::{
     fs::{self, create_dir_all},
+    path::PathBuf,
     process::ExitCode,
     sync::{
         Arc, atomic::{AtomicBool, Ordering}
@@ -46,7 +47,8 @@ use crate::{
     cli_types::SpriteShrinkConfig,
     modes::compress_modes::run_optical_compression,
     storage_io::{
-    cleanup_old_logs, files_from_dirs, load_config, organize_paths
+    entry_name, cleanup_old_logs, disc_title, duplicate_names,
+    files_from_dirs, load_config, organize_paths
     }
 };
 mod utils;
@@ -166,6 +168,8 @@ fn run(
                 return Err(CliError::NoFilesFound());
             }
 
+            check_unique_names(&file_paths, &args.mode)?;
+
             let out_dir = args.output
                 .as_ref()
                 .unwrap()
@@ -211,6 +215,37 @@ fn run(
     }
 
     Ok(())
+}
+
+/// Checks that no two inputs would be stored under the same name: the file
+/// name in default mode, the CUE file's stem in optical mode. Each archive
+/// entry is keyed by name, so all but one would be lost.
+///
+/// # Errors
+///
+/// Returns `CliError::DuplicateNames`, listing each shared name and the
+/// paths that share it, one name per line.
+fn check_unique_names(
+    file_paths: &[PathBuf],
+    mode: &str,
+) -> Result<(), CliError> {
+    let name_of = if mode == "optical" { disc_title } else { entry_name };
+    let duplicates = duplicate_names(file_paths, name_of);
+    if duplicates.is_empty() {
+        return Ok(());
+    }
+
+    let lines: Vec<String> = duplicates
+        .iter()
+        .map(|(name, paths)| {
+            let paths: Vec<String> = paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            format!("  {name}: {}", paths.join(", "))
+        })
+        .collect();
+    Err(CliError::DuplicateNames(lines.join("\n")))
 }
 
 /// Sets up a handler to gracefully shut down the application on Ctrl+C.

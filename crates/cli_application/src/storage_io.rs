@@ -7,7 +7,8 @@
 //! designed to be robust and provide clear error handling.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
+    ffi::OsStr,
     fmt::Display,
     fs::{self, File, OpenOptions, metadata, read_dir, remove_file},
     hash::Hash,
@@ -170,6 +171,57 @@ pub fn organize_paths(
 
     /*Return tuple containing the file and directory path vectors. */
     Ok((file_paths, dir_paths))
+}
+
+/// The name of the entry an input file becomes inside an SSMC archive,
+/// which is the input's file name without its folder, so `x/a.bin` and
+/// `y/a.bin` both become `a.bin`.
+pub fn entry_name(path: &Path) -> Option<String> {
+    path.file_name().map(|name| name.to_string_lossy().into_owned())
+}
+
+/// The title a disc is stored under in an SSMD archive: its CUE file's stem,
+/// cut to the 255 characters `parse_cue` keeps. `None` for a file that
+/// isn't a CUE sheet, since only CUE sheets become discs.
+pub fn disc_title(path: &Path) -> Option<String> {
+    if path.extension() != Some(OsStr::new("cue")) {
+        return None;
+    }
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().chars().take(255).collect())
+}
+
+/// Finds input files that would be stored under the same name, as `name_of`
+/// names them, and returns each shared name with its paths, sorted by name.
+/// The archive keeps one entry per name, so all but one would be lost.
+///
+/// The same file given twice, such as through its folder and on its own,
+/// isn't a conflict: both paths lead to one file.
+pub fn duplicate_names(
+    paths: &[PathBuf],
+    name_of: impl Fn(&Path) -> Option<String>,
+) -> Vec<(String, Vec<PathBuf>)> {
+    let mut by_name: BTreeMap<String, Vec<(PathBuf, PathBuf)>> =
+        BTreeMap::new();
+
+    for path in paths {
+        let Some(name) = name_of(path) else { continue };
+        /*Compare where paths lead, not how they're spelled. A path that
+        can't be resolved is compared as given.*/
+        let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+        let same_name = by_name.entry(name).or_default();
+        if !same_name.iter().any(|(_, other)| *other == resolved) {
+            same_name.push((path.clone(), resolved));
+        }
+    }
+
+    by_name
+        .into_iter()
+        .filter(|(_, same_name)| same_name.len() > 1)
+        .map(|(name, same_name)| {
+            (name, same_name.into_iter().map(|(path, _)| path).collect())
+        })
+        .collect()
 }
 
 /// Collects all regular file paths from a slice of directories.
@@ -745,6 +797,61 @@ mod tests {
         assert_eq!(
             skip_reason(file_type_of(&tmp.path().join("nested"))),
             Some("folders inside an input folder aren't searched")
+        );
+    }
+
+    #[test]
+    fn duplicate_names_lists_each_shared_name_with_its_paths() {
+        let tmp = TempDir::new().unwrap();
+        let mut paths = Vec::new();
+        for dir in ["x", "y"] {
+            fs::create_dir(tmp.path().join(dir)).unwrap();
+            for name in ["a.bin", "b.bin"] {
+                let path = tmp.path().join(dir).join(name);
+                fs::write(&path, name).unwrap();
+                paths.push(path);
+            }
+        }
+        fs::write(tmp.path().join("x/c.bin"), b"c").unwrap();
+        paths.push(tmp.path().join("x/c.bin"));
+
+        let duplicates = duplicate_names(&paths, entry_name);
+        let at = |dir: &str, name: &str| tmp.path().join(dir).join(name);
+        assert_eq!(
+            duplicates,
+            [
+                ("a.bin".to_string(), vec![at("x", "a.bin"), at("y", "a.bin")]),
+                ("b.bin".to_string(), vec![at("x", "b.bin"), at("y", "b.bin")]),
+            ]
+        );
+    }
+
+    #[test]
+    fn one_file_reached_two_ways_is_not_a_duplicate() {
+        let tmp = input_folder();
+        let direct = tmp.path().join("a.bin");
+        let roundabout = tmp.path().join("nested/../a.bin");
+
+        assert_eq!(
+            duplicate_names(&[direct, roundabout], entry_name),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn a_disc_title_is_the_cue_stem_cut_to_255_characters() {
+        assert_eq!(disc_title(Path::new("x/game.cue")).as_deref(), Some("game"));
+        assert_eq!(disc_title(Path::new("x/game.bin")), None);
+
+        // Two long names that only differ past 255 characters get the same
+        // title, as `parse_cue` keeps only the first 255.
+        let long = "é".repeat(255);
+        let first = PathBuf::from(format!("x/{long}1.cue"));
+        let second = PathBuf::from(format!("y/{long}2.cue"));
+        assert_eq!(disc_title(&first), Some(long.clone()));
+        assert_eq!(
+            duplicate_names(&[first.clone(), second.clone()], disc_title),
+            [(long, vec![first, second])]
         );
     }
 

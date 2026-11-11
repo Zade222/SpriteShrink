@@ -531,3 +531,92 @@ fn auto_tune_handles_too_little_data_for_a_dictionary() {
         assert_bytes_eq(&extracted, &original, name);
     }
 }
+
+#[test]
+fn files_sharing_a_name_are_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let first = two_roms(&tmp.path().join("first"));
+    let second = two_roms(&tmp.path().join("second"));
+    let archive = tmp.path().join("roms.ssmc");
+
+    let printed = failure_output(&[
+        "-i", first.to_str().unwrap(),
+        "-i", second.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    for name in ["a.bin", "b.bin"] {
+        assert!(printed.contains(name), "output:\n{printed}");
+    }
+    assert!(printed.contains("duplicate file names"), "output:\n{printed}");
+    assert!(!archive.exists());
+}
+
+#[test]
+fn discs_sharing_a_cue_name_are_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let first_dir = tmp.path().join("first");
+    let second_dir = tmp.path().join("second");
+    write_blank_disc(&first_dir, "game", 300);
+    write_blank_disc(&second_dir, "game", 320);
+    let archive = tmp.path().join("discs.ssmd");
+
+    let printed = failure_output(&[
+        "--mode", "optical",
+        "-i", first_dir.to_str().unwrap(),
+        "-i", second_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    assert!(printed.contains("duplicate file names"), "output:\n{printed}");
+    assert!(printed.contains("game"), "output:\n{printed}");
+    assert!(!archive.exists());
+}
+
+#[test]
+fn the_same_file_given_twice_is_not_a_conflict() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+    let archive = tmp.path().join("roms.ssmc");
+
+    run_cli(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-i", input_dir.join("a.bin").to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+}
+
+#[test]
+fn input_order_does_not_change_the_archive() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = tmp.path().join("input");
+    fs::create_dir_all(&input_dir).unwrap();
+    let names = ["c.bin", "a.bin", "d.bin", "b.bin"];
+    for (seed, name) in (0x5EED_2801..).zip(names) {
+        fs::write(input_dir.join(name), tiled_bytes(seed, 8 * 1024)).unwrap();
+    }
+
+    // The folder in whatever order the filesystem lists it, then the files
+    // one by one in two different orders.
+    let path = |name: &str| input_dir.join(name).to_str().unwrap().to_string();
+    let orders: [Vec<String>; 3] = [
+        vec![input_dir.to_str().unwrap().to_string()],
+        names.iter().map(|name| path(name)).collect(),
+        names.iter().rev().map(|name| path(name)).collect(),
+    ];
+    let archives: Vec<Vec<u8>> = orders
+        .iter()
+        .enumerate()
+        .map(|(i, inputs)| {
+            let archive = tmp.path().join(format!("{i}.ssmc"));
+            let mut args: Vec<&str> = Vec::new();
+            for input in inputs {
+                args.extend(["-i", input]);
+            }
+            args.extend(["-o", archive.to_str().unwrap()]);
+            run_cli(&args);
+            fs::read(&archive).unwrap()
+        })
+        .collect();
+
+    assert_bytes_eq(&archives[1], &archives[0], "files in listed order");
+    assert_bytes_eq(&archives[2], &archives[0], "files in reverse order");
+}
