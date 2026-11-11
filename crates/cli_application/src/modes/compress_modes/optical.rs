@@ -197,15 +197,15 @@ where
     let base_path = cache_info.cache_path.with_extension("");
     let stem = base_path.file_name().unwrap().to_str().unwrap();
 
-    let first_cue_path = prepared_sheets.first().ok_or(
-        CliError::InternalError("No input CUE files provided.".to_string())
-    )?;
+    if prepared_sheets.is_empty() {
+        return Err(CliError::NoCueFiles);
+    }
 
-    let source_base_dir = first_cue_path.0.parent()
-        .ok_or(CliError::InternalError(
-            format!("Could not determine base directory from CUE path: {}", first_cue_path.0.display())
-        ))?
-        .to_path_buf();
+    /*Each disc reads its BIN files from its own CUE file's folder.*/
+    let discs = pair_with_cue_dirs(
+        cue_analysis.cue_sheets,
+        &prepared_sheets
+    )?;
 
 
     let audio_cache_path = base_path.with_file_name(
@@ -240,8 +240,7 @@ where
         128 * 1024, |byte| byte.as_u64());
 
     let proc_result = process_optical_discs::<H>(
-        &cue_analysis.cue_sheets,
-        &source_base_dir,
+        &discs,
         &data_temp_cache,
         &audio_temp_cache,
         &running,
@@ -515,9 +514,47 @@ where
 }
 
 
+/// Pairs each parsed CUE sheet with the folder of the CUE file it was parsed
+/// from. A sheet's `FILE` paths are relative to that folder.
+///
+/// `analyze_cue_sheets` returns one sheet per CUE file, in the order it was
+/// given them, so `sheets[i]` came from `cue_files[i]`.
+///
+/// # Errors
+///
+/// Returns `CliError::InternalError` if the counts differ, so no disc is
+/// dropped, or if a CUE path has no parent folder.
+fn pair_with_cue_dirs(
+    sheets: Vec<CueSheet>,
+    cue_files: &[(PathBuf, String)],
+) -> Result<Vec<(CueSheet, PathBuf)>, CliError> {
+    if sheets.len() != cue_files.len() {
+        return Err(CliError::InternalError(format!(
+            "{} CUE sheets were parsed from {} CUE files",
+            sheets.len(),
+            cue_files.len()
+        )));
+    }
+
+    sheets
+        .into_iter()
+        .zip(cue_files)
+        .map(|(sheet, (cue_path, _))| {
+            let cue_dir = cue_path.parent().ok_or_else(|| {
+                CliError::InternalError(format!(
+                    "Could not determine base directory from CUE path: {}",
+                    cue_path.display()
+                ))
+            })?;
+            Ok((sheet, cue_dir.to_path_buf()))
+        })
+        .collect()
+}
+
+/// `discs` pairs each CUE sheet with the folder its `FILE` paths are
+/// relative to, as `pair_with_cue_dirs` returns them.
 fn process_optical_discs<H>(
-    cue_sheets: &[CueSheet],
-    base_dir: &PathBuf,
+    discs: &[(CueSheet, PathBuf)],
     data_cache: &Arc<TempCache<H>>,
     audio_cache: &Arc<TempCache<H>>,
     running: &Arc<AtomicBool>,
@@ -599,18 +636,17 @@ where
     let worker_subheader_reg = shared_subheader_registry.clone();
     let worker_exception_reg = shared_exception_registry.clone();
 
-    let cue_sheets_owned = cue_sheets.to_owned();
-    let base_dir_owned = base_dir.to_owned();
+    let discs_owned = discs.to_owned();
 
     let worker_handle = thread::spawn(move || -> Result<(), CliError>{
         worker_pool.install(|| -> Result<(), CliError> {
-            cue_sheets_owned
+            discs_owned
                 .par_iter()
-                .try_for_each(|cue_sheet| -> Result<(), CliError> {
+                .try_for_each(|(cue_sheet, cue_dir)| -> Result<(), CliError> {
                     let sender_clone = chunk_sender.clone();
                     let dcd = cue_sheet_worker(
                         cue_sheet,
-                        &base_dir_owned,
+                        cue_dir,
                         window_size,
                         sender_clone,
                         &worker_subheader_reg,
@@ -927,4 +963,44 @@ where
         verification_hash: sha_hasher.finalize().into(),
         integrity_hash: xxh3_hasher.finish()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sheet(title: &str) -> CueSheet {
+        CueSheet { source_filename: title.to_string(), files: Vec::new() }
+    }
+
+    fn cue_file(path: &str) -> (PathBuf, String) {
+        (PathBuf::from(path), String::new())
+    }
+
+    #[test]
+    fn each_sheet_gets_its_own_cue_folder() {
+        let discs = pair_with_cue_dirs(
+            vec![sheet("one"), sheet("two")],
+            &[cue_file("first/one.cue"), cue_file("second/two.cue")],
+        )
+        .unwrap();
+
+        let paired: Vec<(&str, &Path)> = discs
+            .iter()
+            .map(|(sheet, dir)| (sheet.source_filename.as_str(), dir.as_path()))
+            .collect();
+        assert_eq!(
+            paired,
+            [("one", Path::new("first")), ("two", Path::new("second"))]
+        );
+    }
+
+    #[test]
+    fn a_count_mismatch_is_an_error() {
+        let result = pair_with_cue_dirs(
+            vec![sheet("one")],
+            &[cue_file("first/one.cue"), cue_file("second/two.cue")],
+        );
+        assert!(matches!(result, Err(CliError::InternalError(_))));
+    }
 }

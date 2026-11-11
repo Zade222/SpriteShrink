@@ -357,3 +357,72 @@ fn a_skipped_subfolder_is_not_called_a_symbolic_link() {
     assert!(list.contains("a.bin") && list.contains("b.bin"), "{list}");
     assert!(!list.contains("c.bin"), "{list}");
 }
+
+/// Writes a blank Mode 2 data disc of `sectors` sectors to `dir` as
+/// `<title>.cue` pointing at `disc.bin`, and returns the image.
+fn write_blank_disc(dir: &Path, title: &str, sectors: usize) -> Vec<u8> {
+    fs::create_dir_all(dir).unwrap();
+    let image = vec![0_u8; sectors * 2352];
+    fs::write(dir.join("disc.bin"), &image).unwrap();
+    fs::write(
+        dir.join(format!("{title}.cue")),
+        "FILE \"disc.bin\" BINARY\n\
+         \x20 TRACK 01 MODE2/2352\n\
+         \x20   INDEX 01 00:00:00\n",
+    )
+    .unwrap();
+    image
+}
+
+#[test]
+fn discs_from_different_folders_read_their_own_bin_files() {
+    let tmp = TempDir::new().unwrap();
+    let out_dir = tmp.path().join("extract");
+    let archive = tmp.path().join("discs.ssmd");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // Both CUE sheets name `disc.bin`; only the folder tells them apart.
+    let first_dir = tmp.path().join("first");
+    let second_dir = tmp.path().join("second");
+    let one = write_blank_disc(&first_dir, "one", 300);
+    let two = write_blank_disc(&second_dir, "two", 320);
+
+    run_cli(&[
+        "--mode", "optical",
+        "-i", first_dir.to_str().unwrap(),
+        "-i", second_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    run_cli(&[
+        "-i", archive.to_str().unwrap(),
+        "-o", out_dir.to_str().unwrap(),
+        "-e", "1-2",
+    ]);
+
+    assert_bytes_eq(&fs::read(out_dir.join("one.bin")).unwrap(), &one, "one");
+    assert_bytes_eq(&fs::read(out_dir.join("two.bin")).unwrap(), &two, "two");
+}
+
+#[test]
+fn optical_mode_without_cue_files_says_what_is_missing() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = tmp.path().join("input");
+    let archive = tmp.path().join("discs.ssmd");
+    fs::create_dir_all(&input_dir).unwrap();
+    // Two BIN images and no CUE sheet to describe them.
+    for name in ["one.bin", "two.bin"] {
+        fs::write(input_dir.join(name), vec![0_u8; 300 * 2352]).unwrap();
+    }
+
+    let printed = failure_output(&[
+        "--mode", "optical",
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    assert!(
+        printed.contains("Optical mode needs a .cue file for each disc"),
+        "output:\n{printed}"
+    );
+    assert!(!printed.contains("internal logic error"), "output:\n{printed}");
+    assert!(!archive.exists());
+}

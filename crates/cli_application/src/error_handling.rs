@@ -68,6 +68,10 @@ pub enum CliError {
     #[error("The provided input paths contain no files.")]
     NoFilesFound(),
 
+    #[error("Optical mode needs a .cue file for each disc; none were found \
+        in the input paths.")]
+    NoCueFiles,
+
     #[error("This operation requires at least two input files.")]
     NotEnoughFiles,
 
