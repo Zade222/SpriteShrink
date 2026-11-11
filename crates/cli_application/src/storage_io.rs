@@ -116,28 +116,21 @@ log_retention_days = 7
 log_level = "error"
 "#;
 
-/// Checks if a given path points to a regular file.
+/// Why `files_from_dirs` skips a directory entry of type `file_type`, for
+/// the warning it logs. `None` for a regular file, which isn't skipped.
 ///
-/// This function uses `fs::symlink_metadata` to get information about
-/// the path without following symbolic links. This is useful for ensuring
-/// that a path is a file and not a link pointing to one, which is
-/// important when recursively scanning directories.
-///
-/// # Arguments
-///
-/// * `path`: A reference to a `Path` object to be checked.
-///
-/// # Returns
-///
-/// Returns `true` if the path exists and is a regular file. Returns
-/// `false` otherwise, or if an error occurs.
-fn is_regular_file(path: &Path) -> bool {
-    // Get file metadata without following symlinks from system storage.
-    fs::symlink_metadata(path)
-        .map(|m| {
-            m.file_type().is_file()
-        })
-        .unwrap_or(false)
+/// `DirEntry::file_type` doesn't follow symbolic links, so a link reports
+/// as a link even when it points at a file or a folder.
+fn skip_reason(file_type: fs::FileType) -> Option<&'static str> {
+    if file_type.is_file() {
+        None
+    } else if file_type.is_symlink() {
+        Some("symbolic links aren't followed")
+    } else if file_type.is_dir() {
+        Some("folders inside an input folder aren't searched")
+    } else {
+        Some("it isn't a regular file")
+    }
 }
 
 /// Sorts input paths into separate vectors of files and directories.
@@ -184,7 +177,8 @@ pub fn organize_paths(
 /// This function iterates over a list of directory paths and gathers
 /// all entries that are regular files. It performs a shallow search,
 /// meaning it does not recurse into subdirectories. Symbolic links are
-/// ignored to prevent duplicate processing.
+/// ignored to prevent duplicate processing. Each skipped entry is logged
+/// with the reason it was skipped.
 ///
 /// # Arguments
 ///
@@ -206,10 +200,17 @@ pub fn files_from_dirs(
         for entry_result in fs::read_dir(dir_path)? {
             let entry = entry_result?;
             let path = entry.path();
-            if is_regular_file(&path) {
-                file_paths.push(path);
-            } else {
-                warn!("Ignoring symbolic link: {}", path.display());
+            match entry.file_type() {
+                Ok(file_type) => match skip_reason(file_type) {
+                    None => file_paths.push(path),
+                    Some(reason) => {
+                        warn!("Ignoring {}: {reason}", path.display());
+                    }
+                },
+                Err(err) => warn!(
+                    "Ignoring {}: its type couldn't be read: {err}",
+                    path.display()
+                ),
             }
         }
         //Return vector of file paths.
@@ -701,5 +702,76 @@ impl <H: Hash + Eq> Drop for TempCache<H> {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    /// A folder holding `a.bin`, `b.bin` and a subfolder with `c.bin`.
+    fn input_folder() -> TempDir {
+        let tmp = TempDir::new().unwrap();
+        fs::write(tmp.path().join("a.bin"), b"a").unwrap();
+        fs::write(tmp.path().join("b.bin"), b"b").unwrap();
+        fs::create_dir(tmp.path().join("nested")).unwrap();
+        fs::write(tmp.path().join("nested/c.bin"), b"c").unwrap();
+        tmp
+    }
+
+    fn file_type_of(path: &Path) -> fs::FileType {
+        fs::symlink_metadata(path).unwrap().file_type()
+    }
+
+    #[test]
+    fn only_top_level_regular_files_are_collected() {
+        let tmp = input_folder();
+
+        let mut files = files_from_dirs(&[tmp.path().to_path_buf()]).unwrap();
+        files.sort();
+        assert_eq!(
+            files,
+            [tmp.path().join("a.bin"), tmp.path().join("b.bin")]
+        );
+    }
+
+    #[test]
+    fn a_subfolder_is_skipped_as_a_folder() {
+        let tmp = input_folder();
+
+        assert_eq!(skip_reason(file_type_of(&tmp.path().join("a.bin"))), None);
+        assert_eq!(
+            skip_reason(file_type_of(&tmp.path().join("nested"))),
+            Some("folders inside an input folder aren't searched")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symbolic_link_is_skipped_as_a_link() {
+        let tmp = input_folder();
+        let to_file = tmp.path().join("link_to_file");
+        let to_folder = tmp.path().join("link_to_folder");
+        std::os::unix::fs::symlink(tmp.path().join("a.bin"), &to_file)
+            .unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("nested"), &to_folder)
+            .unwrap();
+
+        for link in [&to_file, &to_folder] {
+            assert_eq!(
+                skip_reason(file_type_of(link)),
+                Some("symbolic links aren't followed"),
+                "{}",
+                link.display()
+            );
+        }
+        let mut files = files_from_dirs(&[tmp.path().to_path_buf()]).unwrap();
+        files.sort();
+        assert_eq!(
+            files,
+            [tmp.path().join("a.bin"), tmp.path().join("b.bin")]
+        );
     }
 }

@@ -331,3 +331,29 @@ fn files_past_index_255_can_be_extracted() {
     }
     assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 3);
 }
+
+#[test]
+fn a_skipped_subfolder_is_not_called_a_symbolic_link() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+    let nested = input_dir.join("nested");
+    fs::create_dir_all(&nested).unwrap();
+    fs::write(nested.join("c.bin"), tiled_bytes(0x5EED_3103, 4 * 1024))
+        .unwrap();
+    let archive = tmp.path().join("roms.ssmc");
+
+    let stdout = stdout_of(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    assert!(
+        stdout.contains("folders inside an input folder aren't searched"),
+        "stdout:\n{stdout}"
+    );
+    assert!(!stdout.contains("symbolic link"), "stdout:\n{stdout}");
+
+    // Only the two top-level files were archived.
+    let list = stdout_of(&["-i", archive.to_str().unwrap(), "--list"]);
+    assert!(list.contains("a.bin") && list.contains("b.bin"), "{list}");
+    assert!(!list.contains("c.bin"), "{list}");
+}
