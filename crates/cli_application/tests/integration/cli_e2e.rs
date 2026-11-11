@@ -426,3 +426,48 @@ fn optical_mode_without_cue_files_says_what_is_missing() {
     assert!(!printed.contains("internal logic error"), "output:\n{printed}");
     assert!(!archive.exists());
 }
+
+#[test]
+fn a_window_size_outside_the_chunker_range_is_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+    let archive = tmp.path().join("roms.ssmc");
+
+    // FastCDC accepts average sizes from 256 bytes to 4 MiB.
+    for window in ["100", "8MiB"] {
+        let printed = failure_output(&[
+            "-i", input_dir.to_str().unwrap(),
+            "-o", archive.to_str().unwrap(),
+            "-w", window,
+        ]);
+        assert!(
+            printed.contains("outside the supported range of 256 to 4194304 \
+                bytes"),
+            "-w {window}:\n{printed}"
+        );
+        assert!(!printed.contains("panicked"), "-w {window}:\n{printed}");
+        assert!(!archive.exists());
+    }
+
+    // The limits themselves are accepted.
+    for window in ["256", "4MiB"] {
+        run_cli(&[
+            "-i", input_dir.to_str().unwrap(),
+            "-o", archive.to_str().unwrap(),
+            "-w", window,
+            "--force",
+        ]);
+    }
+
+    // The window only matters when compressing, so a bad value doesn't stop
+    // extraction.
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+    run_cli(&[
+        "-i", archive.to_str().unwrap(),
+        "-o", out_dir.to_str().unwrap(),
+        "-e", "1",
+        "-w", "100",
+    ]);
+    assert!(out_dir.join("a.bin").exists());
+}

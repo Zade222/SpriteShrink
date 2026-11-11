@@ -12,6 +12,7 @@ use std::{
 
 use bytesize::ByteSize;
 use clap::{ArgMatches, Parser};
+use sprite_shrink::{MAX_WINDOW_SIZE, MIN_WINDOW_SIZE};
 
 
 use crate::{
@@ -275,6 +276,8 @@ pub struct Args {
 /// - Missing an output path (`-o`) for extraction or compression.
 /// - The output path for compression is a directory.
 /// - Initiating compression with only one input file.
+/// - A window size, from `-w` or the config file, outside
+///   `MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE` when compressing.
 pub fn validate_args(
     args: &Args,
     matches: &ArgMatches
@@ -352,6 +355,15 @@ pub fn validate_args(
 
         if args.input.len() == 1 && args.input[0].is_file() {
             return Err(CliError::NotEnoughFiles);
+        }
+
+        /*The chunker panics on a window size outside FastCDC's range. The
+        check is only made when compressing, so a bad config value doesn't
+        stop extraction or listing.*/
+        if let Some(window) = args.window
+            && !(MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE).contains(&window.as_u64())
+        {
+            return Err(CliError::InvalidWindowSize(window.as_u64()));
         }
     }
 

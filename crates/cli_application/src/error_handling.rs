@@ -12,6 +12,7 @@ use std::{
 };
 
 use sprite_shrink::{
+    MAX_WINDOW_SIZE, MIN_WINDOW_SIZE,
     IsCancelled, SpriteShrinkError
 };
 use sprite_shrink_cd::SpriteShrinkCDError;
@@ -141,6 +142,14 @@ pub enum CliError {
 
     #[error("Unsupported format ID {0} in the archive header")]
     InvalidFormatID(u16),
+
+    #[error(
+        "Window size {0} is outside the supported range of {min} to {max} \
+         bytes",
+        min = MIN_WINDOW_SIZE,
+        max = MAX_WINDOW_SIZE
+    )]
+    InvalidWindowSize(u64),
 }
 
 /// Converts a library-level `SpriteShrinkError` into a `CliError`.
