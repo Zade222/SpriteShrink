@@ -390,7 +390,8 @@ where
             &archive_file,
             &exception_blob,
             &subheader_table,
-            &mut writer
+            &mut writer,
+            || !running.load(Ordering::SeqCst)
         )?;
 
         let cue_content = generate_cue_string(dm, &entry.filename)

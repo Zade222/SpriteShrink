@@ -10,10 +10,14 @@ use std::{
     fs::File,
     io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 use sha2::{Digest, Sha512};
-use sprite_shrink::{ChunkLocation, Hashable};
+use sprite_shrink::{ChunkLocation, Hashable, IsCancelled};
 use sprite_shrink_cd::{
     ContentBlock, CueSheet, DataChunkLayout, DiscManifest, DiscReconstructor,
     ExceptionRegistry, FileSizeProvider, SSMDIndices, SectorDataProvider,
@@ -293,6 +297,7 @@ fn write_out(disc: &Archived) -> Vec<u8> {
         &disc.exception_blob,
         &disc.subheader_table,
         &mut writer,
+        || false,
     )
     .unwrap();
     writer.into_inner().unwrap()
@@ -408,8 +413,130 @@ fn a_wrong_integrity_hash_fails_write_disc() {
         &disc.exception_blob,
         &disc.subheader_table,
         &mut writer,
+        || false,
     )
     .unwrap_err();
+}
+
+/// A writer whose every write fails, as a full disk does.
+struct FullDisk;
+
+impl Write for FullDisk {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("no space left on device"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+const ONE_DATA_TRACK_CUE: &str = r#"FILE "disc.bin" BINARY
+  TRACK 01 MODE2/2352
+    INDEX 01 00:00:00
+"#;
+
+/// Enough Form 1 sectors (2048 bytes of user data each) for the data stream
+/// to outgrow `write_disc`'s 25 MB read-ahead buffer.
+const LARGE_DISC_SECTORS: usize = 20_000;
+
+/// How `write_disc` failed: whether the error is a cancellation, and its
+/// message.
+type WriteError = (bool, String);
+
+/// Runs `write_disc` on another thread and returns its result, or `None` if
+/// it hasn't returned within a minute.
+fn write_disc_or_hang<W>(
+    disc: Archived,
+    writer: W,
+    is_cancelled: impl Fn() -> bool + Send + 'static,
+) -> Option<Result<(), WriteError>>
+where
+    W: Write + Send + 'static,
+{
+    let (done_tx, done_rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut writer = BufWriter::new(writer);
+        let result = write_disc(
+            &disc.manifest,
+            &disc.indices,
+            &[],
+            &disc.file,
+            &disc.exception_blob,
+            &disc.subheader_table,
+            &mut writer,
+            is_cancelled,
+        );
+        // Fails only if the test already gave up waiting, which the test
+        // reports itself.
+        let _unsent = done_tx
+            .send(result.map_err(|err| (err.is_cancelled(), err.to_string())));
+    });
+    done_rx.recv_timeout(std::time::Duration::from_secs(60)).ok()
+}
+
+#[test]
+fn a_failed_write_stops_write_disc() {
+    let disc = archive(image(LARGE_DISC_SECTORS, form1), ONE_DATA_TRACK_CUE);
+
+    let result = write_disc_or_hang(disc, FullDisk, || false)
+        .expect("write_disc hung after a write failed");
+    let (cancelled, err) = result.unwrap_err();
+    assert!(!cancelled, "{err}");
+    assert!(err.contains("no space left on device"), "{err}");
+}
+
+#[test]
+fn write_disc_stops_when_cancelled() {
+    let disc = archive(image(LARGE_DISC_SECTORS, form1), ONE_DATA_TRACK_CUE);
+
+    // Cancelled partway through, so the workers are mid-stream.
+    let checks = AtomicUsize::new(0);
+    let is_cancelled = move || checks.fetch_add(1, Ordering::Relaxed) >= 1000;
+    let written = Arc::new(Mutex::new(Vec::new()));
+
+    let result = write_disc_or_hang(
+        disc,
+        SharedSink(Arc::clone(&written)),
+        is_cancelled,
+    )
+    .expect("write_disc hung after it was cancelled");
+    let (cancelled, err) = result.unwrap_err();
+    assert!(cancelled, "{err}");
+    // `BufWriter` holds back what it hasn't flushed, so at most the 1000
+    // sectors before the cancel reach the sink.
+    assert!(written.lock().unwrap().len() <= 1000 * SECTOR);
+}
+
+#[test]
+fn write_disc_cancelled_before_the_first_sector_writes_nothing() {
+    let disc = archive(full_disc(), FULL_DISC_CUE);
+    let written = Arc::new(Mutex::new(Vec::new()));
+
+    let result =
+        write_disc_or_hang(disc, SharedSink(Arc::clone(&written)), || true)
+            .expect("write_disc hung after it was cancelled");
+    let (cancelled, err) = result.unwrap_err();
+    assert!(cancelled, "{err}");
+    assert!(written.lock().unwrap().is_empty());
+}
+
+/// A writer the test can read back after `write_disc_or_hang` moves it to
+/// another thread.
+struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+impl Write for SharedSink {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0
+            .lock()
+            .map_err(|err| std::io::Error::other(err.to_string()))?
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 // Data pregaps that aren't blank

@@ -17,7 +17,7 @@ use crate::{
         SectorType, SSMDIndices, SubHeaderEntry
     },
     util::{
-        SharedBuffer,
+        BufferState, ConsumerGuard, SharedBuffer,
         pull_data, spawn_audio_decomp_worker, spawn_chunk_decomp_worker,
         spawn_data_fetcher
     },
@@ -28,7 +28,7 @@ use flume::{
 };
 use sha2::{Digest,Sha512};
 use sprite_shrink::{
-    Hashable,
+    Hashable, SpriteShrinkError,
 };
 use thiserror::Error;
 use xxhash_rust::xxh3::Xxh3;
@@ -808,7 +808,25 @@ const fn to_bcd(v: u8) -> u8 {
 
 
 
-pub fn write_disc<H, W>(
+/// Rebuilds the disc `manifest` describes from the archive and writes its
+/// raw image to `writer`, checking it against the manifest's integrity hash.
+///
+/// `is_cancelled` is called before each sector. Once it returns `true`,
+/// writing stops and the error is a `SpriteShrinkError::Cancelled`, for which
+/// `is_cancelled()` holds. Pass `|| false` to never cancel.
+///
+/// # Errors
+///
+/// Returns an error if a chunk or audio block can't be read or decompressed,
+/// a sector can't be rebuilt, writing fails, the rebuilt disc doesn't match
+/// the integrity hash, or `is_cancelled` returns `true`. `writer` may hold
+/// part of the disc after an error.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each archive section is a separate borrow; grouping them is \
+              an API change of its own"
+)]
+pub fn write_disc<H, W, C>(
     manifest: &DiscManifest<H>,
     indices: &SSMDIndices<H>,
     dictionary: &[u8],
@@ -816,12 +834,13 @@ pub fn write_disc<H, W>(
     exception_blob: &[u8],
     subheader_table: &[[u8; 8]],
     writer: &mut BufWriter<W>,
+    is_cancelled: C,
     //mut progress_cb: P
 ) -> Result<(), SpriteShrinkCDError>
 where
     H: Hashable + Display,
-    //P: FnMut(u64) + Sync + Send + 'static,
-    W: Write
+    W: Write,
+    C: Fn() -> bool,
 {
     const MAX_BUFFER_SIZE: usize = 25 * 1024 * 1024; //25 megabytes
 
@@ -855,12 +874,12 @@ where
     let mut msf_offsets = MsfOffsets::new(&manifest.lba_map);
 
     let shared_data_buffer: SharedBuffer = Arc::new((
-        Mutex::new((VecDeque::with_capacity(MAX_BUFFER_SIZE), false)),
+        Mutex::new(BufferState::with_capacity(MAX_BUFFER_SIZE)),
         Condvar::new(),
     ));
 
     let shared_audio_buffer: SharedBuffer = Arc::new((
-        Mutex::new((VecDeque::with_capacity(MAX_BUFFER_SIZE), false)),
+        Mutex::new(BufferState::with_capacity(MAX_BUFFER_SIZE)),
         Condvar::new(),
     ));
 
@@ -868,6 +887,12 @@ where
     let cloned_audio_buffer =  shared_audio_buffer.clone();
 
     scope(|scope| -> Result<(), SpriteShrinkCDError>{
+        /*Dropped on any early return from this closure, which is still
+        before `scope` joins the workers.*/
+        let consumer_guard = ConsumerGuard {
+            buffers: [&shared_data_buffer, &shared_audio_buffer],
+        };
+
         let data_fetch_handle = spawn_chunk_decomp_worker(
             scope,
             chunk_hashes,
@@ -890,6 +915,10 @@ where
         );
 
         for (i, sector_type) in expanded_sector_types.iter().enumerate() {
+            if is_cancelled() {
+                return Err(SpriteShrinkError::Cancelled.into());
+            }
+
             let sector_idx = i as u32;
 
             let sector_result = match sector_type {
@@ -969,6 +998,11 @@ where
 
             loop_count += 1;
         }
+
+        /*Every sector is written, so stop the workers before joining them.
+        One with data left over, from a manifest that lists more than the
+        sectors use, would otherwise wait for room forever.*/
+        drop(consumer_guard);
 
         data_fetch_handle.join().map_err(|_| ReconstructionError::ThreadPanic(
             "Chunk fetching thread panicked.".to_string()))?;
