@@ -706,6 +706,10 @@ where
 /// size of all compressed chunks. This is used during the auto-tuning
 /// process to evaluate different parameters without creating a full archive.
 ///
+/// If no dictionary can be trained, as happens when the input has too
+/// little distinct data, the estimate is for compressing without one, which
+/// is what `ArchiveBuilder::build` does with the same input.
+///
 /// # Arguments
 ///
 /// * `sorted_hashes`: A sorted slice of all unique chunk hashes to process.
@@ -723,7 +727,7 @@ where
 ///
 /// A `Result` which is:
 /// - `Ok(usize)` containing the total estimated compressed size in bytes.
-/// - `Err(SpriteShrinkError)` if dictionary creation or compression fails.
+/// - `Err(SpriteShrinkError)` if reading the chunks or compression fails.
 pub fn test_compression<E, F, H>(
     sorted_hashes: &[H],
     total_data_size: u64,
@@ -745,12 +749,15 @@ where
         &get_chunk_data
     )?;
 
-    //Build dictionary
+    /*Build dictionary. As in `ArchiveBuilder::build`, training fails when
+    there's too little distinct data (zstd's trainers need at least seven
+    unique chunks), and the chunks are then compressed without one. The
+    estimate matches what `build` would write.*/
     let dictionary = zstd::dict::from_continuous(
         &samples_for_dict,
         &sample_sizes,
         dictionary_size, //Max dictionary size in bytes
-        ).map_err(|e| ProcessingError::DictionaryError(e.to_string()))?;
+        ).unwrap_or_default();
 
     //Add up the compressed sizes instead of storing the data.
     let mut compressed_size = 0usize;
@@ -1659,6 +1666,31 @@ mod tests {
             (estimate as u64) < total,
             "estimate {estimate} for {total} bytes of input"
         );
+    }
+
+    #[test]
+    fn test_compression_estimates_too_little_data_without_a_dictionary() {
+        // Two unique chunks are too few for zstd to train a dictionary on.
+        let chunks: HashMap<u64, Vec<u8>> = [
+            (1, tiled_bytes(0x5EED_3501, 1000)),
+            (2, tiled_bytes(0x5EED_3502, 1000)),
+        ]
+        .into();
+        let hashes = [1, 2];
+
+        let estimate =
+            test_compression(&hashes, 2000, 1, 4096, 7, read_from(chunks.clone()))
+                .unwrap();
+
+        // What `build` writes for the same input: each chunk compressed on
+        // its own, without a dictionary or the content size.
+        let mut compressor = zstd::bulk::Compressor::new(7).unwrap();
+        compressor.include_contentsize(false).unwrap();
+        let expected: usize = hashes
+            .iter()
+            .map(|hash| compressor.compress(&chunks[hash]).unwrap().len())
+            .sum();
+        assert_eq!(estimate, expected);
     }
 
     #[test]

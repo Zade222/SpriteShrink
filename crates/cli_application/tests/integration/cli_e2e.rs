@@ -502,3 +502,32 @@ fn an_auto_tuned_archive_extracts_the_original_files() {
         assert_bytes_eq(&extracted, data, name);
     }
 }
+
+#[test]
+fn auto_tune_handles_too_little_data_for_a_dictionary() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+    let archive = tmp.path().join("roms.ssmc");
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // Two 4 KiB ROMs cut into too few chunks to train a dictionary on, so
+    // every auto-tune estimate has to work without one.
+    let stdout = stdout_of(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+        "--auto-tune",
+    ]);
+    assert!(stdout.contains(NO_DICTIONARY_NOTE), "stdout:\n{stdout}");
+
+    run_cli(&[
+        "-i", archive.to_str().unwrap(),
+        "-o", out_dir.to_str().unwrap(),
+        "-e", "1-2",
+    ]);
+    for name in ["a.bin", "b.bin"] {
+        let extracted = fs::read(out_dir.join(name)).unwrap();
+        let original = fs::read(input_dir.join(name)).unwrap();
+        assert_bytes_eq(&extracted, &original, name);
+    }
+}
