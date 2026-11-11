@@ -9,7 +9,9 @@ use std::{
 use bitcode::Encode;
 use indicatif::{ProgressBar, ProgressStyle};
 use sprite_shrink::{
-    Hashable, SerializedData, serialize_uncompressed_data, test_compression
+    MAX_WINDOW_SIZE,
+    Hashable, SerializedData,
+    serialize_uncompressed_data, test_compression
 };
 use tracing::{
     debug,
@@ -22,6 +24,64 @@ use crate::{
     error_handling::CliError,
     storage_io::TempCache
 };
+
+/// The largest dictionary size, in bytes, that auto-tune tries.
+const MAX_TUNED_DICTIONARY_SIZE: u64 = 1024 * 1024;
+
+/// Finds the size with the smallest `measure` result by doubling from
+/// `start`, and returns it. `what` names the setting in log messages.
+///
+/// Stops at the first size whose result is larger than the one before, at
+/// the last size not above `max`, or after a measurement that took longer
+/// than `timeout`. A slow measurement still counts if it improved on the
+/// best so far: it has already finished, so its result is real.
+///
+/// # Errors
+///
+/// Returns the first error from `measure`.
+fn tune<E>(
+    start: u64,
+    max: u64,
+    timeout: Option<Duration>,
+    what: &str,
+    mut measure: impl FnMut(u64) -> Result<usize, E>,
+) -> Result<u64, E> {
+    let mut size = start;
+    let mut best_size = start;
+    let mut best_result = usize::MAX;
+
+    while size <= max {
+        debug!("Testing {what} size: {size}");
+        let start_time = Instant::now();
+        let result = measure(size)?;
+        let elapsed = start_time.elapsed();
+        debug!("Compressed size = {result}, best so far = {best_result}");
+
+        if result > best_result {
+            //Past the optimal point.
+            break;
+        }
+        best_size = size;
+        best_result = result;
+
+        if let Some(timeout) = timeout
+            && elapsed > timeout
+        {
+            warn!(
+                "Auto-tune for {what} size {size} took longer than \
+                 {timeout:?}. Stopping with the best result so far: \
+                 {best_size} bytes."
+            );
+            break;
+        }
+
+        let Some(next) = size.checked_mul(2) else { break };
+        size = next;
+    }
+
+    debug!("Optimal {what} size found to be {best_size} bytes.");
+    Ok(best_size)
+}
 
 
 pub fn auto_tune_dict<F, H>(
@@ -40,10 +100,6 @@ where
 {
     let timeout_dur = args.autotune_timeout.
         map(Duration::from_secs);
-
-    let mut current_dict_size: usize = 8192;
-    let mut best_dict_size = 8192;
-    let mut last_compressed_size = usize::MAX;
 
     let dictionary_bar = if args.progress {
         let bar = ProgressBar::new_spinner();
@@ -67,55 +123,27 @@ where
         None
     };
 
-    loop{
-        debug!("Testing dictionary size: {current_dict_size}");
-
-        let start_time = Instant::now();
-
-        let compressed_size = test_compression(
-            &ser_data.sorted_hashes,
-            chunk_sum,
-            args.threads.unwrap(),
-            current_dict_size,
-            args.compression_level as i32,
-            chunk_ret_cb.clone()
-        )?;
-
-        let elapsed = start_time.elapsed();
-
-        debug!("Compressed size = {compressed_size}");
-        debug!("Last compressed size = {last_compressed_size}");
-
-        if compressed_size > last_compressed_size {
-            //Process passed the optimal point, stop.
-            debug!("Optimal dictionary size found to be \
-                {best_dict_size} bytes."
-            );
-            break;
-        }
-
-        if let Some(timeout) = timeout_dur
-            && elapsed > timeout
-        {
-            warn!("Autotune for dicitonary size {current_dict_size}\
-                took too long (>{timeout:?}).Using best \
-                result so far: {best_dict_size}."
-            );
-        }
-
-        //This iteration was successful and an improvement
-        last_compressed_size = compressed_size;
-        best_dict_size = current_dict_size as u64;
-
-        //Double value for next loop
-        current_dict_size *= 2;
-
-        /*Accept reasonable upper limit for dictionary size.
-        This will stop it at an accepted value of 1024 * 1024*/
-        if current_dict_size > 1024 * 1024 {
-            break;
-        }
-    }
+    let best_dict_size = tune::<CliError>(
+        8192,
+        MAX_TUNED_DICTIONARY_SIZE,
+        timeout_dur,
+        "dictionary",
+        |dict_size| {
+            let dict_size = usize::try_from(dict_size).map_err(|err| {
+                CliError::InternalError(format!(
+                    "Dictionary size {dict_size} doesn't fit in memory: {err}"
+                ))
+            })?;
+            Ok(test_compression(
+                &ser_data.sorted_hashes,
+                chunk_sum,
+                args.threads.unwrap_or(0),
+                dict_size,
+                i32::from(args.compression_level),
+                chunk_ret_cb.clone()
+            )?)
+        },
+    )?;
 
     if let Some(bar) = &dictionary_bar {
         bar.finish_with_message("Optimal dictionary size found.");
@@ -141,11 +169,6 @@ where
     let timeout_dur = args.autotune_timeout.
         map(Duration::from_secs);
 
-    //Starting values
-    let mut current_window_size = 512;
-    let mut best_window_size = 512;
-    let mut last_compressed_size = usize::MAX;
-
     let window_bar = if args.progress {
         let bar = ProgressBar::new_spinner();
         bar.enable_steady_tick(Duration::from_millis(500));
@@ -168,80 +191,123 @@ where
         None
     };
 
-    loop {
-        debug!("Testing window size: {current_window_size}");
+    /*FastCDC panics on a window above `MAX_WINDOW_SIZE`, so tuning stops
+    there.*/
+    let best_window_size = tune::<CliError>(
+        512,
+        MAX_WINDOW_SIZE,
+        timeout_dur,
+        "window",
+        |window_size| {
+            let (file_data, temp_cache) = processor_fn(window_size)?;
 
-        /*Set starting time for determining the compressed size
-        using the current window size*/
-        let start_time = Instant::now();
+            /*Callback for getting one or more chunks from the temporary
+            cache*/
+            let chunk_ret_cb = Arc::new({
+                let cache_clone = Arc::clone(&temp_cache);
+                let running_clone = Arc::clone(running);
+                move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
+                    if !running_clone.load(Ordering::SeqCst) {
+                        return Err(CliError::Cancelled);
+                    }
 
-        let (file_data, temp_cache) = processor_fn(current_window_size)?;
-
-        /*Callback for getting one or more chunks from the temporary
-        cache*/
-        let chunk_ret_cb = Arc::new({
-            let cache_clone = Arc::clone(&temp_cache);
-            let running_clone = Arc::clone(running);
-            move |hashes: &[H]| -> Result<Vec<Vec<u8>>, CliError> {
-                if !running_clone.load(Ordering::SeqCst) {
-                    return Err(CliError::Cancelled);
+                    cache_clone.get_chunks(hashes)
                 }
+            });
 
-                cache_clone.get_chunks(hashes)
-            }
-        });
+            let serialized_data =
+                serialize_uncompressed_data(&file_data.file_manifest);
 
-        let serialized_data =
-            serialize_uncompressed_data(&file_data.file_manifest);
+            let total_data_size = temp_cache.get_tot_data_size();
 
-        let total_data_size = temp_cache.get_tot_data_size();
+            let get_chunk_data_for_test = {
+                let cb = Arc::clone(&chunk_ret_cb);
+                move |hashes: &[H]| cb(hashes)
+            };
 
-        let get_chunk_data_for_test = {
-            let cb = Arc::clone(&chunk_ret_cb);
-            move |hashes: &[H]| cb(hashes)
-        };
-
-        /*Compress the data and measure the size
-        (dictionary size + compressed data size)*/
-        let compressed_size = test_compression(
-            &serialized_data.sorted_hashes,
-            total_data_size,
-            args.threads.unwrap(),
-            8192,
-            args.compression_level as i32,
-            get_chunk_data_for_test,
-        )?;
-
-        /*Measure the time taken for determining the compressed size
-        for the current window size*/
-        let elapsed = start_time.elapsed();
-
-        debug!("Compressed size = {compressed_size}");
-        debug!("Last compressed size = {last_compressed_size}");
-
-        if compressed_size > last_compressed_size {
-            debug!("Optimal window size found to be \
-                {best_window_size} bytes.");
-            break;
-        }
-
-        if let Some(timeout) = timeout_dur
-            && elapsed > timeout
-        {
-            warn!("Autotune for window size {current_window_size}\
-                took too long (>{timeout:?}).Using best \
-                result so far: {best_window_size}."
-            );
-        }
-
-        last_compressed_size = compressed_size;
-        best_window_size = current_window_size;
-        current_window_size *= 2;
-    }
+            /*Compress the data and measure the size
+            (dictionary size + compressed data size)*/
+            Ok(test_compression(
+                &serialized_data.sorted_hashes,
+                total_data_size,
+                args.threads.unwrap_or(0),
+                8192,
+                i32::from(args.compression_level),
+                get_chunk_data_for_test,
+            )?)
+        },
+    )?;
 
     if let Some(bar) = &window_bar {
         bar.finish_with_message("Optimal window size found.");
     }
 
     Ok(best_window_size)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, thread};
+
+    use super::*;
+
+    /// Runs `tune` from 512 with `results` as the measurements, in order,
+    /// and returns the best size and the sizes that were measured.
+    fn run_tune(
+        max: u64,
+        timeout: Option<Duration>,
+        delay: Duration,
+        results: &[usize],
+    ) -> (u64, Vec<u64>) {
+        let measured = RefCell::new(Vec::new());
+        let best = tune(512, max, timeout, "test", |size| {
+            thread::sleep(delay);
+            let mut measured = measured.borrow_mut();
+            measured.push(size);
+            Ok::<_, CliError>(results[measured.len() - 1])
+        })
+        .unwrap();
+        (best, measured.into_inner())
+    }
+
+    #[test]
+    fn tuning_stops_at_the_first_worse_result() {
+        let (best, measured) =
+            run_tune(1 << 20, None, Duration::ZERO, &[100, 90, 95, 10]);
+        assert_eq!(best, 1024);
+        assert_eq!(measured, [512, 1024, 2048]);
+    }
+
+    #[test]
+    fn tuning_never_passes_the_maximum() {
+        let (best, measured) =
+            run_tune(4096, None, Duration::ZERO, &[40, 30, 20, 10, 0]);
+        assert_eq!(best, 4096);
+        assert_eq!(measured, [512, 1024, 2048, 4096]);
+
+        // A maximum between two steps stops at the step below it.
+        let (best, measured) = run_tune(1000, None, Duration::ZERO, &[40, 30]);
+        assert_eq!(best, 512);
+        assert_eq!(measured, [512]);
+    }
+
+    #[test]
+    fn tuning_stops_after_a_slow_measurement_and_keeps_its_result() {
+        let (best, measured) = run_tune(
+            1 << 20,
+            Some(Duration::from_millis(1)),
+            Duration::from_millis(5),
+            &[40, 30],
+        );
+        assert_eq!(best, 512);
+        assert_eq!(measured, [512]);
+    }
+
+    #[test]
+    fn a_measurement_error_stops_tuning() {
+        let result = tune(512, 1 << 20, None, "test", |_| {
+            Err::<usize, _>(CliError::Cancelled)
+        });
+        assert!(matches!(result, Err(CliError::Cancelled)));
+    }
 }

@@ -471,3 +471,34 @@ fn a_window_size_outside_the_chunker_range_is_rejected() {
     ]);
     assert!(out_dir.join("a.bin").exists());
 }
+
+#[test]
+fn an_auto_tuned_archive_extracts_the_original_files() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = tmp.path().join("input");
+    let archive = tmp.path().join("roms.ssmc");
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+    let files = rom_set();
+    for (name, data) in &files {
+        fs::write(input_dir.join(name), data).unwrap();
+    }
+
+    run_cli(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+        "--auto-tune",
+    ]);
+
+    let range = format!("1-{}", files.len());
+    run_cli(&[
+        "-i", archive.to_str().unwrap(),
+        "-o", out_dir.to_str().unwrap(),
+        "-e", &range,
+    ]);
+    for (name, data) in &files {
+        let extracted = fs::read(out_dir.join(name)).unwrap();
+        assert_bytes_eq(&extracted, data, name);
+    }
+}
