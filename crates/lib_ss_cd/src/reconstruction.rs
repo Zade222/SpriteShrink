@@ -197,8 +197,9 @@ impl<'a> MsfOffsets<'a> {
     /// sector order. A corrupt offset saturates instead of overflowing; the
     /// wrong header it gives fails the integrity check.
     pub(crate) fn sector_num(&mut self, sector_idx: u32) -> u32 {
-        while let Some(&(threshold, offset)) = self.lba_map.get(self.index + 1)
-            && self.offset.saturating_add(sector_idx) >= threshold
+        // Entries start at a sector index, not at a frame number.
+        while let Some(&(start, offset)) = self.lba_map.get(self.index + 1)
+            && sector_idx >= start
         {
             self.index += 1;
             self.offset = offset;
@@ -1610,6 +1611,26 @@ mod tests {
         assert_eq!(offsets.sector_num(0), LEAD_IN_FRAMES);
         assert_eq!(offsets.sector_num(500), 500 + LEAD_IN_FRAMES);
         assert_eq!(offsets.sector_num(u32::MAX), u32::MAX);
+    }
+
+    #[test]
+    fn msf_offsets_switch_at_the_sector_an_entry_starts() {
+        let jump = LEAD_IN_FRAMES + 10_000;
+        let map = [(0, LEAD_IN_FRAMES), (400, jump)];
+        let mut offsets = MsfOffsets::new(&map);
+        assert_eq!(offsets.sector_num(0), LEAD_IN_FRAMES);
+        assert_eq!(offsets.sector_num(399), 399 + LEAD_IN_FRAMES);
+        assert_eq!(offsets.sector_num(400), 400 + jump);
+        assert_eq!(offsets.sector_num(401), 401 + jump);
+    }
+
+    #[test]
+    fn msf_offsets_pass_entries_a_jump_skips() {
+        // A random read starts a fresh walk, which may cross several
+        // entries at once.
+        let map = [(0, 150), (100, 1_000), (200, 2_000), (300, 3_000)];
+        assert_eq!(MsfOffsets::new(&map).sector_num(250), 2_250);
+        assert_eq!(MsfOffsets::new(&map).sector_num(300), 3_300);
     }
 
     /// The fetch callback `verify_disc_integrity` takes: returns `blocks`

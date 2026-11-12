@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use sprite_shrink_cd::{SectorType, rebuild_sector_simd};
 use sprite_shrink_test_support::{assert_bytes_eq, rom_set, tiled_bytes};
 use tempfile::TempDir;
 
@@ -407,6 +408,51 @@ fn write_blank_disc(dir: &Path, title: &str, sectors: usize) -> Vec<u8> {
     )
     .unwrap();
     image
+}
+
+#[test]
+fn a_disc_whose_header_numbers_jump_is_archived_and_extracted() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = tmp.path().join("input");
+    let out_dir = tmp.path().join("extract");
+    let archive = tmp.path().join("jump.ssmd");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // Mode 2 Form 1 sectors numbered from 150, jumping 10,000 forward at
+    // sector 400, as at a GD-ROM's gap between its two areas.
+    let subheader = [1, 0, 0x08, 0, 1, 0, 0x08, 0];
+    let image: Vec<u8> = (0..600_u32)
+        .flat_map(|i| {
+            let number = i + 150 + if i < 400 { 0 } else { 10_000 };
+            let user_data = tiled_bytes(u64::from(number), 2048);
+            rebuild_sector_simd(
+                &user_data,
+                &subheader,
+                SectorType::Mode2Form1,
+                number,
+                None,
+            )
+            .unwrap()
+        })
+        .collect();
+    fs::write(input_dir.join("disc.bin"), &image).unwrap();
+    fs::write(
+        input_dir.join("disc.cue"),
+        "FILE \"disc.bin\" BINARY\n\
+         \x20 TRACK 01 MODE2/2352\n\
+         \x20   INDEX 01 00:00:00\n",
+    )
+    .unwrap();
+
+    run_cli(&[
+        "--mode", "optical",
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    extract_first(&archive, &out_dir);
+    let extracted = fs::read(out_dir.join("disc.bin")).unwrap();
+    assert_bytes_eq(&extracted, &image, "disc.bin");
 }
 
 #[test]

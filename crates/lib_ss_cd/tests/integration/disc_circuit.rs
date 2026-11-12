@@ -67,8 +67,17 @@ fn data_sector(
     sector_type: SectorType,
     metadata: [u8; 8],
 ) -> [u8; SECTOR] {
-    let user_data = payload(usize::from(sector_type.data_size()), number(index));
-    rebuild_sector_simd(&user_data, &metadata, sector_type, number(index), None)
+    numbered_sector(number(index), sector_type, metadata)
+}
+
+/// A data sector whose header holds `sector_number`.
+fn numbered_sector(
+    sector_number: u32,
+    sector_type: SectorType,
+    metadata: [u8; 8],
+) -> [u8; SECTOR] {
+    let user_data = payload(usize::from(sector_type.data_size()), sector_number);
+    rebuild_sector_simd(&user_data, &metadata, sector_type, sector_number, None)
         .unwrap()
 }
 
@@ -648,4 +657,37 @@ fn a_damaged_mode1_pregap_sector_reads_back() {
     let disc = archive(bin, MODE1_PREGAP_CUE);
     assert_eq!(disc.manifest.disc_exception_index.len(), 1);
     assert_reads_back(&disc);
+}
+
+const ONE_TRACK_MODE2_CUE: &str = r#"FILE "disc.bin" BINARY
+  TRACK 01 MODE2/2352
+    INDEX 01 00:00:00
+"#;
+
+/// Where the header numbers jump in `jumping_disc`, and by how much.
+const JUMP_AT: usize = 400;
+const JUMP_BY: u32 = 10_000;
+
+/// Form 1 sectors whose header numbers jump forward by `JUMP_BY` at sector
+/// `JUMP_AT`, as at a GD-ROM's gap between its two areas.
+fn jumping_disc() -> Vec<u8> {
+    image(600, |i| {
+        let jump = if i < JUMP_AT { 0 } else { JUMP_BY };
+        numbered_sector(number(i) + jump, SectorType::Mode2Form1, FORM1_SUBHEADER)
+    })
+}
+
+#[test]
+fn header_numbers_that_jump_mid_disc_are_mapped_where_they_jump() {
+    let disc = archive(jumping_disc(), ONE_TRACK_MODE2_CUE);
+    assert_eq!(
+        disc.manifest.lba_map,
+        [(0, LEAD_IN), (u32::try_from(JUMP_AT).unwrap(), LEAD_IN + JUMP_BY)]
+    );
+    assert_eq!(disc.manifest.disc_exception_index, []);
+}
+
+#[test]
+fn a_disc_whose_header_numbers_jump_reads_back() {
+    assert_reads_back(&archive(jumping_disc(), ONE_TRACK_MODE2_CUE));
 }
