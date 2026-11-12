@@ -9,6 +9,7 @@ use crate::{
         sector_ecc_check_bitwise, sector_edc_check
     },
     lib_structs::{
+        MAX_DISC_SECTORS,
         CueAnalysisResult, CueSheet, SectorAnalysis,
         SectorType
     },
@@ -25,7 +26,10 @@ pub enum AnalysisError {
     #[error("Failed to get size for file '{0}': {1}")]
     FileSizeError(String, #[source] std::io::Error),
     #[error("{0} is a malformed bin file. Not a multiple of 2352 bytes.")]
-    MalformedBin(String)
+    MalformedBin(String),
+    #[error("The disc's files hold {0} or more sectors, more than the \
+        {max} a CD or GD-ROM can hold.", max = MAX_DISC_SECTORS)]
+    TooManySectors(u64),
 }
 
 pub const SYNC_PATTERN: [u8; 12] = [
@@ -222,7 +226,9 @@ where
             let data_file_path = cue_dir.join(&file_entry.name);
 
             let size = size_resolver(&data_file_path)?;
-            total_data_size += size;
+            /*Only used to decide whether the input fits in memory, which a
+            total past u64::MAX doesn't.*/
+            total_data_size = total_data_size.saturating_add(size);
         }
 
         parsed_sheets.push(sheet);
@@ -240,12 +246,25 @@ pub fn resolve_file_sector_counts(
     provider: &impl FileSizeProvider,
 ) -> Result<Vec<u32>, SpriteShrinkCDError> {
     let mut sector_counts = Vec::with_capacity(cue_sheet.files.len());
+    let mut total_sectors = 0_u64;
 
     for file in &cue_sheet.files {
         match provider.get_file_size_bytes(&file.name) {
             Ok(size_in_bytes) => {
                 if size_in_bytes % 2352 == 0 {
-                    let sectors = (size_in_bytes / 2352) as u32;
+                    let sectors = size_in_bytes / 2352;
+                    total_sectors = total_sectors.saturating_add(sectors);
+                    if total_sectors > MAX_DISC_SECTORS {
+                        return Err(
+                            AnalysisError::TooManySectors(total_sectors).into()
+                        );
+                    }
+                    /*The cap is far below u32::MAX, so this always fits.*/
+                    let Ok(sectors) = u32::try_from(sectors) else {
+                        return Err(
+                            AnalysisError::TooManySectors(total_sectors).into()
+                        );
+                    };
                     sector_counts.push(sectors);
                 } else {
                     return Err(AnalysisError::MalformedBin(file.name.clone())
@@ -262,4 +281,46 @@ pub fn resolve_file_sector_counts(
         }
     }
     Ok(sector_counts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every file is `sectors` sectors long.
+    struct Sectors(u64);
+
+    impl FileSizeProvider for Sectors {
+        fn get_file_size_bytes(&self, _: &str) -> Result<u64, io::Error> {
+            Ok(self.0 * 2352)
+        }
+    }
+
+    #[test]
+    fn a_disc_past_the_sector_cap_is_rejected_across_its_files() {
+        let sheet = parse_cue(
+            "disc",
+            "FILE \"a.bin\" BINARY\n  TRACK 01 MODE2/2352\n    INDEX 01 00:00:00\n\
+             FILE \"b.bin\" BINARY\n  TRACK 02 AUDIO\n    INDEX 01 00:00:00\n",
+        )
+        .unwrap();
+
+        // Two files of half the cap each: exactly at the cap.
+        let half = MAX_DISC_SECTORS / 2;
+        assert_eq!(
+            resolve_file_sector_counts(&sheet, &Sectors(half)).unwrap(),
+            [u32::try_from(half).unwrap(); 2]
+        );
+
+        let result = resolve_file_sector_counts(&sheet, &Sectors(half + 1));
+        assert!(
+            matches!(
+                result,
+                Err(SpriteShrinkCDError::Analysis(
+                    AnalysisError::TooManySectors(_)
+                ))
+            ),
+            "{result:?}"
+        );
+    }
 }

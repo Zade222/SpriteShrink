@@ -11,7 +11,7 @@ use thiserror::Error;
 use crate::{
     lib_error_handling::SpriteShrinkCDError,
     lib_structs::{
-        SSMD_UID,
+        MAX_DISC_SECTORS, SSMD_UID,
         ContentBlock, DataChunkLayout, DiscManifest, ParsedSSMD,
         RleSectorMap, SSMDFormatData, SSMDIndices, SSMDTocEntry,
         SubHeaderEntry
@@ -31,6 +31,10 @@ pub enum DecodeError {
 
     #[error("File header is malformed. {0}")]
     InvalidHeader(String),
+
+    #[error("Disc {disc} lists {sectors} sectors, more than the {max} a CD \
+        or GD-ROM can hold.", max = MAX_DISC_SECTORS)]
+    TooManySectors { disc: usize, sectors: u64 },
 
     //#[error("Failed to decode file manifest: {0}")]
     //ManifestDecodeError(String),
@@ -102,8 +106,9 @@ pub fn decode_ssmd_format_data(
 ///
 /// Returns an error if the header is invalid or isn't for an SSMD
 /// archive, a section lies outside `prefix`, a section fails to decode,
-/// the subheader table's length isn't a multiple of 8, or a chunk's
-/// absolute offset doesn't fit in a `u64`.
+/// a disc lists more than `MAX_DISC_SECTORS` sectors, the subheader
+/// table's length isn't a multiple of 8, or a chunk's absolute offset
+/// doesn't fit in a `u64`.
 pub fn parse_ssmd_prefix<H>(
     prefix: &[u8]
 ) -> Result<ParsedSSMD<H>, SpriteShrinkCDError>
@@ -144,6 +149,18 @@ where
         format_data.enc_disc_manifest.bytes_in(prefix, "disc manifest")?,
         header.file_version
     )?;
+    /*Readers size their sector maps from this total, so a damaged manifest
+    could otherwise ask for gigabytes.*/
+    for (index, manifest) in disc_manifests.iter().enumerate() {
+        let sectors = manifest.rle_sector_map.runs.iter()
+            .fold(0_u64, |total, &(count, _)| total.saturating_add(count.into()));
+        if sectors > MAX_DISC_SECTORS {
+            return Err(DecodeError::TooManySectors {
+                disc: index + 1,
+                sectors,
+            }.into());
+        }
+    }
 
     let data_dictionary = format_data.data_dictionary
         .bytes_in(prefix, "dictionary")?

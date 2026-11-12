@@ -33,7 +33,7 @@ pub use lib_error_handling::SpriteShrinkCDError;
 
 mod lib_structs;
 pub use lib_structs::{
-    SSMD_UID,
+    MAX_DISC_SECTORS, SSMD_UID,
     CueSheet, ContentBlock, DataChunkLayout, DiscFile, DiscIndex,
     DiscManifest, DiscTrack, TrackType,
     ExceptionInfo, ExceptionRegistry, ExceptionType, DiscReconstructor,

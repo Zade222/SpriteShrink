@@ -35,6 +35,11 @@ use zerocopy::{Immutable, IntoBytes, FromBytes};
 
 pub const SSMD_UID: u16 = 0xd541;
 
+/// The most sectors a disc can have: a GD-ROM's 549,150, which is more than
+/// a 99-minute CD's 450,000. Archiving rejects a larger disc, and reading
+/// rejects a manifest that claims more, before anything is sized from it.
+pub const MAX_DISC_SECTORS: u64 = 549_150;
+
 
 #[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
 pub struct ContentBlock<H> {

@@ -9,7 +9,7 @@ use sprite_shrink::{
     parse_file_header,
 };
 use sprite_shrink_cd::{
-    SSMD_UID, 
+    MAX_DISC_SECTORS, SSMD_UID,
     ContentBlock, DataChunkLayout, DiscFile, DiscIndex, DiscManifest,
     DiscTrack, RleSectorMap, SSMDFormatData, SSMDPrefix, SSMDTocEntry,
     SectorType, SpriteShrinkCDError, SubHeaderEntry, TrackType,
@@ -360,6 +360,27 @@ fn parse_ssmd_prefix_without_audio_has_empty_audio_index() {
     assert!(parsed.indices.audio_block_index.is_empty());
     assert_eq!(parsed.indices.chunk_index.len(), 2);
     assert_eq!(parsed.subheader_table, inputs.subheader_table);
+}
+
+#[test]
+fn a_disc_past_the_sector_cap_is_rejected_before_its_maps_are_built() {
+    let mut inputs = inputs_with_audio([1_u64, 2, 3]);
+    let cap = u32::try_from(MAX_DISC_SECTORS).unwrap();
+    // The second disc, so the error must name it.
+    inputs.disc_manifests[1].rle_sector_map.runs =
+        vec![(cap, SectorType::Mode2Form1)];
+    let prefix = build_ssmd_prefix(&inputs.parts(HASH_TYPE_XXH3_64)).unwrap();
+    parse_ssmd_prefix::<u64>(&prefix).unwrap();
+
+    inputs.disc_manifests[1].rle_sector_map.runs.push((1, SectorType::Audio));
+    let prefix = build_ssmd_prefix(&inputs.parts(HASH_TYPE_XXH3_64)).unwrap();
+    let Err(e) = parse_ssmd_prefix::<u64>(&prefix) else {
+        panic!("a disc of {} sectors was accepted", MAX_DISC_SECTORS + 1);
+    };
+    assert!(
+        e.to_string().contains(&format!("Disc 2 lists {}", MAX_DISC_SECTORS + 1)),
+        "{e}"
+    );
 }
 
 // A host may read more than the prefix, up to the whole archive.
