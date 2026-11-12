@@ -35,87 +35,14 @@ use crate::{
     error_handling::CliError
 };
 
-/// A string literal representing the default, commented configuration file.
+/// The default, commented configuration file, from `default_config.toml`
+/// next to this file.
 ///
-/// This constant holds the content that is written to `spriteshrink.toml`
-/// when the application is run for the first time and no existing
-/// configuration is found.
-///
-/// Its primary purpose is to provide a user-friendly template, with each
-/// option explained, so that users can easily understand and customize their
-/// settings.
-const DEFAULT_CONFIG_WITH_COMMENTS:
-&str = r#"# Sets the numerical compression level.
-# Default = 19
-compression_level = 19
-
-# Sets the hashing algorithm window size (e.g., "2KB", "4KB").
-# Default = "2kb"
-window_size = "2kb"
-
-# Sets the zstd compression algorithm dictionary size.
-# Default = "16kb"
-dictionary_size = "16kb"
-
-# Sets the hashing algorithm bit length.
-# Default = 64
-hash_bit_length = 64
-
-# Enable (true) or disable (false) whether to auto tune the window and/or
-# dictionary size.
-# Default = false
-auto_tune = false
-
-# Sets the maximum time for each auto tune iteration to take. If exceeded take
-# the latest result.
-# Default = 15 seconds
-autotune_timeout = 15
-
-# Enable (true) or disable (false) whether to optimze the ztd compression
-# dictionary when it is generated. Be sure to disable when processing large
-# amounts of data (e.g. If a single ROM exceeds approximately 64 megabytes,
-# set to false) as this step can take a significant amount of time for neglible
-# gain for large amounts of data.
-# Default = false
-optimize_dictionary = false
-
-# Sets the maximum number of worker threads to use.
-# 0 means use all available cores.
-threads = 0
-
-# Enable (true) or disable (false) low memory mode. Forces the use of a
-# temporary cache instead of processing all files in memory even if the
-# application determines there is enough memory to do so.
-# Default = false
-low_memory = false
-
-# Enable (true) or disable (false) printing the --list output in json
-# format, as the --metadata flag does.
-# Default = false
-json_output = false
-
-# Whether to print anything to console. True will disable printing to console
-# and false will enable.
-# Default = false
-quiet_output = false
-
-# Specifies the amount of days the application will retain log files. Any log
-# file found to be older than the retention period, upon the application being
-# run, will be removed. A value of 0 will keep logs forever.
-# Default = 7
-log_retention_days = 7
-
-# Sets the log file verbosity level when enabled.
-# - error will only log errors.
-# - warning includes warning messages and the above messages (errors)
-# - info includes info messages and the above messages (errrors and warnings)
-# - debug includes debug messages and the above messages
-#   (errrors, warnings and info)
-# - off disables the creation of a log file and won't write any messages to one
-#   if one exists
-# Default = "error"
-log_level = "error"
-"#;
+/// It is written to the config path when the application runs for the
+/// first time and no configuration exists, so each option is explained
+/// for users to customize. Its values must match
+/// `SpriteShrinkConfig::default()`.
+const DEFAULT_CONFIG_WITH_COMMENTS: &str = include_str!("default_config.toml");
 
 /// Why `files_from_dirs` skips a directory entry of type `file_type`, for
 /// the warning it logs. `None` for a regular file, which isn't skipped.
@@ -762,6 +689,29 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn the_default_config_file_holds_the_default_config() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("config.toml");
+        fs::write(&path, DEFAULT_CONFIG_WITH_COMMENTS).unwrap();
+        let loaded: SpriteShrinkConfig = confy::load_path(&path).unwrap();
+
+        // The config has no `PartialEq`, so compare it as JSON.
+        let defaults =
+            serde_json::to_value(SpriteShrinkConfig::default()).unwrap();
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), defaults);
+
+        /*Missing keys load as their defaults, so the comparison above can't
+        catch one the file leaves out.*/
+        for key in defaults.as_object().unwrap().keys() {
+            let line = format!("\n{key} = ");
+            assert!(
+                DEFAULT_CONFIG_WITH_COMMENTS.contains(&line),
+                "the default config file has no {key}"
+            );
+        }
+    }
 
     /// A folder holding `a.bin`, `b.bin` and a subfolder with `c.bin`.
     fn input_folder() -> TempDir {
