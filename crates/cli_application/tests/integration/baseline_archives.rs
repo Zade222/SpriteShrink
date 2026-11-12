@@ -161,16 +161,13 @@ fn optical_mode_archive_matches_baseline() {
     fs::create_dir_all(&out_dir).unwrap();
 
     let image = disc_image();
+    let cue = "FILE \"disc.bin\" BINARY\n\
+               \x20 TRACK 01 MODE2/2352\n\
+               \x20   INDEX 01 00:00:00\n\
+               \x20 TRACK 02 AUDIO\n\
+               \x20   INDEX 01 00:04:00\n";
     fs::write(input_dir.join("disc.bin"), &image).unwrap();
-    fs::write(
-        input_dir.join("disc.cue"),
-        "FILE \"disc.bin\" BINARY\n\
-         \x20 TRACK 01 MODE2/2352\n\
-         \x20   INDEX 01 00:00:00\n\
-         \x20 TRACK 02 AUDIO\n\
-         \x20   INDEX 01 00:04:00\n",
-    )
-    .unwrap();
+    fs::write(input_dir.join("disc.cue"), cue).unwrap();
 
     let archive = tmp.path().join("disc.ssmd");
     run_cli(&[
@@ -188,4 +185,5 @@ fn optical_mode_archive_matches_baseline() {
     ]);
     let extracted = fs::read(out_dir.join("disc.bin")).unwrap();
     assert_bytes_eq(&extracted, &image, "disc.bin");
+    assert_eq!(fs::read_to_string(out_dir.join("disc.cue")).unwrap(), cue);
 }

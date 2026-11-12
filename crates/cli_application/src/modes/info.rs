@@ -110,7 +110,7 @@ fn dispatch_print_info(
             )?;
 
             if metadata {
-                println!("Not yet implemented.")
+                ssmd_print_info_json(&toc)?;
             } else {
                 ssmd_print_info_table(toc);
             }
@@ -205,11 +205,8 @@ fn ssmd_print_info_table(
 
     ssmd_toc.iter().enumerate().for_each(|(index, toc_entry)|{
         let file_size = toc_entry.uncompressed_size;
-        let collection_id = if toc_entry.collection_id == 255 {
-            "-".to_string()
-        } else {
-            (toc_entry.collection_id + 1).to_string()
-        };
+        let collection_id = ssmd_group(toc_entry.collection_id)
+            .map_or_else(|| "-".to_string(), |group| group.to_string());
 
         println!("{}\t| {}\t| {} | {}",
             index + 1,
@@ -218,4 +215,44 @@ fn ssmd_print_info_table(
             toc_entry.filename
         );
     });
+}
+
+/// The 1-based group number of a disc in a collection, or `None` for a disc
+/// in no collection, which the TOC marks with 255.
+fn ssmd_group(collection_id: u8) -> Option<u16> {
+    (collection_id != 255).then(|| u16::from(collection_id) + 1)
+}
+
+/// Prints the discs in an ssmd archive as JSON: the same keys as for an ssmc
+/// archive, plus `group`, which is `null` for a disc in no collection.
+fn ssmd_print_info_json(ssmd_toc: &[SSMDTocEntry]) -> Result<(), CliError> {
+    let discs: Vec<Value> = ssmd_toc
+        .iter()
+        .enumerate()
+        .map(|(index, toc_entry)| {
+            json!({
+                "index": index + 1,
+                "filename": &toc_entry.filename,
+                "group": ssmd_group(toc_entry.collection_id),
+                "size(bytes)": toc_entry.uncompressed_size
+            })
+        })
+        .collect();
+
+    let pretty_json = to_string_pretty(&discs)
+        .map_err(|e| CliError::InternalError(e.to_string()))?;
+    println!("{pretty_json}");
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_disc_in_no_collection_has_no_group() {
+        assert_eq!(ssmd_group(255), None);
+        assert_eq!(ssmd_group(0), Some(1));
+        assert_eq!(ssmd_group(254), Some(255));
+    }
 }

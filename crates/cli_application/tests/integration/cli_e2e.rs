@@ -10,7 +10,7 @@ use sprite_shrink_cd::{SectorType, rebuild_sector_simd};
 use sprite_shrink_test_support::{assert_bytes_eq, rom_set, tiled_bytes};
 use tempfile::TempDir;
 
-use crate::common::{cli_output, reported_error, run_cli};
+use crate::common::{cli_command, cli_output, reported_error, run_cli};
 
 /// Part of the note the CLI prints when it builds an archive without a
 /// compression dictionary.
@@ -111,6 +111,101 @@ fn rom_set_is_archived_with_a_dictionary() {
     assert!(!stdout.contains(NO_DICTIONARY_NOTE), "stdout:\n{stdout}");
 }
 
+/// Compresses the shared ROM set from a folder in `dir`, and returns the
+/// archive and the files in the order the archive lists them, by name.
+fn archived_rom_set(dir: &Path) -> (PathBuf, Vec<(String, Vec<u8>)>) {
+    let input_dir = dir.join("input");
+    let archive = dir.join("roms.ssmc");
+    fs::create_dir_all(&input_dir).unwrap();
+    let mut files = rom_set();
+    for (name, data) in &files {
+        fs::write(input_dir.join(name), data).unwrap();
+    }
+    run_cli(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    (archive, files)
+}
+
+#[test]
+fn the_list_shows_each_file_with_its_size() {
+    let tmp = TempDir::new().unwrap();
+    let (archive, files) = archived_rom_set(tmp.path());
+
+    let stdout = stdout_of(&["-i", archive.to_str().unwrap(), "-l"]);
+    let rows: Vec<&str> = stdout.lines().skip(2).collect();
+    let expected: Vec<String> = files
+        .iter()
+        .enumerate()
+        .map(|(index, (name, data))| {
+            #[expect(
+                clippy::cast_precision_loss,
+                reason = "the CLI formats sizes from an f64 the same way"
+            )]
+            let size = human_bytes::human_bytes(data.len() as f64);
+            format!("{}\t| {size}\t| {name}", index + 1)
+        })
+        .collect();
+    assert_eq!(rows, expected, "stdout:\n{stdout}");
+}
+
+#[test]
+fn metadata_lists_each_file_as_json() {
+    let tmp = TempDir::new().unwrap();
+    let (archive, files) = archived_rom_set(tmp.path());
+
+    let stdout = stdout_of(&["-i", archive.to_str().unwrap(), "-m"]);
+    let listed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let expected: Vec<serde_json::Value> = files
+        .iter()
+        .enumerate()
+        .map(|(index, (name, data))| {
+            serde_json::json!({
+                "index": index + 1,
+                "filename": name,
+                "size(bytes)": data.len(),
+            })
+        })
+        .collect();
+    assert_eq!(listed, serde_json::Value::from(expected));
+}
+
+#[test]
+fn metadata_lists_each_disc_as_json() {
+    let tmp = TempDir::new().unwrap();
+    let archive = tmp.path().join("discs.ssmd");
+    let one = write_blank_disc(&tmp.path().join("first"), "one", 300);
+    let two = write_blank_disc(&tmp.path().join("second"), "two", 320);
+    run_cli(&[
+        "--mode", "optical",
+        "-i", tmp.path().join("first").to_str().unwrap(),
+        "-i", tmp.path().join("second").to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+
+    let stdout = stdout_of(&["-i", archive.to_str().unwrap(), "-m"]);
+    let listed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        listed,
+        serde_json::json!([
+            {
+                "index": 1,
+                "filename": "one.bin",
+                "group": null,
+                "size(bytes)": one.len(),
+            },
+            {
+                "index": 2,
+                "filename": "two.bin",
+                "group": null,
+                "size(bytes)": two.len(),
+            },
+        ])
+    );
+}
+
 /// Copies the committed v2 SSMC fixture into `dir` with the byte at
 /// `offset` set to `value`, and returns the copy's path.
 fn patched_fixture(dir: &Path, offset: usize, value: u8) -> PathBuf {
@@ -199,7 +294,7 @@ fn a_damaged_chunk_stops_extraction() {
 /// these variables.
 #[cfg(target_os = "linux")]
 fn output_with_config_in(home: &Path, args: &[&str]) -> std::process::Output {
-    std::process::Command::new(env!("CARGO_BIN_EXE_sprite-shrink"))
+    cli_command()
         .env("XDG_CONFIG_HOME", home.join("config"))
         .env("XDG_CACHE_HOME", home.join("cache"))
         .env("XDG_DATA_HOME", home.join("data"))
@@ -515,6 +610,35 @@ fn a_disc_whose_header_numbers_jump_is_archived_and_extracted() {
     extract_first(&archive, &out_dir);
     let extracted = fs::read(out_dir.join("disc.bin")).unwrap();
     assert_bytes_eq(&extracted, &image, "disc.bin");
+}
+
+#[test]
+fn an_audio_only_disc_is_archived_and_extracted() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = tmp.path().join("input");
+    let out_dir = tmp.path().join("extract");
+    let archive = tmp.path().join("audio.ssmd");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+
+    // Two seconds of PCM, with no data sector to read a header from.
+    let image = tiled_bytes(0xA0D1_0001, 150 * 2352);
+    let cue = "FILE \"disc.bin\" BINARY\n\
+               \x20 TRACK 01 AUDIO\n\
+               \x20   INDEX 01 00:00:00\n";
+    fs::write(input_dir.join("disc.bin"), &image).unwrap();
+    fs::write(input_dir.join("disc.cue"), cue).unwrap();
+
+    run_cli(&[
+        "--mode", "optical",
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    extract_first(&archive, &out_dir);
+
+    let extracted = fs::read(out_dir.join("disc.bin")).unwrap();
+    assert_bytes_eq(&extracted, &image, "disc.bin");
+    assert_eq!(fs::read_to_string(out_dir.join("disc.cue")).unwrap(), cue);
 }
 
 #[test]
