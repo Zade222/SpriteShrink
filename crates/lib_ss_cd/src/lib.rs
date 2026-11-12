@@ -2,6 +2,9 @@ mod analyze;
 pub use analyze::{
     FileSizeProvider, analyze_cue_sheets, resolve_file_sector_counts
 };
+/// Only for fuzz targets, which `cargo fuzz` builds with `--cfg fuzzing`.
+#[cfg(fuzzing)]
+pub use analyze::analyze_data_sector;
 
 mod cue_gen;
 pub use cue_gen::{

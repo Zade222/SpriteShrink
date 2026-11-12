@@ -1,0 +1,60 @@
+[package]
+name = "sprite_shrink_fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Its own workspace, so the main workspace's builds and lints never include
+# the fuzz targets, which need nightly and libFuzzer.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sprite_shrink = { path = "../crates/lib_sprite_shrink" }
+sprite_shrink_cd = { path = "../crates/lib_ss_cd" }
+tempfile = { version = "~3.27", default-features = false }
+
+[[bin]]
+name = "ssmc_prefix"
+path = "fuzz_targets/ssmc_prefix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssmc_read"
+path = "fuzz_targets/ssmc_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssmd_prefix"
+path = "fuzz_targets/ssmd_prefix.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "ssmd_read"
+path = "fuzz_targets/ssmd_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cue_sheet"
+path = "fuzz_targets/cue_sheet.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "data_sector"
+path = "fuzz_targets/data_sector.rs"
+test = false
+doc = false
+bench = false
