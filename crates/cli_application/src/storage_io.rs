@@ -728,6 +728,26 @@ mod tests {
     }
 
     #[test]
+    fn input_paths_are_split_into_files_and_folders_in_order() {
+        let tmp = input_folder();
+        let at = |name: &str| tmp.path().join(name);
+
+        let (files, folders) = organize_paths(&[
+            at("b.bin"),
+            at("nested"),
+            at("missing.bin"),
+            at("a.bin"),
+            tmp.path().to_path_buf(),
+        ])
+        .unwrap();
+
+        // `validate_args` has already rejected a missing path, so one here
+        // is dropped.
+        assert_eq!(files, [at("b.bin"), at("a.bin")]);
+        assert_eq!(folders, [at("nested"), tmp.path().to_path_buf()]);
+    }
+
+    #[test]
     fn only_top_level_regular_files_are_collected() {
         let tmp = input_folder();
 
