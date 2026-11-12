@@ -89,8 +89,8 @@ threads = 0
 # Default = false
 low_memory = false
 
-# Enable (true) or disable (false) whether to print metadata info in
-# json format.
+# Enable (true) or disable (false) printing the --list output in json
+# format, as the --metadata flag does.
 # Default = false
 json_output = false
 

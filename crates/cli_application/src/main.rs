@@ -131,7 +131,7 @@ fn run(
 
             debug!("Mode: Extract");
             run_extraction(
-                &file_paths[0],
+                file_path,
                 output_path,
                 &indices,
                 args,
@@ -140,12 +140,12 @@ fn run(
         }
 
         (None, true) =>{
-            match file_paths.len() {
-                1 => {
+            match file_paths.as_slice() {
+                [file_path] => {
                     debug!("Mode: Info");
-                    run_info(&file_paths[0], args.metadata)?
+                    run_info(file_path, args.metadata || args.json_output)?;
                 },
-                0 => return Err(CliError::NoFilesFound()),
+                [] => return Err(CliError::NoFilesFound()),
                 _ => {
                     if !dir_paths.is_empty() {
                         return Err(CliError::DirectoryNotSupported(

@@ -11,7 +11,7 @@ use std::{
 };
 
 use bytesize::ByteSize;
-use clap::{ArgMatches, Parser};
+use clap::{ArgMatches, Parser, parser::ValueSource};
 use sprite_shrink::{MAX_WINDOW_SIZE, MIN_WINDOW_SIZE};
 
 
@@ -242,6 +242,20 @@ pub struct Args {
         help = "Disables logging messages to log file."
     )]
     pub disable_logging: bool,
+
+    /// Whether `--list` prints JSON, from the config's `json_output`. It has
+    /// no flag; `-m` prints JSON for a single run.
+    #[arg(skip)]
+    pub json_output: bool,
+}
+
+/// Whether the user typed the argument `name` on the command line.
+///
+/// `ArgMatches::contains_id` can't tell: it is also true for an argument
+/// that only has its default value, and every `bool` flag has the default
+/// `false`.
+fn given_on_command_line(matches: &ArgMatches, name: &str) -> bool {
+    matches.value_source(name) == Some(ValueSource::CommandLine)
 }
 
 /// Validates the command-line arguments provided by the user.
@@ -267,22 +281,26 @@ pub struct Args {
 /// # Errors
 ///
 /// Returns an error in the following cases:
-/// - Using `--metadata` and `--extract` together.
-/// - No input path (`-i`) is provided.
-/// - No files are found for an operation that requires them.
-/// - Attempting extraction on a single file without a ROM index (`-r`).
-/// - Attempting extraction with more than one input file.
-/// - Providing an invalid format for the ROM index.
-/// - Missing an output path (`-o`) for extraction or compression.
-/// - The output path for compression is a directory.
-/// - Initiating compression with only one input file.
+/// - The compression output (`-o`) already exists and `--force` isn't set.
+/// - `--mode optical` with `--list`, `--extract` or `--metadata`.
+/// - Extraction with more than one input path.
+/// - An extraction range (`-e`) that isn't a list or range of numbers.
+/// - An extraction output path that exists and isn't a directory.
+/// - Extraction or compression without an output path (`-o`).
+/// - A compression output path that is a directory.
+/// - Compression of a single input file.
 /// - A window size, from `-w` or the config file, outside
 ///   `MIN_WINDOW_SIZE..=MAX_WINDOW_SIZE` when compressing.
+/// - An input path that doesn't exist.
+/// - `--auto-tune` with both `-w` and `-d` given on the command line.
+///
+/// clap rejects a missing `-i`, and `--extract` with `--list` or
+/// `--metadata`, before this runs.
 pub fn validate_args(
     args: &Args,
     matches: &ArgMatches
 ) -> Result<(), CliError> {
-    let arg_was_provided = |name: &str| matches.contains_id(name);
+    let arg_was_provided = |name: &str| given_on_command_line(matches, name);
     //Check if the output file already exists and if the force flag is set.
     if let Some(output_path) = &args.output
         && !args.force
@@ -419,8 +437,7 @@ pub fn merge_config_and_args (
     mut args: Args,
     matches: &ArgMatches,
 ) -> Args {
-    //This helper checks if an argument was present on the command line.
-    let arg_was_present = |name: &str| matches.contains_id(name);
+    let arg_was_present = |name: &str| given_on_command_line(matches, name);
 
     //If the user did NOT provide a flag, use the value from the config file.
     if !arg_was_present("compression_level") {
@@ -450,9 +467,9 @@ pub fn merge_config_and_args (
     if !arg_was_present("low_memory") {
         args.low_memory = config.low_memory;
     }
-    if !arg_was_present("metadata") {
-        args.metadata = config.json_output;
-    }
+    // `json_output` formats `--list` as JSON. It isn't `-m`, which would
+    // switch every run to printing metadata.
+    args.json_output = config.json_output;
     if !arg_was_present("quiet") {
         args.quiet = config.quiet_output;
     }
@@ -470,4 +487,268 @@ pub fn merge_config_and_args (
     }
 
     args
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::{CommandFactory, FromArgMatches};
+
+    use super::*;
+
+    /// Parses `flags` after the program name, the way `main` does.
+    fn parse(flags: &[&str]) -> (Args, ArgMatches) {
+        let matches = Args::command()
+            .try_get_matches_from(
+                std::iter::once("sprite-shrink").chain(flags.iter().copied()),
+            )
+            .unwrap();
+        let args = Args::from_arg_matches(&matches).unwrap();
+        (args, matches)
+    }
+
+    /// A config whose every setting differs from the flags' defaults.
+    fn config() -> SpriteShrinkConfig {
+        SpriteShrinkConfig {
+            compression_level: 7,
+            window_size: "4kb".to_string(),
+            dictionary_size: "32kb".to_string(),
+            hash_bit_length: 128,
+            auto_tune: false,
+            autotune_timeout: 30,
+            optimize_dictionary: true,
+            threads: 3,
+            low_memory: true,
+            json_output: true,
+            quiet_output: true,
+            ..SpriteShrinkConfig::default()
+        }
+    }
+
+    #[test]
+    fn config_values_apply_to_flags_not_given() {
+        let (args, matches) = parse(&["-i", "in"]);
+        let merged = merge_config_and_args(&config(), args, &matches);
+
+        assert_eq!(merged.compression_level, 7);
+        assert_eq!(merged.window, Some(ByteSize::kb(4)));
+        assert_eq!(merged.dictionary, Some(ByteSize::kb(32)));
+        assert_eq!(merged.hash_bit_length, Some(128));
+        assert_eq!(merged.autotune_timeout, Some(30));
+        assert!(merged.optimize_dictionary);
+        assert_eq!(merged.threads, Some(3));
+        assert!(merged.low_memory);
+        assert!(merged.quiet);
+    }
+
+    #[test]
+    fn flags_given_override_the_config() {
+        // `-c 19` is the flag's default value, so this also checks that a
+        // flag is told apart from its default by where it came from.
+        let (args, matches) = parse(&[
+            "-i", "in", "-c", "19", "-w", "8kb", "-d", "64kb", "-b", "64",
+            "--autotune-timeout", "5", "-t", "2",
+        ]);
+        let merged = merge_config_and_args(&config(), args, &matches);
+
+        assert_eq!(merged.compression_level, 19);
+        assert_eq!(merged.window, Some(ByteSize::kb(8)));
+        assert_eq!(merged.dictionary, Some(ByteSize::kb(64)));
+        assert_eq!(merged.hash_bit_length, Some(64));
+        assert_eq!(merged.autotune_timeout, Some(5));
+        assert_eq!(merged.threads, Some(2));
+    }
+
+    #[test]
+    fn bool_flags_given_turn_on_what_the_config_turns_off() {
+        let (args, matches) = parse(&[
+            "-i", "in", "--auto-tune", "--optimize-dictionary",
+            "--low-memory", "-q",
+        ]);
+        let merged = merge_config_and_args(
+            &SpriteShrinkConfig::default(),
+            args,
+            &matches,
+        );
+
+        assert!(merged.auto_tune);
+        assert!(merged.optimize_dictionary);
+        assert!(merged.low_memory);
+        assert!(merged.quiet);
+    }
+
+    #[test]
+    fn json_output_formats_the_list_without_switching_to_metadata() {
+        let (args, matches) = parse(&["-i", "in"]);
+        let merged = merge_config_and_args(&config(), args, &matches);
+        assert!(merged.json_output);
+        assert!(!merged.metadata);
+    }
+
+    #[test]
+    fn auto_tune_from_the_config_tunes_sizes_not_given() {
+        let config = SpriteShrinkConfig {
+            auto_tune: true,
+            ..config()
+        };
+
+        let (args, matches) = parse(&["-i", "in"]);
+        let merged = merge_config_and_args(&config, args, &matches);
+        assert!(merged.auto_tune);
+        assert_eq!((merged.window, merged.dictionary), (None, None));
+
+        let (args, matches) = parse(&["-i", "in", "-w", "8kb"]);
+        let merged = merge_config_and_args(&config, args, &matches);
+        assert_eq!(merged.window, Some(ByteSize::kb(8)));
+        assert_eq!(merged.dictionary, None);
+    }
+
+    /// A folder with two ROMs, a subfolder and an existing archive.
+    struct Inputs {
+        dir: tempfile::TempDir,
+    }
+
+    impl Inputs {
+        fn new() -> Self {
+            let dir = tempfile::TempDir::new().unwrap();
+            std::fs::write(dir.path().join("a.bin"), b"a").unwrap();
+            std::fs::write(dir.path().join("b.bin"), b"b").unwrap();
+            std::fs::write(dir.path().join("old.ssmc"), b"old").unwrap();
+            std::fs::create_dir(dir.path().join("sub")).unwrap();
+            Self { dir }
+        }
+
+        /// The path of `name` inside the folder, as a string.
+        fn path(&self, name: &str) -> String {
+            self.dir.path().join(name).to_str().unwrap().to_string()
+        }
+
+        /// `validate_args` on `flags`, where `{name}` stands for the path of
+        /// `name` inside the folder.
+        fn validate(&self, flags: &[&str]) -> Result<(), CliError> {
+            let flags: Vec<String> = flags
+                .iter()
+                .map(|flag| match flag.strip_prefix('{') {
+                    Some(name) => self.path(name.trim_end_matches('}')),
+                    None => (*flag).to_string(),
+                })
+                .collect();
+            let flags: Vec<&str> = flags.iter().map(String::as_str).collect();
+            let (args, matches) = parse(&flags);
+            validate_args(&args, &matches)
+        }
+    }
+
+    #[test]
+    fn valid_arguments_are_accepted() {
+        let inputs = Inputs::new();
+        let cases: [&[&str]; 6] = [
+            &["-i", "{a.bin}", "-i", "{b.bin}", "-o", "{new.ssmc}"],
+            &["-i", "{sub}", "-o", "{new.ssmc}"],
+            &["-i", "{a.bin}", "-i", "{b.bin}", "-o", "{old.ssmc}", "-f"],
+            &["-i", "{old.ssmc}", "-o", "{sub}", "-e", "1,3-5"],
+            &["-i", "{old.ssmc}", "-l"],
+            &["-i", "{sub}", "-o", "{new.ssmc}", "--auto-tune", "-w", "4kb"],
+        ];
+        for flags in cases {
+            let result = inputs.validate(flags);
+            assert!(result.is_ok(), "{flags:?}: {result:?}");
+        }
+    }
+
+    /// What a case is called, its flags, and whether an error is the one
+    /// it should give.
+    type Rejection =
+        (&'static str, &'static [&'static str], fn(&CliError) -> bool);
+
+    #[test]
+    fn each_documented_rejection_is_made() {
+        let inputs = Inputs::new();
+        let cases: [Rejection; 12] = [
+            (
+                "compression output exists",
+                &["-i", "{sub}", "-o", "{old.ssmc}"],
+                |e| matches!(e, CliError::FileExistsError(_)),
+            ),
+            (
+                "optical with list",
+                &["-i", "{old.ssmc}", "-l", "--mode", "optical"],
+                |e| matches!(e, CliError::ConflictingArguments(_)),
+            ),
+            (
+                "extraction from two inputs",
+                &["-i", "{old.ssmc}", "-i", "{a.bin}", "-o", "{sub}", "-e", "1"],
+                |e| matches!(e, CliError::TooManyFiles(_)),
+            ),
+            (
+                "extraction range not a number",
+                &["-i", "{old.ssmc}", "-o", "{sub}", "-e", "one"],
+                |e| matches!(e, CliError::InvalidFormRomRange(_)),
+            ),
+            (
+                "extraction output is a file",
+                &["-i", "{old.ssmc}", "-o", "{a.bin}", "-e", "1"],
+                |e| matches!(e, CliError::InvalidPath(_)),
+            ),
+            (
+                "extraction without output",
+                &["-i", "{old.ssmc}", "-e", "1"],
+                |e| matches!(e, CliError::MissingFlag(_)),
+            ),
+            (
+                "compression without output",
+                &["-i", "{sub}"],
+                |e| matches!(e, CliError::MissingFlag(_)),
+            ),
+            (
+                // Without `-f`, an existing folder is rejected as existing.
+                "compression output is a folder",
+                &["-i", "{a.bin}", "-i", "{b.bin}", "-o", "{sub}", "-f"],
+                |e| matches!(e, CliError::InvalidPath(_)),
+            ),
+            (
+                "compression of one file",
+                &["-i", "{a.bin}", "-o", "{new.ssmc}"],
+                |e| matches!(e, CliError::NotEnoughFiles),
+            ),
+            (
+                "window too large",
+                &["-i", "{sub}", "-o", "{new.ssmc}", "-w", "1GiB"],
+                |e| matches!(e, CliError::InvalidWindowSize(_)),
+            ),
+            (
+                "input missing",
+                &["-i", "{missing}", "-l"],
+                |e| matches!(e, CliError::InvalidPath(_)),
+            ),
+            (
+                "auto-tune with window and dictionary",
+                &[
+                    "-i", "{sub}", "-o", "{new.ssmc}", "--auto-tune",
+                    "-w", "4kb", "-d", "16kb",
+                ],
+                |e| matches!(e, CliError::ConflictingArguments(_)),
+            ),
+        ];
+        for (what, flags, expected) in cases {
+            match inputs.validate(flags) {
+                Err(e) => assert!(expected(&e), "{what}: got {e:?}"),
+                Ok(()) => panic!("{what}: accepted {flags:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn clap_rejects_what_validate_args_relies_on() {
+        let cases: [&[&str]; 3] = [
+            &["-o", "out"],
+            &["-i", "in", "-l", "-e", "1"],
+            &["-i", "in", "-m", "-e", "1"],
+        ];
+        for flags in cases {
+            let result = Args::command().try_get_matches_from(
+                std::iter::once("sprite-shrink").chain(flags.iter().copied()),
+            );
+            assert!(result.is_err(), "{flags:?} parsed");
+        }
+    }
 }

@@ -194,6 +194,68 @@ fn a_damaged_chunk_stops_extraction() {
     assert_eq!(left, Vec::<std::ffi::OsString>::new());
 }
 
+/// Runs the CLI with its config, cache and data folders inside `home`, so it
+/// reads and writes its config file there. Only Linux finds them through
+/// these variables.
+#[cfg(target_os = "linux")]
+fn output_with_config_in(home: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_sprite-shrink"))
+        .env("XDG_CONFIG_HOME", home.join("config"))
+        .env("XDG_CACHE_HOME", home.join("cache"))
+        .env("XDG_DATA_HOME", home.join("data"))
+        .args(["--disable-logging", "--threads", "1"])
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn json_output_in_the_config_lists_as_json() {
+    let tmp = TempDir::new().unwrap();
+    let archive = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/compat/v2/roms.ssmc");
+    let archive = archive.to_str().unwrap();
+    let list = ["-i", archive, "-l"];
+
+    // The first run writes the default config.
+    let table = output_with_config_in(tmp.path(), &list);
+    assert!(table.status.success());
+    let config = tmp
+        .path()
+        .join("config/spriteshrink/SpriteShrink-config.toml");
+    let text = fs::read_to_string(&config).unwrap();
+    assert!(text.contains("json_output = false"), "{text}");
+    let text = text.replace("json_output = false", "json_output = true");
+    fs::write(&config, text).unwrap();
+
+    let json = output_with_config_in(tmp.path(), &list);
+    assert!(json.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&json.stdout),
+        stdout_of(&["-i", archive, "-m"]),
+    );
+    assert_ne!(json.stdout, table.stdout);
+
+    // Compression still works: the setting doesn't switch to `-m` mode.
+    let input_dir = tmp.path().join("input");
+    fs::create_dir_all(&input_dir).unwrap();
+    for (name, data) in rom_set() {
+        fs::write(input_dir.join(name), data).unwrap();
+    }
+    let new_archive = tmp.path().join("new.ssmc");
+    let compressed = output_with_config_in(tmp.path(), &[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", new_archive.to_str().unwrap(),
+    ]);
+    assert!(
+        compressed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compressed.stderr)
+    );
+    assert!(new_archive.exists());
+}
+
 #[test]
 fn unknown_hash_type_stops_extraction_and_listing() {
     let tmp = TempDir::new().unwrap();

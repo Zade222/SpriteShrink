@@ -357,3 +357,49 @@ pub fn offset_to_line_col(
     }
     (line, col)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_start_of_the_input_is_line_1_column_1() {
+        assert_eq!(offset_to_line_col("abc", 0), (1, 1));
+        assert_eq!(offset_to_line_col("", 0), (1, 1));
+    }
+
+    #[test]
+    fn columns_count_within_a_line() {
+        assert_eq!(offset_to_line_col("abc", 2), (1, 3));
+    }
+
+    #[test]
+    fn a_newline_starts_the_next_line() {
+        let text = "ab\ncd";
+        assert_eq!(offset_to_line_col(text, 2), (1, 3));
+        assert_eq!(offset_to_line_col(text, 3), (2, 1));
+        assert_eq!(offset_to_line_col(text, 4), (2, 2));
+    }
+
+    #[test]
+    fn a_crlf_ending_starts_the_next_line() {
+        // The `\r` is the last column of its line.
+        let text = "ab\r\ncd";
+        assert_eq!(offset_to_line_col(text, 2), (1, 3));
+        assert_eq!(offset_to_line_col(text, 4), (2, 1));
+    }
+
+    #[test]
+    fn the_end_of_the_input_is_just_past_its_last_character() {
+        assert_eq!(offset_to_line_col("ab\ncd", 5), (2, 3));
+        assert_eq!(offset_to_line_col("ab\n", 3), (2, 1));
+        // An offset past the end stops there too.
+        assert_eq!(offset_to_line_col("ab", 99), (1, 3));
+    }
+
+    #[test]
+    fn a_multibyte_character_is_one_column() {
+        // `é` is 2 bytes, so `x` starts at byte 2.
+        assert_eq!(offset_to_line_col("éx", 2), (1, 2));
+    }
+}
