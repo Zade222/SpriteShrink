@@ -111,11 +111,15 @@ fn image(len: usize, sector: impl Fn(usize) -> [u8; SECTOR]) -> Vec<u8> {
 
 // Compression
 
-struct OneFile(u64);
+/// The size of each BIN file, by the name the CUE sheet gives it.
+struct BinSizes(HashMap<String, u64>);
 
-impl FileSizeProvider for OneFile {
-    fn get_file_size_bytes(&self, _: &str) -> Result<u64, std::io::Error> {
-        Ok(self.0)
+impl FileSizeProvider for BinSizes {
+    fn get_file_size_bytes(
+        &self,
+        filename: &str,
+    ) -> Result<u64, std::io::Error> {
+        Ok(self.0[filename])
     }
 }
 
@@ -167,10 +171,21 @@ fn store(file: &mut File, compressed: &[u8]) -> ChunkLocation {
 }
 
 fn archive(bin: Vec<u8>, cue: &str) -> Archived {
-    let bin_len = bin.len() as u64;
-    let sheet = parse(cue, bin_len);
-    let sector_counts = resolve_file_sector_counts(&sheet, &OneFile(bin_len))
-        .unwrap();
+    archive_files(vec![(BIN_NAME, bin)], cue)
+}
+
+/// Archives a disc stored as several BIN files, given in the CUE sheet's
+/// order. The sectors are read from the files joined, as the CLI reads
+/// them.
+fn archive_files(bins: Vec<(&str, Vec<u8>)>, cue: &str) -> Archived {
+    let sizes = BinSizes(
+        bins.iter()
+            .map(|(name, bin)| ((*name).to_string(), bin.len() as u64))
+            .collect(),
+    );
+    let bin: Vec<u8> = bins.into_iter().flat_map(|(_, bin)| bin).collect();
+    let sheet = parse(cue, bin.len() as u64);
+    let sector_counts = resolve_file_sector_counts(&sheet, &sizes).unwrap();
     let files = disc_files(&sheet, &sector_counts).unwrap();
 
     let subheaders = SubheaderRegistry::default();
@@ -458,6 +473,40 @@ fn a_damaged_audio_block_is_not_read_back() {
     for e in &errors {
         assert!(e.contains("Audio block failed its integrity check"), "{e}");
     }
+}
+
+/// The full disc with each track in its own file, as Redump stores discs.
+/// Index times are relative to the file they're in.
+const SPLIT_DISC_CUE: &str = r#"FILE "track1.bin" BINARY
+  TRACK 01 MODE2/2352
+    INDEX 01 00:00:00
+FILE "track2.bin" BINARY
+  TRACK 02 MODE2/2352
+    INDEX 00 00:00:00
+    INDEX 01 00:00:30
+FILE "track3.bin" BINARY
+  TRACK 03 AUDIO
+    INDEX 00 00:00:00
+    INDEX 01 00:00:30
+"#;
+
+#[test]
+fn a_disc_split_into_one_file_per_track_maps_as_one_file() {
+    let joined = full_disc();
+    let split = archive_files(
+        vec![
+            ("track1.bin", joined[..120 * SECTOR].to_vec()),
+            ("track2.bin", joined[120 * SECTOR..200 * SECTOR].to_vec()),
+            ("track3.bin", joined[200 * SECTOR..].to_vec()),
+        ],
+        SPLIT_DISC_CUE,
+    );
+
+    assert_eq!(
+        split.manifest.rle_sector_map,
+        archive(joined, FULL_DISC_CUE).manifest.rle_sector_map
+    );
+    assert_reads_back(&split);
 }
 
 #[test]

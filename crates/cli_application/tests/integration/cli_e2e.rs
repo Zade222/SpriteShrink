@@ -471,6 +471,50 @@ fn an_audio_only_disc_is_archived_and_extracted() {
 }
 
 #[test]
+fn a_disc_in_two_files_is_extracted_as_one() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = tmp.path().join("input");
+    let out_dir = tmp.path().join("extract");
+    let archive = tmp.path().join("split.ssmd");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::create_dir_all(&out_dir).unwrap();
+
+    let data = vec![0_u8; 150 * 2352];
+    let audio = tiled_bytes(0xA0D1_0002, 150 * 2352);
+    fs::write(input_dir.join("track1.bin"), &data).unwrap();
+    fs::write(input_dir.join("track2.bin"), &audio).unwrap();
+    fs::write(
+        input_dir.join("disc.cue"),
+        "FILE \"track1.bin\" BINARY\n\
+         \x20 TRACK 01 MODE2/2352\n\
+         \x20   INDEX 01 00:00:00\n\
+         FILE \"track2.bin\" BINARY\n\
+         \x20 TRACK 02 AUDIO\n\
+         \x20   INDEX 01 00:00:00\n",
+    )
+    .unwrap();
+
+    run_cli(&[
+        "--mode", "optical",
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    extract_first(&archive, &out_dir);
+
+    let joined = [data, audio].concat();
+    let extracted = fs::read(out_dir.join("disc.bin")).unwrap();
+    assert_bytes_eq(&extracted, &joined, "disc.bin");
+    assert_eq!(
+        fs::read_to_string(out_dir.join("disc.cue")).unwrap(),
+        "FILE \"disc.bin\" BINARY\n\
+         \x20 TRACK 01 MODE2/2352\n\
+         \x20   INDEX 01 00:00:00\n\
+         \x20 TRACK 02 AUDIO\n\
+         \x20   INDEX 01 00:02:00\n"
+    );
+}
+
+#[test]
 fn discs_from_different_folders_read_their_own_bin_files() {
     let tmp = TempDir::new().unwrap();
     let out_dir = tmp.path().join("extract");
