@@ -515,22 +515,6 @@ pub enum ExceptionType {
 }
 
 
-impl ExceptionType {
-    pub const MODE1_EXCEP_SIZE: u32 = 296;
-    pub const MODE2FORM1_EXCEP_SIZE: u32 = 296;
-    pub const MODE2FORM2_EXCEP_SIZE: u32 = 20;
-
-    pub fn metadata_size(&self) -> u32 {
-        match self {
-            ExceptionType::Mode1 => Self::MODE1_EXCEP_SIZE,
-            ExceptionType::Mode2Form1 => Self::MODE2FORM1_EXCEP_SIZE,
-            ExceptionType::Mode2Form2 => Self::MODE2FORM2_EXCEP_SIZE,
-            ExceptionType::None => 0
-        }
-    }
-}
-
-
 pub struct SubheaderRegistry {
     map: DashMap<[u8; 8], u16>,
     next_id: AtomicU16,

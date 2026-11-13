@@ -874,8 +874,6 @@ where
 
     let mut hasher = Xxh3::new();
 
-    let mut loop_count = 0usize;
-
     let mut msf_offsets = MsfOffsets::new(&manifest.lba_map);
 
     let shared_data_buffer: SharedBuffer = Arc::new((
@@ -1000,8 +998,6 @@ where
             hasher.update(&reconstructed_sector);
 
             writer.write_all(&reconstructed_sector)?;
-
-            loop_count += 1;
         }
 
         /*Every sector is written, so stop the workers before joining them.
