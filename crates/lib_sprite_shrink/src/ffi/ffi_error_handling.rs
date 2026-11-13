@@ -226,6 +226,31 @@ mod tests {
         }
     }
 
+    /// The statuses no error maps to: the entry points return them
+    /// directly, and hosts return the callback statuses. Each number is
+    /// written out for the same reason as above.
+    #[test]
+    fn statuses_returned_directly_have_their_documented_numbers() {
+        let statuses = [
+            (FFIStatus::StatusOk as i32, 0),
+            (FFIStatus::NullArgument as i32, -1),
+            (FFIStatus::InvalidString as i32, -11),
+            (FFIStatus::InvalidMagicNumber as i32, -13),
+            (FFIStatus::IncorrectArrayLength as i32, -15),
+            (FFIStatus::NoDataToProcess as i32, -16),
+            (FFIStatus::BufferTooSmall as i32, -17),
+            (FFIStatus::HashNotFound as i32, -18),
+            (FFIStatus::DuplicateFilename as i32, -19),
+            (FFICallbackStatus::CallbackOk as i32, 0),
+            (FFICallbackStatus::Error as i32, -1),
+            (FFICallbackStatus::Cancelled as i32, -2),
+        ];
+
+        for (index, (actual, expected)) in statuses.into_iter().enumerate() {
+            assert_eq!(actual, expected, "row {index}");
+        }
+    }
+
     #[test]
     fn only_faults_in_the_library_are_internal_errors() {
         let cases: [SpriteShrinkError; 3] = [
