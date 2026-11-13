@@ -376,11 +376,13 @@ const FULL_DISC_CUE: &str = r#"FILE "disc.bin" BINARY
 
 const FULL_DISC_SECTORS: usize = 300;
 
-/// Form 1 data with some Form 2 sectors, a libcrypt-style sector and a blank
-/// stretch; a data track with a pregap; an audio track with a pregap.
+/// Form 1 data with some Form 2 sectors (one with a broken EDC), a
+/// libcrypt-style sector and a blank stretch; a data track with a pregap;
+/// an audio track with a pregap.
 fn full_disc() -> Vec<u8> {
     image(FULL_DISC_SECTORS, |i| match i {
         40..=44 => form2(i),
+        45 => with_bad_edc(form2(i), 2348),
         60 => with_bad_edc(form1(i), 2072),
         100..=103 => [0; SECTOR],
         0..=119 | 150..=199 => form1(i),
@@ -400,13 +402,14 @@ fn the_disc_is_analyzed_as_built() {
     assert_eq!(types.len(), FULL_DISC_SECTORS);
     assert_eq!(types[0], SectorType::Mode2Form1);
     assert_eq!(types[40], SectorType::Mode2Form2);
+    assert_eq!(types[45], SectorType::Mode2Form2Exception);
     assert_eq!(types[60], SectorType::Mode2Form1Exception);
     assert_eq!(types[100], SectorType::ZeroedMode2Data);
     assert_eq!(types[120], SectorType::PregapMode2);
     assert_eq!(types[150], SectorType::Mode2Form1);
     assert_eq!(types[200], SectorType::PregapAudio);
     assert_eq!(types[230], SectorType::Audio);
-    assert_eq!(disc.manifest.disc_exception_index.len(), 1);
+    assert_eq!(disc.manifest.disc_exception_index.len(), 2);
     assert_eq!(disc.manifest.lba_map, [(0, LEAD_IN)]);
 }
 
