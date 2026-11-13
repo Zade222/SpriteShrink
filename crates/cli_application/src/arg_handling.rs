@@ -641,13 +641,18 @@ mod tests {
     #[test]
     fn valid_arguments_are_accepted() {
         let inputs = Inputs::new();
-        let cases: [&[&str]; 6] = [
+        let cases: [&[&str]; 9] = [
             &["-i", "{a.bin}", "-i", "{b.bin}", "-o", "{new.ssmc}"],
             &["-i", "{sub}", "-o", "{new.ssmc}"],
             &["-i", "{a.bin}", "-i", "{b.bin}", "-o", "{old.ssmc}", "-f"],
             &["-i", "{old.ssmc}", "-o", "{sub}", "-e", "1,3-5"],
             &["-i", "{old.ssmc}", "-l"],
             &["-i", "{sub}", "-o", "{new.ssmc}", "--auto-tune", "-w", "4kb"],
+            // The window limits themselves are accepted.
+            &["-i", "{sub}", "-o", "{new.ssmc}", "-w", "256"],
+            &["-i", "{sub}", "-o", "{new.ssmc}", "-w", "4MiB"],
+            // The window only matters when compressing.
+            &["-i", "{old.ssmc}", "-o", "{sub}", "-e", "1", "-w", "100"],
         ];
         for flags in cases {
             let result = inputs.validate(flags);
@@ -663,7 +668,7 @@ mod tests {
     #[test]
     fn each_documented_rejection_is_made() {
         let inputs = Inputs::new();
-        let cases: [Rejection; 12] = [
+        let cases: [Rejection; 13] = [
             (
                 "compression output exists",
                 &["-i", "{sub}", "-o", "{old.ssmc}"],
@@ -709,6 +714,11 @@ mod tests {
                 "compression of one file",
                 &["-i", "{a.bin}", "-o", "{new.ssmc}"],
                 |e| matches!(e, CliError::NotEnoughFiles),
+            ),
+            (
+                "window too small",
+                &["-i", "{sub}", "-o", "{new.ssmc}", "-w", "100"],
+                |e| matches!(e, CliError::InvalidWindowSize(_)),
             ),
             (
                 "window too large",

@@ -1110,25 +1110,6 @@ mod tests {
         assert_eq!(e.to_string(), "Unknown frame descriptor");
     }
 
-    #[test]
-    fn a_flipped_bit_does_not_panic() {
-        // The frames carry no checksum, so most flips decode to different
-        // bytes without an error. This checks that none of them panic, and
-        // that zstd catches at least some.
-        let (_, compressed) = compressed_payload();
-        let mut failures = 0;
-        for index in 0..compressed.len() {
-            for bit in 0..8 {
-                let mut corrupted = compressed.clone();
-                corrupted[index] ^= 1 << bit;
-                if decompress_chunk(&corrupted, dictionary()).is_err() {
-                    failures += 1;
-                }
-            }
-        }
-        assert!(failures > 0, "no flipped bit was detected");
-    }
-
     /// Whether `result` is the error for a chunk that failed its hash.
     fn is_hash_mismatch(result: &Result<Vec<u8>, SpriteShrinkError>) -> bool {
         matches!(

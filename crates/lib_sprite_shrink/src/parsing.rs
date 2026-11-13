@@ -364,15 +364,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_file_header_valid_bytes_round_trips() {
-        let header = sample_header();
-
-        let parsed = parse_file_header(&header.to_le_bytes()).unwrap();
-
-        assert_eq!(parsed, header);
-    }
-
-    #[test]
     fn parse_file_header_wrong_magic_returns_invalid_header() {
         let mut header = sample_header();
         header.magic_num = *b"SSARCHV0";

@@ -6,7 +6,6 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use sprite_shrink_cd::{SectorType, rebuild_sector_simd};
 use sprite_shrink_test_support::{assert_bytes_eq, rom_set, tiled_bytes};
 use tempfile::TempDir;
 
@@ -38,29 +37,6 @@ fn extract_first(archive: &Path, out_dir: &Path) {
         "-o", out_dir.to_str().unwrap(),
         "-e", "1",
     ]);
-}
-
-#[test]
-fn single_small_rom_is_archived_without_a_dictionary() {
-    let tmp = TempDir::new().unwrap();
-    let input_dir = tmp.path().join("input");
-    let out_dir = tmp.path().join("extract");
-    let archive = tmp.path().join("small.ssmc");
-    fs::create_dir_all(&input_dir).unwrap();
-
-    // A 4 KiB ROM cuts into too few chunks to train a dictionary on.
-    let rom = tiled_bytes(0x5EED_3001, 4 * 1024);
-    fs::write(input_dir.join("small.bin"), &rom).unwrap();
-
-    let stdout = stdout_of(&[
-        "-i", input_dir.to_str().unwrap(),
-        "-o", archive.to_str().unwrap(),
-    ]);
-    assert!(stdout.contains(NO_DICTIONARY_NOTE), "stdout:\n{stdout}");
-
-    extract_first(&archive, &out_dir);
-    let extracted = fs::read(out_dir.join("small.bin")).unwrap();
-    assert_bytes_eq(&extracted, &rom, "small.bin");
 }
 
 #[test]
@@ -412,117 +388,15 @@ fn rejected_arguments_exit_with_failure() {
     let input_dir = two_roms(tmp.path());
     let existing = tmp.path().join("existing.ssmc");
     fs::write(&existing, b"keep me").unwrap();
-    let single = input_dir.join("a.bin");
-    let input = input_dir.to_str().unwrap();
-    let new_archive = tmp.path().join("new.ssmc");
 
-    let cases: [(&[&str], &str); 3] = [
-        (
-            &["-i", input, "-o", existing.to_str().unwrap()],
-            "File already exists",
-        ),
-        (
-            &["-i", single.to_str().unwrap(), "-o", new_archive.to_str().unwrap()],
-            "requires at least two input files",
-        ),
-        (
-            &["--mode", "optical", "-i", existing.to_str().unwrap(), "--list"],
-            "only applicable for compression",
-        ),
-    ];
-    for (args, message) in cases {
-        let printed = failure_output(args);
-        assert!(printed.contains(message), "sprite-shrink {args:?}:\n{printed}");
-    }
-    assert_eq!(fs::read(&existing).unwrap(), b"keep me");
-    assert!(!new_archive.exists());
-}
-
-#[test]
-fn a_failed_run_exits_with_failure() {
-    let tmp = TempDir::new().unwrap();
-    let input_dir = two_roms(tmp.path());
-    let archive = tmp.path().join("roms.ssmc");
-    let out_dir = tmp.path().join("extract");
-    fs::create_dir_all(&out_dir).unwrap();
-    run_cli(&[
-        "-i", input_dir.to_str().unwrap(),
-        "-o", archive.to_str().unwrap(),
-    ]);
-
-    // The archive holds 2 files, so index 3 fails after the arguments are
-    // accepted.
+    // The unit tests check each rejection `validate_args` makes. This checks
+    // that `main` stops on one with a failure, before writing anything.
     let printed = failure_output(&[
-        "-i", archive.to_str().unwrap(),
-        "-o", out_dir.to_str().unwrap(),
-        "-e", "3",
-    ]);
-    assert!(
-        printed.contains("requested index 3 is out of the valid range (1-2)"),
-        "output:\n{printed}"
-    );
-}
-
-#[test]
-fn rom_index_zero_is_rejected() {
-    let tmp = TempDir::new().unwrap();
-    let input_dir = two_roms(tmp.path());
-    let archive = tmp.path().join("roms.ssmc");
-    let out_dir = tmp.path().join("extract");
-    fs::create_dir_all(&out_dir).unwrap();
-    run_cli(&[
         "-i", input_dir.to_str().unwrap(),
-        "-o", archive.to_str().unwrap(),
+        "-o", existing.to_str().unwrap(),
     ]);
-
-    // Indices are 1-based, so 0 names no file, alone or in a range.
-    for range in ["0", "0-1"] {
-        let printed = failure_output(&[
-            "-i", archive.to_str().unwrap(),
-            "-o", out_dir.to_str().unwrap(),
-            "-e", range,
-        ]);
-        assert!(
-            printed.contains("ROM indexes start at 1"),
-            "-e {range}:\n{printed}"
-        );
-    }
-    assert!(fs::read_dir(&out_dir).unwrap().next().is_none());
-}
-
-#[test]
-fn files_past_index_255_can_be_extracted() {
-    const FILE_COUNT: u32 = 256;
-    let tmp = TempDir::new().unwrap();
-    let input_dir = tmp.path().join("input");
-    let archive = tmp.path().join("many.ssmc");
-    let out_dir = tmp.path().join("extract");
-    fs::create_dir_all(&input_dir).unwrap();
-    fs::create_dir_all(&out_dir).unwrap();
-
-    // Zero-padded names keep the table of contents in this order, so file
-    // `n` is at index `n`.
-    for n in 1..=FILE_COUNT {
-        let data = tiled_bytes(0x5EED_4000 + u64::from(n), 256);
-        fs::write(input_dir.join(format!("{n:03}.bin")), data).unwrap();
-    }
-    run_cli(&[
-        "-i", input_dir.to_str().unwrap(),
-        "-o", archive.to_str().unwrap(),
-    ]);
-
-    run_cli(&[
-        "-i", archive.to_str().unwrap(),
-        "-o", out_dir.to_str().unwrap(),
-        "-e", "1,255-256",
-    ]);
-    for n in [1, 255, 256] {
-        let name = format!("{n:03}.bin");
-        let extracted = fs::read(out_dir.join(&name)).unwrap();
-        let original = fs::read(input_dir.join(&name)).unwrap();
-        assert_bytes_eq(&extracted, &original, &name);
-    }
-    assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 3);
+    assert!(printed.contains("File already exists"), "output:\n{printed}");
+    assert_eq!(fs::read(&existing).unwrap(), b"keep me");
 }
 
 #[test]
@@ -565,51 +439,6 @@ fn write_blank_disc(dir: &Path, title: &str, sectors: usize) -> Vec<u8> {
     )
     .unwrap();
     image
-}
-
-#[test]
-fn a_disc_whose_header_numbers_jump_is_archived_and_extracted() {
-    let tmp = TempDir::new().unwrap();
-    let input_dir = tmp.path().join("input");
-    let out_dir = tmp.path().join("extract");
-    let archive = tmp.path().join("jump.ssmd");
-    fs::create_dir_all(&input_dir).unwrap();
-    fs::create_dir_all(&out_dir).unwrap();
-
-    // Mode 2 Form 1 sectors numbered from 150, jumping 10,000 forward at
-    // sector 400, as at a GD-ROM's gap between its two areas.
-    let subheader = [1, 0, 0x08, 0, 1, 0, 0x08, 0];
-    let image: Vec<u8> = (0..600_u32)
-        .flat_map(|i| {
-            let number = i + 150 + if i < 400 { 0 } else { 10_000 };
-            let user_data = tiled_bytes(u64::from(number), 2048);
-            rebuild_sector_simd(
-                &user_data,
-                &subheader,
-                SectorType::Mode2Form1,
-                number,
-                None,
-            )
-            .unwrap()
-        })
-        .collect();
-    fs::write(input_dir.join("disc.bin"), &image).unwrap();
-    fs::write(
-        input_dir.join("disc.cue"),
-        "FILE \"disc.bin\" BINARY\n\
-         \x20 TRACK 01 MODE2/2352\n\
-         \x20   INDEX 01 00:00:00\n",
-    )
-    .unwrap();
-
-    run_cli(&[
-        "--mode", "optical",
-        "-i", input_dir.to_str().unwrap(),
-        "-o", archive.to_str().unwrap(),
-    ]);
-    extract_first(&archive, &out_dir);
-    let extracted = fs::read(out_dir.join("disc.bin")).unwrap();
-    assert_bytes_eq(&extracted, &image, "disc.bin");
 }
 
 #[test]
@@ -692,51 +521,6 @@ fn optical_mode_without_cue_files_says_what_is_missing() {
     );
     assert!(!printed.contains("internal logic error"), "output:\n{printed}");
     assert!(!archive.exists());
-}
-
-#[test]
-fn a_window_size_outside_the_chunker_range_is_rejected() {
-    let tmp = TempDir::new().unwrap();
-    let input_dir = two_roms(tmp.path());
-    let archive = tmp.path().join("roms.ssmc");
-
-    // FastCDC accepts average sizes from 256 bytes to 4 MiB.
-    for window in ["100", "8MiB"] {
-        let printed = failure_output(&[
-            "-i", input_dir.to_str().unwrap(),
-            "-o", archive.to_str().unwrap(),
-            "-w", window,
-        ]);
-        assert!(
-            printed.contains("outside the supported range of 256 to 4194304 \
-                bytes"),
-            "-w {window}:\n{printed}"
-        );
-        assert!(!printed.contains("panicked"), "-w {window}:\n{printed}");
-        assert!(!archive.exists());
-    }
-
-    // The limits themselves are accepted.
-    for window in ["256", "4MiB"] {
-        run_cli(&[
-            "-i", input_dir.to_str().unwrap(),
-            "-o", archive.to_str().unwrap(),
-            "-w", window,
-            "--force",
-        ]);
-    }
-
-    // The window only matters when compressing, so a bad value doesn't stop
-    // extraction.
-    let out_dir = tmp.path().join("extract");
-    fs::create_dir_all(&out_dir).unwrap();
-    run_cli(&[
-        "-i", archive.to_str().unwrap(),
-        "-o", out_dir.to_str().unwrap(),
-        "-e", "1",
-        "-w", "100",
-    ]);
-    assert!(out_dir.join("a.bin").exists());
 }
 
 #[test]

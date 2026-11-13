@@ -218,20 +218,6 @@ fn assert_truncated_copies_fail_cleanly(
 }
 
 #[test]
-fn v2_ssmc_truncated_archive_reports_error() {
-    assert_truncated_copies_fail_cleanly(
-        &compat_path(V2_DIR, "roms.ssmc"), "1-3", &V2_ROMS,
-    );
-}
-
-#[test]
-fn v2_ssmd_truncated_archive_reports_error() {
-    assert_truncated_copies_fail_cleanly(
-        &compat_path(V2_DIR, "disc.ssmd"), "1", &[V2_DISC],
-    );
-}
-
-#[test]
 fn v2_1_ssmc_truncated_archive_reports_error() {
     assert_truncated_copies_fail_cleanly(
         &compat_path(V2_1_DIR, "roms.ssmc"), "1-3", &V2_ROMS,

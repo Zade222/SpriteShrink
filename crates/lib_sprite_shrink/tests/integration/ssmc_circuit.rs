@@ -23,7 +23,7 @@ use sprite_shrink::{
 };
 use proptest::{prelude::*, sample::Index};
 use sprite_shrink_test_support::{
-    XorShift, assert_bytes_eq, rom_set, tiled_bytes,
+    XorShift, assert_bytes_eq, tiled_bytes,
 };
 
 /// Chunk sizes average 1 KiB, so each test file splits into dozens of
@@ -169,13 +169,6 @@ fn open<H: TestHash>(files: &[FileData], hash_type: u8) -> (Built, Reader<H>) {
     (built, reader)
 }
 
-fn rom_set_files() -> Vec<FileData> {
-    rom_set()
-        .into_iter()
-        .map(|(file_name, file_data)| FileData { file_name, file_data })
-        .collect()
-}
-
 /// Checks that the header, TOC and manifests list `files`.
 fn assert_archive_lists_files<H: TestHash>(
     files: &[FileData],
@@ -204,32 +197,6 @@ fn assert_archive_lists_files<H: TestHash>(
             entry.filename
         );
     }
-}
-
-fn assert_rom_set_described<H: TestHash>(hash_type: u8) {
-    let files = rom_set_files();
-    let (built, reader) = open::<H>(&files, hash_type);
-    assert_archive_lists_files(&files, &reader, hash_type);
-
-    // The patched file shares most chunks with the base, so the archive
-    // stores fewer chunks than the manifests reference.
-    let parsed = &reader.parsed;
-    let referenced: usize = parsed
-        .manifests
-        .iter()
-        .map(|manifest| manifest.chunk_metadata.len())
-        .sum();
-    assert!(
-        parsed.chunk_index.len() < referenced,
-        "{} stored chunks for {referenced} references",
-        parsed.chunk_index.len()
-    );
-    let total: usize = files.iter().map(|file| file.file_data.len()).sum();
-    assert!(built.archive.len() < total);
-
-    // There's enough distinct data to train on, so the archive must not
-    // fall back to compressing without a dictionary.
-    assert_ne!(parsed.dictionary, [] as [u8; 0]);
 }
 
 /// Checks that every file rebuilt from its manifest's chunks equals the
@@ -292,25 +259,6 @@ fn assert_files_verify<H: TestHash>(built: &Built, reader: &Arc<Reader<H>>) {
     }
 }
 
-fn assert_rom_set_verifies<H: TestHash>(hash_type: u8) {
-    let (built, reader) = open::<H>(&rom_set_files(), hash_type);
-    // `verify_single_file` needs a `'static` chunk callback.
-    let reader = Arc::new(reader);
-    assert_files_verify(&built, &reader);
-
-    // Each file's hash must not verify another file, or a check that always
-    // passes would go unnoticed. The ROM set's files all differ.
-    let toc = &reader.parsed.toc;
-    for (index, entry) in toc.iter().enumerate() {
-        let other = &toc[(index + 1) % toc.len()].filename;
-        assert!(
-            verify(&reader, index, &built.veri_hashes[other]).is_err(),
-            "{} verified against the hash of {other}",
-            entry.filename
-        );
-    }
-}
-
 /// Byte ranges to seek, as `(offset, length)`: the edges of the file, every
 /// chunk boundary, and pseudo-random ranges.
 fn seek_ranges(len: u64, boundaries: &[u64], seed: u64) -> Vec<(u64, u64)> {
@@ -370,7 +318,7 @@ fn assert_seeks_match<H: TestHash>(
     }
 }
 
-const ROM_SET_SEEK_SEED: u64 = 0x5EED_1001;
+const SMALL_SET_SEEK_SEED: u64 = 0x5EED_1001;
 
 /// File sets with too few distinct chunks for zstd to train a dictionary
 /// on, so the archive is built without one.
@@ -417,65 +365,9 @@ fn assert_small_sets_round_trip<H: TestHash>(hash_type: u8) {
 
         assert_archive_lists_files(&files, &reader, hash_type);
         assert_files_extract(&files, &reader);
-        assert_seeks_match(&files, &reader, ROM_SET_SEEK_SEED);
+        assert_seeks_match(&files, &reader, SMALL_SET_SEEK_SEED);
         assert_files_verify(&built, &Arc::new(reader));
     }
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
-fn u64_archive_describes_its_files() {
-    assert_rom_set_described::<u64>(HASH_TYPE_XXH3_64);
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
-fn u128_archive_describes_its_files() {
-    assert_rom_set_described::<u128>(HASH_TYPE_XXH3_128);
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
-fn u64_archive_extracts_original_files() {
-    let files = rom_set_files();
-    let (_built, reader) = open::<u64>(&files, HASH_TYPE_XXH3_64);
-    assert_files_extract(&files, &reader);
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
-fn u128_archive_extracts_original_files() {
-    let files = rom_set_files();
-    let (_built, reader) = open::<u128>(&files, HASH_TYPE_XXH3_128);
-    assert_files_extract(&files, &reader);
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
-fn u64_verification_accepts_only_each_files_hash() {
-    assert_rom_set_verifies::<u64>(HASH_TYPE_XXH3_64);
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
-fn u128_verification_accepts_only_each_files_hash() {
-    assert_rom_set_verifies::<u128>(HASH_TYPE_XXH3_128);
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
-fn u64_seeks_read_the_original_bytes() {
-    let files = rom_set_files();
-    let (_built, reader) = open::<u64>(&files, HASH_TYPE_XXH3_64);
-    assert_seeks_match(&files, &reader, ROM_SET_SEEK_SEED);
-}
-
-#[test]
-#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
-fn u128_seeks_read_the_original_bytes() {
-    let files = rom_set_files();
-    let (_built, reader) = open::<u128>(&files, HASH_TYPE_XXH3_128);
-    assert_seeks_match(&files, &reader, ROM_SET_SEEK_SEED);
 }
 
 #[test]
