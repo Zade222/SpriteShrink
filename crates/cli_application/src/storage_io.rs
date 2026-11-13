@@ -851,4 +851,39 @@ mod tests {
             [tmp.path().join("a.bin"), tmp.path().join("b.bin")]
         );
     }
+
+    /*Every test input is small enough for the in-memory cache, so only
+    this test runs the on-disk one large inputs use. Both backends get the
+    same steps and must give the same answers.*/
+    #[test]
+    fn both_cache_backends_keep_the_first_copy_of_each_chunk() {
+        let tmp = TempDir::new().unwrap();
+
+        for use_in_memory in [false, true] {
+            let path = tmp.path().join("cache.tmp");
+            let cache = TempCache::<u64>::new(path.clone(), use_in_memory)
+                .unwrap();
+
+            cache.insert_batch(&[(1, b"aaa".to_vec()), (2, b"bb".to_vec())])
+                .unwrap();
+            // Key 2 is already stored, so its new data is dropped.
+            cache.insert_batch(&[(2, b"XX".to_vec()), (3, b"c".to_vec())])
+                .unwrap();
+
+            assert_eq!(
+                cache.get_chunks(&[3, 1, 2]).unwrap(),
+                [b"c".to_vec(), b"aaa".to_vec(), b"bb".to_vec()],
+                "in memory: {use_in_memory}"
+            );
+            assert_eq!(cache.get_keys().unwrap(), [1, 2, 3]);
+            assert_eq!(cache.get_tot_data_size(), 6);
+            assert!(matches!(
+                cache.get_chunks(&[4]),
+                Err(CliError::KeyNotFound(_))
+            ));
+
+            drop(cache);
+            assert!(!path.exists(), "in memory: {use_in_memory}");
+        }
+    }
 }
