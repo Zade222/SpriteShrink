@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use sprite_shrink::{HASH_TYPE_XXH3_128, parse_file_header};
 use sprite_shrink_test_support::{assert_bytes_eq, rom_set, tiled_bytes};
 use tempfile::TempDir;
 
@@ -511,6 +512,60 @@ fn a_disc_in_two_files_is_extracted_as_one() {
          \x20   INDEX 01 00:00:00\n\
          \x20 TRACK 02 AUDIO\n\
          \x20   INDEX 01 00:02:00\n"
+    );
+}
+
+#[test]
+fn both_modes_write_128_bit_archives_on_request() {
+    let tmp = TempDir::new().unwrap();
+    let out_dir = tmp.path().join("extract");
+    let roms = tmp.path().join("roms.ssmc");
+    let disc = tmp.path().join("disc.ssmd");
+    let input_dir = two_roms(tmp.path());
+    let disc_dir = tmp.path().join("disc");
+    let image = write_blank_disc(&disc_dir, "disc", 300);
+
+    run_cli(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", roms.to_str().unwrap(),
+        "-b", "128",
+    ]);
+    run_cli(&[
+        "--mode", "optical",
+        "-i", disc_dir.to_str().unwrap(),
+        "-o", disc.to_str().unwrap(),
+        "-b", "128",
+    ]);
+
+    for archive in [&roms, &disc] {
+        let bytes = fs::read(archive).unwrap();
+        let header = parse_file_header(&bytes[..36]).unwrap();
+        assert_eq!(
+            header.hash_type,
+            HASH_TYPE_XXH3_128,
+            "{}",
+            archive.display()
+        );
+    }
+
+    fs::create_dir_all(&out_dir).unwrap();
+    run_cli(&[
+        "-i", roms.to_str().unwrap(),
+        "-o", out_dir.to_str().unwrap(),
+        "-e", "1-2",
+    ]);
+    extract_first(&disc, &out_dir);
+    for name in ["a.bin", "b.bin"] {
+        assert_bytes_eq(
+            &fs::read(out_dir.join(name)).unwrap(),
+            &fs::read(input_dir.join(name)).unwrap(),
+            name,
+        );
+    }
+    assert_bytes_eq(
+        &fs::read(out_dir.join("disc.bin")).unwrap(),
+        &image,
+        "disc.bin",
     );
 }
 
