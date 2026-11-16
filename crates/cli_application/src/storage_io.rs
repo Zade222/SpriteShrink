@@ -393,12 +393,9 @@ pub fn calc_tot_input_size(
 
 /// Manages log file retention by deleting old log files.
 ///
-/// This function is responsible for cleaning up the application's log
-/// directory. It identifies the platform-specific local data directory,
-/// finds any log files matching the application's naming convention
-/// (e.g., `debug.log.<date>`), and compares their creation timestamps
-/// against the specified retention period. Any log file found to be older
-/// than the retention period is removed.
+/// This function finds the application's log directory in the
+/// platform-specific local data directory and removes the logs in it that
+/// are older than the retention period, as [`remove_old_logs`] describes.
 ///
 /// A special value of `0` for `retention_days` will disable the cleanup
 /// process, effectively keeping all log files indefinitely.
@@ -424,11 +421,6 @@ pub fn calc_tot_input_size(
 pub fn cleanup_old_logs(
     retention_days: u16
 ) -> Result<(), CliError> {
-    if retention_days == 0 {
-        //A value of 0 means logs are retained indefinitely.
-        return Ok(());
-    }
-
     let proj_dirs = ProjectDirs::from(
         APPIDENTIFIER.qualifier,
         APPIDENTIFIER.organization,
@@ -438,13 +430,36 @@ pub fn cleanup_old_logs(
     let mut log_dir = PathBuf::from(proj_dirs.data_local_dir());
     log_dir.push("logs");
 
+    remove_old_logs(&log_dir, retention_days, SystemTime::now())
+}
+
+/// Removes the log files in `log_dir` (named like `debug.log.<date>`) whose
+/// last modification is more than `retention_days` before `now`. A log
+/// exactly that old is kept. `0` keeps every log, and a missing `log_dir`
+/// has nothing to remove.
+///
+/// `now` is a parameter so tests can place files at exact ages.
+///
+/// # Errors
+///
+/// Returns `CliError::IoError` if `log_dir` can't be read or a log can't be
+/// removed.
+fn remove_old_logs(
+    log_dir: &Path,
+    retention_days: u16,
+    now: SystemTime,
+) -> Result<(), CliError> {
+    if retention_days == 0 {
+        //A value of 0 means logs are retained indefinitely.
+        return Ok(());
+    }
+
     if !log_dir.exists() {
         return Ok(());
     }
 
-    let now = SystemTime::now();
     let retention_duration = std::time::Duration::from_secs(
-        retention_days as u64 * 24 * 60 * 60 //Convert to secs
+        u64::from(retention_days) * 24 * 60 * 60 //Convert to secs
     );
 
     for log in read_dir(log_dir)? {
@@ -686,6 +701,8 @@ impl <H: Hash + Eq> Drop for TempCache<H> {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use tempfile::TempDir;
 
     use super::*;
@@ -850,6 +867,37 @@ mod tests {
             files,
             [tmp.path().join("a.bin"), tmp.path().join("b.bin")]
         );
+    }
+
+    #[test]
+    fn only_debug_logs_past_the_retention_are_removed() {
+        const DAY: Duration = Duration::from_hours(24);
+        let now = SystemTime::now();
+        let tmp = TempDir::new().unwrap();
+        let file_aged = |name: &str, age: Duration| {
+            let path = tmp.path().join(name);
+            File::create(&path).unwrap().set_modified(now - age).unwrap();
+            path
+        };
+        let expired = file_aged(
+            "debug.log.2026-01-01",
+            7 * DAY + Duration::from_secs(1),
+        );
+        let at_limit = file_aged("debug.log.2026-01-02", 7 * DAY);
+        let recent = file_aged("debug.log.2026-01-07", DAY);
+        let not_a_log = file_aged("notes.txt", 30 * DAY);
+
+        // 0 keeps every log, however old.
+        remove_old_logs(tmp.path(), 0, now).unwrap();
+        assert!(expired.exists());
+
+        remove_old_logs(tmp.path(), 7, now).unwrap();
+        assert!(!expired.exists());
+        for kept in [&at_limit, &recent, &not_a_log] {
+            assert!(kept.exists(), "{}", kept.display());
+        }
+
+        remove_old_logs(&tmp.path().join("missing"), 7, now).unwrap();
     }
 
     /*Every test input is small enough for the in-memory cache, so only
