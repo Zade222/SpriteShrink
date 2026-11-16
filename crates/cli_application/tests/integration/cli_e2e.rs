@@ -183,6 +183,50 @@ fn metadata_lists_each_disc_as_json() {
     );
 }
 
+#[test]
+fn discs_in_a_playlist_share_a_group() {
+    let tmp = TempDir::new().unwrap();
+    let archive = tmp.path().join("discs.ssmd");
+    let dirs = ["first", "second", "third"].map(|name| tmp.path().join(name));
+    write_blank_disc(&dirs[0], "one", 300);
+    write_blank_disc(&dirs[1], "two", 310);
+    write_blank_disc(&dirs[2], "three", 320);
+
+    // Entries are matched to discs by file stem, so the commented-out path
+    // would put disc two in the first group if comments were read.
+    fs::write(
+        dirs[0].join("set.m3u"),
+        "#EXTM3U\n\n# second/two.cue\none.cue\n",
+    )
+    .unwrap();
+    fs::write(dirs[2].join("set.m3u8"), "three.cue\n").unwrap();
+
+    let mut args = vec!["--mode", "optical"];
+    for dir in &dirs {
+        args.extend(["-i", dir.to_str().unwrap()]);
+    }
+    args.extend(["-o", archive.to_str().unwrap()]);
+    run_cli(&args);
+
+    let stdout = stdout_of(&["-i", archive.to_str().unwrap(), "-m"]);
+    let listed: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    let groups: Vec<(&str, &serde_json::Value)> = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|disc| (disc["filename"].as_str().unwrap(), &disc["group"]))
+        .collect();
+    // The archive lists discs by name.
+    assert_eq!(
+        groups,
+        [
+            ("one.bin", &serde_json::json!(1)),
+            ("three.bin", &serde_json::json!(2)),
+            ("two.bin", &serde_json::Value::Null),
+        ]
+    );
+}
+
 /// Copies the committed v2 SSMC fixture into `dir` with the byte at
 /// `offset` set to `value`, and returns the copy's path.
 fn patched_fixture(dir: &Path, offset: usize, value: u8) -> PathBuf {
