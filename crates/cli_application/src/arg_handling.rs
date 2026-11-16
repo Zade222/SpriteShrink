@@ -668,7 +668,7 @@ mod tests {
     #[test]
     fn each_documented_rejection_is_made() {
         let inputs = Inputs::new();
-        let cases: [Rejection; 13] = [
+        let cases: [Rejection; 15] = [
             (
                 "compression output exists",
                 &["-i", "{sub}", "-o", "{old.ssmc}"],
@@ -677,6 +677,16 @@ mod tests {
             (
                 "optical with list",
                 &["-i", "{old.ssmc}", "-l", "--mode", "optical"],
+                |e| matches!(e, CliError::ConflictingArguments(_)),
+            ),
+            (
+                "optical with extraction",
+                &["-i", "{old.ssmc}", "-o", "{sub}", "-e", "1", "--mode", "optical"],
+                |e| matches!(e, CliError::ConflictingArguments(_)),
+            ),
+            (
+                "optical with metadata",
+                &["-i", "{old.ssmc}", "-m", "--mode", "optical"],
                 |e| matches!(e, CliError::ConflictingArguments(_)),
             ),
             (
@@ -705,7 +715,6 @@ mod tests {
                 |e| matches!(e, CliError::MissingFlag(_)),
             ),
             (
-                // Without `-f`, an existing folder is rejected as existing.
                 "compression output is a folder",
                 &["-i", "{a.bin}", "-i", "{b.bin}", "-o", "{sub}", "-f"],
                 |e| matches!(e, CliError::InvalidPath(_)),

@@ -444,6 +444,68 @@ fn rejected_arguments_exit_with_failure() {
     assert_eq!(fs::read(&existing).unwrap(), b"keep me");
 }
 
+/// These are checked in `run` and the extractors, after folders have been
+/// expanded into files, so `validate_args` and its unit tests don't see
+/// them.
+#[test]
+fn inputs_and_outputs_run_cannot_use_are_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let roms = two_roms(tmp.path());
+    let empty = tmp.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+    let missing = tmp.path().join("missing");
+    let baseline = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/baseline");
+    let [roms, empty, missing, roms_archive, disc_archive] = [
+        roms,
+        empty,
+        missing,
+        baseline.join("roms.ssmc"),
+        baseline.join("disc.ssmd"),
+    ]
+    .map(|path| path.to_str().unwrap().to_owned());
+    let new_archive = format!("{missing}/out.ssmc");
+
+    let cases: [(&str, Vec<&str>, &str); 6] = [
+        (
+            "extraction from a folder of two files",
+            vec!["-i", &roms, "-o", &empty, "-e", "1"],
+            "Only one input file is supported for extraction",
+        ),
+        (
+            "listing an empty folder",
+            vec!["-i", &empty, "-l"],
+            "The provided input paths contain no files.",
+        ),
+        (
+            "listing a folder of two files",
+            vec!["-i", &roms, "-l"],
+            "Metadata flag does not support ingesting directories.",
+        ),
+        (
+            "compression into a missing folder",
+            vec!["-i", &roms, "-o", &new_archive],
+            "Provided output path does not exist.",
+        ),
+        (
+            "SSMC extraction into a missing folder",
+            vec!["-i", &roms_archive, "-o", &missing, "-e", "1"],
+            "Provided output path does not exist.",
+        ),
+        (
+            "SSMD extraction into a missing folder",
+            vec!["-i", &disc_archive, "-o", &missing, "-e", "1"],
+            "Provided output path does not exist.",
+        ),
+    ];
+
+    for (case, args, message) in cases {
+        let printed = failure_output(&args);
+        assert!(printed.contains(message), "{case}, output:\n{printed}");
+        assert!(!Path::new(&missing).exists(), "{case} created the folder");
+    }
+}
+
 #[test]
 fn a_skipped_subfolder_is_not_called_a_symbolic_link() {
     let tmp = TempDir::new().unwrap();
