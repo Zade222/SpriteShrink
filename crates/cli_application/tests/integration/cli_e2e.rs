@@ -225,6 +225,23 @@ fn discs_in_a_playlist_share_a_group() {
             ("two.bin", &serde_json::Value::Null),
         ]
     );
+
+    // The list shows the same groups, with "-" for a disc in none.
+    let table = stdout_of(&["-i", archive.to_str().unwrap(), "-l"]);
+    let rows: Vec<&str> = table.lines().skip(2).collect();
+    let row = |index: usize, group: &str, sectors: u32, name: &str| {
+        let size = human_bytes::human_bytes(f64::from(sectors * 2352));
+        format!("{index}\t| {group}\t| {size} | {name}")
+    };
+    assert_eq!(
+        rows,
+        [
+            row(1, "1", 300, "one.bin"),
+            row(2, "2", 320, "three.bin"),
+            row(3, "-", 310, "two.bin"),
+        ],
+        "stdout:\n{table}"
+    );
 }
 
 /// Copies the committed v2 SSMC fixture into `dir` with the byte at
