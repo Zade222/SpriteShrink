@@ -24,11 +24,11 @@ auto_tune = false
 # Default = 15 seconds
 autotune_timeout = 15
 
-# Enable (true) or disable (false) whether to optimze the ztd compression
+# Enable (true) or disable (false) whether to optimize the zstd compression
 # dictionary when it is generated. Be sure to disable when processing large
 # amounts of data (e.g. If a single ROM exceeds approximately 64 megabytes,
-# set to false) as this step can take a significant amount of time for neglible
-# gain for large amounts of data.
+# set to false) as this step can take a significant amount of time for
+# negligible gain for large amounts of data.
 # Default = false
 optimize_dictionary = false
 
@@ -61,9 +61,9 @@ log_retention_days = 7
 # Sets the log file verbosity level when enabled.
 # - error will only log errors.
 # - warning includes warning messages and the above messages (errors)
-# - info includes info messages and the above messages (errrors and warnings)
+# - info includes info messages and the above messages (errors and warnings)
 # - debug includes debug messages and the above messages
-#   (errrors, warnings and info)
+#   (errors, warnings and info)
 # - off disables the creation of a log file and won't write any messages to one
 #   if one exists
 # Default = "error"

@@ -21,6 +21,7 @@ Welcome to the official user manual for SpriteShrink! This guide provides everyt
     - [2. Inspecting an `.ssmc` Archive](#2-inspecting-an-ssmc-archive)
     - [3. Extracting Files from an `.ssmc` Archive](#3-extracting-files-from-an-ssmc-archive)
   - [Command Line Reference](#command-line-reference)
+    - [Exit Status](#exit-status)
   - [Advanced Usage \& Performance Tuning](#advanced-usage--performance-tuning)
     - [The Configuration File](#the-configuration-file)
       - [Configuration File Location](#configuration-file-location)
@@ -137,6 +138,8 @@ Let's say you have your game variants in a folder named `MyGameCollection`.
 *   It creates a new archive named `MyGame.ssmc` in the current directory.
 *   The `-p` flag shows a progress bar so you can see what's happening.
 
+Each file is stored under its file name, so every input must have a different name. If you give several folders with `-i` and two of them hold a file with the same name, such as `USA/game.rom` and `Europe/game.rom`, SpriteShrink lists the clashing names and stops before writing anything. Rename one of the files and run it again.
+
 ### 2. Compressing Optical Disc Images (Optical Mode)
 
    SpriteShrink features a specialized "Optical Mode" designed specifically for CD-based disc images (like PlayStation 1, Sega Saturn, or Sega CD games). Unlike standard file compression, this mode understands the structure of the disc (sectors, audio tracks, error correction), allowing for safe, bit-perfect restoration and superior compression of game data and CD audio.
@@ -159,7 +162,8 @@ Let's say you have your game variants in a folder named `MyGameCollection`.
 
    **Key Features of Optical Mode:**
    *   **Audio Compression**: Redundant CD-DA (audio) tracks are analyzed and compressed/deduplicated separately from data tracks.
-   *   **Multi-Disc Collections**: If you include an `.m3u` file containing filenames of `.cue` sheets (e.g., "Final Fantasy VII (Disc 1).cue", etc.), SpriteShrink will link them together into a group.
+   *   **Multi-Disc Collections**: If you include an `.m3u` file containing filenames of `.cue` sheets (e.g., "Final Fantasy VII (Disc 1).cue", etc.), SpriteShrink will link them together into a group. Lines starting with `#` are comments. When you list the archive, discs in a group share a number in the `Grp` column (`group` with `-m`); discs in no group show `-` (`null`).
+   *   **Unique Disc Names**: Each disc is stored under its `.cue` file's name, so every `.cue` sheet must have a different name, even when they are in different folders. Each disc's `.bin` files are read from the folder its `.cue` file is in.
    *   **Integrity Verification**: Optical mode calculates specialized hashes (SHA-512 and XXH3) to ensure the reconstructed disc is bit-perfect to the original.
 
 ### 3. Inspecting an `.ssmc` or `.ssmd` Archive
@@ -182,14 +186,14 @@ Before you extract files, you need to know what's inside the archive. The file l
 The tool will print a table listing all the files in the archive, each with an **index number**. This index is crucial for extraction.
 
 ```
-+-------+--------------------------------+---------------+
-| Index | Filename                       | Original Size |
-+-------+--------------------------------+---------------+
-| 1     | MyGame (USA).rom               | 4.19 MB       |
-| 2     | MyGame (Europe).rom            | 4.19 MB       |
-| 3     | MyGame (Japan).rom             | 4.21 MB       |
-+-------+--------------------------------+---------------+
+Index   | Filesize      | Filename
+----------------------------------
+1       | 4.2 MB        | MyGame (Europe).rom
+2       | 4.2 MB        | MyGame (Japan).rom
+3       | 4.2 MB        | MyGame (USA).rom
 ```
+
+Files are listed in name order. For a `.ssmd` archive the table also has a `Grp` column showing each disc's collection.
 
 For automation, you can get this same information in a machine-readable format using the `-m` (`--metadata`) flag.
 
@@ -205,10 +209,10 @@ Once you know the index of the file(s) you want, you can extract them.
 *   `-e` or `--extract`: The index or indices of the files to extract. You can specify multiple indices separated by commas (e.g., `1,2`) or a range (e.g., `1-3`).
 
 **Example:**
-Let's extract the USA and Japan versions (indices 1 and 3) from our `MyGame.ssmc` archive into a folder called `ExtractedGames`.
+Let's extract the Japan and USA versions (indices 2 and 3) from our `MyGame.ssmc` archive into a folder called `ExtractedGames`.
 
 ```bash
-./sprite_shrink -i ./MyGame.ssmc -o ./ExtractedGames -e 1,3 -f
+./sprite_shrink -i ./MyGame.ssmc -o ./ExtractedGames -e 2,3 -f
 ```
 
 *   This will re-create `MyGame (USA).rom` and `MyGame (Japan).rom` inside the `ExtractedGames` folder.
@@ -233,6 +237,18 @@ This is a quick reference for the most common arguments. For a full list, run `.
 | `-h`       | `--help`              | Print the full help message and exit.                                    |
 |            | `--mode`              | Specify a specialized mode other than the default such as `optical`      |
 
+### Exit Status
+
+SpriteShrink's exit status tells scripts whether a run worked:
+
+| Status | Meaning |
+| :--- | :--- |
+| `0` | The run finished successfully. |
+| `1` | The run failed, for example because of an invalid argument, a missing file or a damaged archive. The error is printed to the terminal. |
+| `130` | The run was cancelled with `Ctrl+C`. |
+
+The [Helper Scripts](#helper-scripts) use this to report which games failed.
+
 ---
 
 ## Advanced Usage & Performance Tuning
@@ -250,7 +266,7 @@ SpriteShrink offers several options to fine-tune the compression process. For mo
 *   `-t` or `--threads`: By default, SpriteShrink will use all available CPU cores to work as fast as possible. You can use this flag to limit the number of threads if you need to use your computer for other tasks while it's running (e.g., `-t 4`).
 
 * `-w <size>` or `--window <size>`: This flag allows you to manually set the window size for the content-defined chunking algorithm (e.g., 2kb, 4kb). The window
-size influences the average size of the data chunks. Smaller chunks can lead to better deduplication on files with small, repetitive segments, while larger chunks can be faster to process. This is automatically handled by --auto-tune, but manual control is available for fine-tuning. The recommended default is 2kb.
+size influences the average size of the data chunks. Smaller chunks can lead to better deduplication on files with small, repetitive segments, while larger chunks can be faster to process. This is automatically handled by --auto-tune, but manual control is available for fine-tuning. The recommended default is 2kb. The window must be between 256 bytes and 4 MiB; SpriteShrink rejects any other size before it starts compressing. The window only applies when compressing, so `-w` (or `window_size` in the configuration file) is ignored when you list or extract.
 
 * `-d <size>` or `--dictionary <size>`: Manually sets the size of the compression dictionary (e.g., 16kb, 32kb). The dictionary is a small file, generated from samples of your input data, this helps the Zstandard compression algorithm used by SpriteShrink to achieve much better compression ratios. A larger dictionary can significantly improve compression for datasets with a lot of repetitive patterns, but it will increase memory usage and the initial training time. The recommended default is 16kb.
 
@@ -282,8 +298,6 @@ The configuration file uses the TOML format, which is designed to be easy to rea
 
 
 ```toml
-# SpriteShrink Configuration File
-# -------------------------------
 # Sets the numerical compression level.
 # Default = 19
 compression_level = 19
@@ -310,11 +324,11 @@ auto_tune = false
 # Default = 15 seconds
 autotune_timeout = 15
 
-# Enable (true) or disable (false) whether to optimize the ztd compression 
-# dictionary when it is generated. Be sure to disable when processing large 
-# amounts of data (e.g. If a single ROM exceeds approximately 64 megabytes, 
-# set to false) as this step can take a significant amount of time for negligible
-# gain for large amounts of data.
+# Enable (true) or disable (false) whether to optimize the zstd compression
+# dictionary when it is generated. Be sure to disable when processing large
+# amounts of data (e.g. If a single ROM exceeds approximately 64 megabytes,
+# set to false) as this step can take a significant amount of time for
+# negligible gain for large amounts of data.
 # Default = false
 optimize_dictionary = false
 
@@ -328,8 +342,8 @@ threads = 0
 # Default = false
 low_memory = false
 
-# Enable (true) or disable (false) whether to print metadata info in
-# json format.
+# Enable (true) or disable (false) printing the --list output in json
+# format, as the --metadata flag does.
 # Default = false
 json_output = false
 
@@ -348,7 +362,7 @@ log_retention_days = 7
 # - error will only log errors.
 # - warning includes warning messages and the above messages (errors)
 # - info includes info messages and the above messages (errors and warnings)
-# - debug includes debug messages and the above messages 
+# - debug includes debug messages and the above messages
 #   (errors, warnings and info)
 # - off disables the creation of a log file and won't write any messages to one
 #   if one exists

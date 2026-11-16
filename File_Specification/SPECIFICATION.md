@@ -34,9 +34,9 @@ The header appears at offset 0. It identifies the file type, version, and the fo
 | Offset | Type | Field | Description |
 | :--- | :--- | :--- | :--- |
 | 0 | `[u8; 8]` | `magic_num` | Magic bytes. Default: `b"SSARCHV1"` |
-| 8 | `u32` | `file_version` | Archive format version (e.g., `0x00020000`). |
+| 8 | `u32` | `file_version` | Archive format version: major in the high 16 bits, minor in the low 16 (e.g., `0x00020001` = 2.1). Readers reject a version newer than their own. |
 | 12 | `u32` | `file_count` | Total number of files/discs in the archive. |
-| 16 | `u16` | `algorithm` | Compresson algorithm ID (e.g., 98 = Zstd). |
+| 16 | `u16` | `algorithm` | Compression algorithm ID (e.g., 98 = Zstd). |
 | 18 | `u8` | `hash_type` | Hash type ID (e.g., 1 = xxhash3_64, 2 = xxhash3_128). |
 | 19 | `u8` | `_pad1` | Padding (Zero). |
 | 20 | `u16` | `format_id` | **Format Identifier**: <br>`0x0000` = SSMC (Multi-Cart) <br>`0xd541` = SSMD (Multi-Disc) |
@@ -69,7 +69,7 @@ Used for standard file archives.
 | `FileRegion` | `enc_manifest` | Location of the compressed File Manifest. |
 | `FileRegion` | `data_dictionary` | Location of the compression dictionary. |
 | `FileRegion` | `enc_chunk_index` | Location of the compressed Chunk Index. |
-| `u64` | `data_offset` | Absolute offst where the Chunk Data Blob begins. |
+| `u64` | `data_offset` | Absolute offset where the Chunk Data Blob begins. |
 
 ### 3.2. SSMD Format Data (`format_id = 0xd541`)
 
@@ -133,6 +133,7 @@ SSMD uses a complex manifest to reconstruct CD sectors.
 
 *   **Disc Manifest:** Serialized `Vec<DiscManifest<H>>`.
   struct DiscManifest<H> {
+      files: Vec<DiscFile>,               // CUE sheet layout (2.1 and later)
       lba_map: Vec<(u32, u32)>,           // Logical Block Address mapping
       rle_sector_map: RleSectorMap,       // Run-Length Encoded Sector Types
       audio_block_map: Vec<ContentBlock<H>>, // CD-DA Audio tracks
@@ -142,13 +143,38 @@ SSMD uses a complex manifest to reconstruct CD sectors.
       integrity_hash: u64,
   }
 
+  struct DiscFile {
+      name: String,          // File name from the CUE sheet's FILE line
+      sector_count: u32,     // Length in 2352-byte sectors
+      tracks: Vec<DiscTrack>,
+  }
+
+  struct DiscTrack {
+      number: u8,
+      track_type: TrackType, // Audio, Mode1_2352 or Mode2_2352
+      indices: Vec<DiscIndex>,
+  }
+
+  struct DiscIndex {
+      number: u8,
+      sector: u32,           // Sectors from the start of its file
+  }
+
+*   **Manifest layout by version:** `files` was added in format 2.1.
+    bitcode stores no field names, so a reader picks the layout from the
+    header's `file_version`: from `0x00020001` the manifest starts with
+    `files`, and before it the manifest has every other field in the same
+    order. A reader rebuilds the CUE sheet from `files`, joining the files
+    into one image and moving each file's indices to where it starts. For
+    archives before 2.1, which have no layout, it infers the sheet from
+    the sector map.
 
 *   **Sector Types:**
     Common types include `Audio` (2352 bytes), `Mode1` (2048 bytes data), `Mode2Form1`, `Mode2Form2`.
 
 *   **Streams vs Blocks:**
     *   **Data (Mode1/Mode2):** Stored as a deduplicated stream of chunks (`data_stream_layout`), reconstructed using the `chunk_index`.
-    *   **Audio:** Stored as "blocks" (typically full tracks or large segments) compressed with FLAC, referenced by `audio_block_map` and `enc_audio_index`.
+    *   **Audio:** Stored as deduplicated blocks, each compressed with FLAC, referenced by `audio_block_map` and `enc_audio_index`. Each `ContentBlock` records its own sector count. The reference writer uses 16 sectors per block, with a shorter last block where a run of audio sectors ends.
 
 ## 5. Read Logic Summary
 

@@ -129,7 +129,13 @@ Run the full test suite before submitting a pull request:
 cargo test --workspace
 ```
 
-CI runs the tests on Linux and Windows, in both debug and release mode, for every push and pull request. It also checks that the generated C header compiles, and runs the `lib_ss_cd` tests under QEMU on an emulated CPU without AVX2 so the non-AVX2 SIMD path is covered.
+CI runs the tests on Linux and Windows, in both debug and release mode, for every push and pull request. It also checks that the generated C header compiles, runs the `lib_ss_cd` tests under QEMU on an emulated CPU without AVX2 so the non-AVX2 SIMD path is covered, and runs the tests of the `unsafe` code under Miri (see below).
+
+The release profile aborts on panic, but tests need unwinding, so run the release tests the way CI does:
+
+```bash
+CARGO_PROFILE_RELEASE_PANIC=unwind cargo test --workspace --release
+```
 
 To run only part of the suite, filter by crate, test binary or module path:
 
@@ -164,6 +170,21 @@ To test the non-AVX2 path locally on Linux, install QEMU user-mode emulation and
 ```bash
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="qemu-x86_64 -cpu Westmere" cargo test -p sprite_shrink_cd
 ```
+
+**Miri:** every `unsafe` block needs a `// SAFETY:` comment and a test that runs under [Miri](https://github.com/rust-lang/miri), which reports undefined behaviour that normal tests can't see. CI runs the FFI tests and the ECC kernel tests under it. With a nightly toolchain that has the `miri` component:
+
+```bash
+export MIRIFLAGS=-Zmiri-symbolic-alignment-check
+cargo +nightly miri test -p sprite_shrink --test integration ffi_smoke::
+cargo +nightly miri test -p sprite_shrink_cd --lib -- \
+    ecc::tests::ecc_kernel ecc::tests::calc_ecc_simd_inplace
+```
+
+Miri can't run zstd, which is C code, so tests that compress are marked `#[cfg_attr(miri, ignore = "...")]`. Miri is also much slower than a normal run; a test that loops over a lot of data can use less of it under `cfg!(miri)`, as long as it still reaches the same `unsafe` code.
+
+**Fuzzing:** the `fuzz/` folder has cargo-fuzz targets for the archive readers, the CUE parser and sector analysis. They aren't run in CI. See [`fuzz/README.md`](fuzz/README.md) for how to run them and what to do with a crash.
+
+**Mutation testing:** [cargo-mutants](https://mutants.rs/) changes the code in small ways and reports changes no test notices. It isn't run in CI, but it's a good check that a new test actually catches the bug it's for. `.cargo/mutants.toml` holds its settings. It doesn't mutate `unsafe` functions, so it says nothing about the FFI entry points.
 
 ### Error Handling
 
