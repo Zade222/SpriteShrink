@@ -539,6 +539,24 @@ fn a_wrong_integrity_hash_fails_write_disc() {
     .unwrap_err();
 }
 
+const ONE_AUDIO_TRACK_CUE: &str = r#"FILE "disc.bin" BINARY
+  TRACK 01 AUDIO
+    INDEX 01 00:00:00
+"#;
+
+#[test]
+fn audio_past_the_first_fetch_is_verified() {
+    let sectors = 65 * AUDIO_BLOCK_SECTORS;
+    let disc = archive(
+        image(sectors, |i| audio(i % AUDIO_BLOCK_SECTORS)),
+        ONE_AUDIO_TRACK_CUE,
+    );
+    assert_eq!(disc.audio_blocks.len(), 1);
+    assert_eq!(disc.manifest.audio_block_map.len(), 65);
+
+    verify(&disc);
+}
+
 /// A writer whose every write fails, as a full disk does.
 struct FullDisk;
 
