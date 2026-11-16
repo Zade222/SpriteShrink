@@ -39,12 +39,22 @@ const Q_COL_LEN: usize = 26 + MAX_LANES;
 /// directly, not only the one `Arch::new()` picks on the test machine.
 struct EccKernel<'a>(&'a mut [u8]);
 
+/// Writes `word` to `sector[at..at + 2]`, little-endian.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "every parity word ends by byte 2352, and with_simd asserts \
+              the sector is 2352 bytes"
+)]
+fn put_word(sector: &mut [u8], at: usize, word: u16) {
+    sector[at..at + 2].copy_from_slice(&word.to_le_bytes());
+}
+
 impl WithSimd for EccKernel<'_> {
     type Output = ();
 
     #[inline(always)]
     fn with_simd<S: Simd>(self, simd: S) -> Self::Output {
-        // The parity is written through raw pointers up to byte 2352.
+        // put_word writes the parity up to byte 2352.
         assert_eq!(self.0.len(), 2352, "ECC needs a full 2352-byte sector");
 
         // pulp's `Scalar` level uses `bool` masks, so `transmute_u8s_m8s`
@@ -70,9 +80,6 @@ impl WithSimd for EccKernel<'_> {
         let mut high_p = [0u8; 86];
         let mut temp_out_p1 = [0u8; MAX_LANES];
         let mut temp_out_p0 = [0u8; MAX_LANES];
-
-        let p1_dst = unsafe { sector.as_mut_ptr().add(2076) as *mut u16 };
-        let p0_dst = unsafe { sector.as_mut_ptr().add(2162) as *mut u16 };
 
         for chunk_start in (0..43).step_by(lanes) {
             let chunk_len = std::cmp::min(chunk_start + lanes, 43) - chunk_start;
@@ -123,10 +130,8 @@ impl WithSimd for EccKernel<'_> {
                 let p1_val = (low_p[c] as u16) | ((high_p[c] as u16) << 8);
                 let p0_val = (low_p[c + 43] as u16) | ((high_p[c + 43] as u16) << 8);
 
-                unsafe {
-                    p1_dst.add(c).write_unaligned(p1_val.to_le());
-                    p0_dst.add(c).write_unaligned(p0_val.to_le());
-                }
+                put_word(sector, 2076 + 2 * c, p1_val);
+                put_word(sector, 2162 + 2 * c, p0_val);
             }
         }
 
@@ -149,9 +154,6 @@ impl WithSimd for EccKernel<'_> {
             let (src_h, dst_h) = high_cols[c].split_at_mut(26);
             dst_h[..26].copy_from_slice(&src_h[..26]);
         }
-
-        let q1_dst = unsafe { sector.as_mut_ptr().add(2248) as *mut u16 };
-        let q0_dst = unsafe { sector.as_mut_ptr().add(2300) as *mut u16 };
 
         let mut temp_out_q1_h = [0u8; MAX_LANES];
         let mut temp_out_q0_h = [0u8; MAX_LANES];
@@ -201,10 +203,8 @@ impl WithSimd for EccKernel<'_> {
                 let q1_val = (l_q1 as u16) | ((h_q1 as u16) << 8);
                 let q0_val = (l_q0 as u16) | ((h_q0 as u16) << 8);
 
-                unsafe {
-                    q1_dst.add(d).write_unaligned(q1_val.to_le());
-                    q0_dst.add(d).write_unaligned(q0_val.to_le());
-                }
+                put_word(sector, 2248 + 2 * d, q1_val);
+                put_word(sector, 2300 + 2 * d, q0_val);
             }
         }
     }
@@ -394,7 +394,12 @@ mod tests {
     /// Sectors from a fixed-seed xorshift generator, plus solid fills. The
     /// 0x80 and 0xFF fills set the top bit of every byte, which is the case
     /// where the GF(2^8) multiply has to reduce by 0x1D.
+    ///
+    /// Miri gets one generated sector instead of 64. It checks memory
+    /// accesses, which are the same for any sector, and with all 67 sectors
+    /// the kernel tests took it about 6 minutes instead of 20 seconds.
     fn test_sectors() -> Vec<[u8; SECTOR_SIZE]> {
+        let generated = if cfg!(miri) { 1 } else { 64 };
         let mut sectors = vec![
             [0x00; SECTOR_SIZE],
             [0x80; SECTOR_SIZE],
@@ -402,7 +407,7 @@ mod tests {
         ];
 
         let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
-        for _ in 0..64 {
+        for _ in 0..generated {
             let mut sector = [0_u8; SECTOR_SIZE];
             for byte in &mut sector {
                 state ^= state << 13;

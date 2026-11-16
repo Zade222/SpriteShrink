@@ -103,3 +103,38 @@ jobs:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: qemu-x86_64 -cpu Westmere
           # See "Test (release)" above.
           CARGO_PROFILE_RELEASE_PANIC: unwind
+
+  miri:
+    name: Unsafe code under Miri
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Miri can't call zstd's C code, so the tests that compress are
+      # ignored under it (`cfg_attr(miri, ignore)`).
+      - name: FFI tests under Miri
+        run: >
+          cargo miri test -p sprite_shrink --test integration ffi_smoke::
+
+      # The ECC kernel writes and reads SIMD vectors through raw pointers.
+      # The ECC proptests check safe code, so they aren't run here.
+      - name: ECC kernel under Miri
+        run: >
+          cargo miri test -p sprite_shrink_cd --lib --
+          ecc::tests::ecc_kernel ecc::tests::calc_ecc_simd_inplace
+
+    env:
+      # Fails accesses that are only aligned because of where the allocator
+      # happened to put the data. -Zmiri-strict-provenance isn't used: the
+      # FFI code passes the host's user_data pointer through a usize.
+      MIRIFLAGS: -Zmiri-symbolic-alignment-check
