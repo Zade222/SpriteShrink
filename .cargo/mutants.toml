@@ -1,0 +1,3 @@
+# test_support holds helpers that only tests use. Its code has no tests of
+# its own, so every mutant in it would be reported as missed.
+exclude_globs = ["crates/test_support/**"]

@@ -366,16 +366,11 @@ fn serialize_u128_matches_rust_api() {
     unsafe { free_serialized_output_u128(out) };
 }
 
+/// `serialize_rejects_each_null_pointer` covers a null `filenames` array;
+/// this is a null entry inside it.
 #[test]
-fn serialize_rejects_null_filenames() {
+fn serialize_rejects_a_null_filename_in_the_array() {
     let hashes = [1_u64, 2, 3];
-
-    let input = host_input::<u64, u64>(hashes);
-    let (status, out) = ffi_serialize_u64(&input, |args| {
-        args.filenames = ptr::null();
-    });
-    assert_eq!(status_code(status), status_code(FFIStatus::NullArgument));
-    assert!(out.is_null());
 
     let mut input = host_input::<u64, u64>(hashes);
     input.name_ptrs[1] = ptr::null();
@@ -407,14 +402,6 @@ fn serialize_rejects_filename_that_is_not_utf8() {
 
     assert_eq!(status_code(status), status_code(FFIStatus::InvalidString));
     assert!(out.is_null());
-}
-
-#[test]
-fn free_serialized_output_accepts_null() {
-    // SAFETY: `free_serialized_output_u64` returns early on null.
-    unsafe { free_serialized_output_u64(ptr::null_mut()) };
-    // SAFETY: `free_serialized_output_u128` returns early on null.
-    unsafe { free_serialized_output_u128(ptr::null_mut()) };
 }
 
 fn header_bytes() -> [u8; 36] {
@@ -526,12 +513,6 @@ fn parse_file_header_rejects_unknown_hash_type() {
         status_code(FFIStatus::UnsupportedHashType)
     );
     assert!(out.is_null());
-}
-
-#[test]
-fn free_file_header_accepts_null() {
-    // SAFETY: `free_file_header` returns early on null.
-    unsafe { free_file_header(ptr::null_mut()) };
 }
 
 /// The signature shared by `build_ssmc_prefix_u64` and
@@ -790,12 +771,6 @@ fn build_ssmc_prefix_rejects_filename_that_is_not_utf8() {
         });
     assert_eq!(status_code(status), status_code(FFIStatus::InvalidString));
     assert!(out.is_null());
-}
-
-#[test]
-fn free_ssmc_prefix_accepts_null() {
-    // SAFETY: `free_ssmc_prefix` returns early on null.
-    unsafe { free_ssmc_prefix(ptr::null_mut()) };
 }
 
 /// Stands in for the compressed data after the prefix. The parser has to
@@ -1156,14 +1131,6 @@ fn lookup_chunk_location_u128_rejects_null_hash() {
     assert_eq!(status_code(status), status_code(FFIStatus::NullArgument));
     // SAFETY: `parsed` is freed once, here.
     unsafe { free_parsed_ssmc_u128(parsed) };
-}
-
-#[test]
-fn free_parsed_ssmc_accepts_null() {
-    // SAFETY: `free_parsed_ssmc_u64` returns early on null.
-    unsafe { free_parsed_ssmc_u64(ptr::null_mut()) };
-    // SAFETY: `free_parsed_ssmc_u128` returns early on null.
-    unsafe { free_parsed_ssmc_u128(ptr::null_mut()) };
 }
 
 /// Calls `process_file_in_memory_ffi` on `data` and returns its status. The
@@ -2224,14 +2191,6 @@ fn get_seek_chunks_rejects_a_read_past_the_end() {
     }
 }
 
-#[test]
-fn free_seek_chunks_accepts_null() {
-    // SAFETY: `free_seek_chunks_u64` returns early for a null pointer.
-    unsafe { free_seek_chunks_u64(ptr::null_mut()) };
-    // SAFETY: `free_seek_chunks_u128` returns early for a null pointer.
-    unsafe { free_seek_chunks_u128(ptr::null_mut()) };
-}
-
 // Hashes passed to callbacks
 
 /// Reads the 16-byte little-endian hashes the u128 exports pass callbacks.
@@ -2774,14 +2733,6 @@ fn archive_builder_rejects_a_missing_chunk_array() {
     let status = unsafe { archive_builder_build_u128(builder, &raw mut comp) };
     assert_eq!(status_code(status), error, "u128");
     assert!(comp.is_null());
-}
-
-#[test]
-fn archive_builder_free_accepts_null() {
-    // SAFETY: `archive_builder_free_u64` ignores a null pointer.
-    unsafe { archive_builder_free_u64(ptr::null_mut()) };
-    // SAFETY: `archive_builder_free_u128` ignores a null pointer.
-    unsafe { archive_builder_free_u128(ptr::null_mut()) };
 }
 
 #[test]
@@ -3454,8 +3405,30 @@ fn archive_builder_build_rejects_each_null_pointer_and_keeps_the_builder() {
     assert!(out.is_null());
 }
 
+/// A host may pass on whatever a failed call left behind, which is null, so
+/// every exported free function must accept null.
 #[test]
-fn remaining_frees_accept_null() {
+fn every_free_accepts_null() {
+    // SAFETY: `free_file_header` returns early on null.
+    unsafe { free_file_header(ptr::null_mut()) };
+    // SAFETY: `free_ssmc_prefix` returns early on null.
+    unsafe { free_ssmc_prefix(ptr::null_mut()) };
+    // SAFETY: `free_parsed_ssmc_u64` returns early on null.
+    unsafe { free_parsed_ssmc_u64(ptr::null_mut()) };
+    // SAFETY: `free_parsed_ssmc_u128` returns early on null.
+    unsafe { free_parsed_ssmc_u128(ptr::null_mut()) };
+    // SAFETY: `free_serialized_output_u64` returns early on null.
+    unsafe { free_serialized_output_u64(ptr::null_mut()) };
+    // SAFETY: `free_serialized_output_u128` returns early on null.
+    unsafe { free_serialized_output_u128(ptr::null_mut()) };
+    // SAFETY: `free_seek_chunks_u64` returns early for a null pointer.
+    unsafe { free_seek_chunks_u64(ptr::null_mut()) };
+    // SAFETY: `free_seek_chunks_u128` returns early for a null pointer.
+    unsafe { free_seek_chunks_u128(ptr::null_mut()) };
+    // SAFETY: `archive_builder_free_u64` ignores a null pointer.
+    unsafe { archive_builder_free_u64(ptr::null_mut()) };
+    // SAFETY: `archive_builder_free_u128` ignores a null pointer.
+    unsafe { archive_builder_free_u128(ptr::null_mut()) };
     // SAFETY: `free_file_manifest_and_chunks_u64` returns early on null.
     unsafe { free_file_manifest_and_chunks_u64(ptr::null_mut()) };
     // SAFETY: `free_file_manifest_and_chunks_u128` returns early on null.
