@@ -7,7 +7,9 @@ use std::{
 };
 
 use sprite_shrink::{HASH_TYPE_XXH3_128, parse_file_header};
-use sprite_shrink_test_support::{assert_bytes_eq, rom_set, tiled_bytes};
+use sprite_shrink_test_support::{
+    assert_bytes_eq, rom_set, stand_in_for, tiled_bytes, with_name,
+};
 use tempfile::TempDir;
 
 use crate::common::{cli_command, cli_output, reported_error, run_cli};
@@ -521,6 +523,94 @@ fn inputs_and_outputs_run_cannot_use_are_rejected() {
         assert!(printed.contains(message), "{case}, output:\n{printed}");
         assert!(!Path::new(&missing).exists(), "{case} created the folder");
     }
+}
+
+#[test]
+fn an_archive_with_an_unsafe_name_is_refused_by_every_read_mode() {
+    for name in ["../x", "a\u{1b}[2J"] {
+        let tmp = TempDir::new().unwrap();
+        let input_dir = tmp.path().join("input");
+        fs::create_dir_all(&input_dir).unwrap();
+        fs::write(input_dir.join(stand_in_for(name)), tiled_bytes(1, 4096))
+            .unwrap();
+        fs::write(input_dir.join("b.bin"), tiled_bytes(2, 4096)).unwrap();
+        let built = tmp.path().join("built.ssmc");
+        run_cli(&[
+            "-i", input_dir.to_str().unwrap(),
+            "-o", built.to_str().unwrap(),
+        ]);
+        let archive = tmp.path().join("unsafe.ssmc");
+        fs::write(&archive, with_name(&fs::read(&built).unwrap(), name))
+            .unwrap();
+        let out_dir = tmp.path().join("extract");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        let archive = archive.to_str().unwrap();
+        let extract = ["-i", archive, "-o", out_dir.to_str().unwrap(), "-e", "1"];
+        let list = ["-i", archive, "--list"];
+        let metadata = ["-i", archive, "--metadata"];
+        for args in [&extract[..], &list[..], &metadata[..]] {
+            let printed = failure_output(args);
+            assert!(
+                printed.contains(&format!("Entry name {name:?} can't")),
+                "sprite-shrink {args:?}:\n{printed}"
+            );
+            assert!(!printed.contains('\u{1b}'), "{args:?}:\n{printed}");
+        }
+        assert!(fs::read_dir(&out_dir).unwrap().next().is_none(), "{name:?}");
+        assert!(!tmp.path().join("x").exists(), "{name:?}");
+    }
+}
+
+/// Extraction writes `a.bin` through the temp file `a.tmp`. A link planted
+/// there is replaced, not written through.
+#[cfg(unix)]
+#[test]
+fn a_link_at_the_temp_path_is_not_followed() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+    let archive = tmp.path().join("roms.ssmc");
+    run_cli(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+    let victim = tmp.path().join("victim");
+    fs::write(&victim, b"keep me").unwrap();
+    std::os::unix::fs::symlink(&victim, out_dir.join("a.tmp")).unwrap();
+
+    extract_first(&archive, &out_dir);
+
+    assert_eq!(fs::read(&victim).unwrap(), b"keep me");
+    assert_eq!(
+        fs::read(out_dir.join("a.bin")).unwrap(),
+        fs::read(input_dir.join("a.bin")).unwrap()
+    );
+    assert!(!out_dir.join("a.tmp").exists());
+}
+
+/// A file name Windows can't use is refused before anything is compressed,
+/// not by the archive writer at the end. Unix only: Windows can't create
+/// the input either.
+#[cfg(unix)]
+#[test]
+fn an_input_name_other_systems_cannot_use_is_refused_up_front() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+    fs::write(input_dir.join("a:b.bin"), tiled_bytes(3, 4096)).unwrap();
+    let archive = tmp.path().join("roms.ssmc");
+
+    let printed = failure_output(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+
+    assert!(
+        printed.contains("a:b.bin can't be archived. Entry name \"a:b.bin\""),
+        "output:\n{printed}"
+    );
+    assert!(!archive.exists());
 }
 
 #[test]

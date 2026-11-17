@@ -15,6 +15,7 @@ use sprite_shrink_cd::{
     SectorType, SpriteShrinkCDError, SubHeaderEntry, TrackType,
     build_ssmd_prefix, decode_ssmd_format_data, parse_ssmd_prefix,
 };
+use sprite_shrink_test_support::{UNSAFE_NAMES, stand_in_for, with_name};
 
 /// The inputs for a two-disc archive. Owned here so a test can borrow them
 /// as `SSMDPrefix`.
@@ -501,4 +502,38 @@ fn parse_ssmd_prefix_chunk_offset_overflow_returns_error() {
     });
 
     assert_parse_error(&near_max, "chunk offset overflow");
+}
+
+#[test]
+fn parse_ssmd_prefix_rejects_names_that_leave_the_folder() {
+    for name in UNSAFE_NAMES {
+        let mut inputs = inputs_with_audio([1_u64, 2, 3]);
+        inputs.toc[1].filename = stand_in_for(name);
+        let prefix = build_ssmd_prefix(&inputs.parts(HASH_TYPE_XXH3_64))
+            .unwrap();
+
+        let err = parse_ssmd_prefix::<u64>(&with_name(&prefix, name))
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains(&format!("Entry name {name:?} can't")),
+            "{name:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn build_ssmd_prefix_rejects_names_readers_would_refuse() {
+    for name in UNSAFE_NAMES {
+        let mut inputs = inputs_with_audio([1_u64, 2, 3]);
+        inputs.toc[1].filename = name.to_string();
+
+        let err = build_ssmd_prefix(&inputs.parts(HASH_TYPE_XXH3_64))
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains(&format!("Entry name {name:?} can't")),
+            "{name:?}: {err}"
+        );
+    }
 }

@@ -16,6 +16,7 @@ use dashmap::DashMap;
 use thiserror::Error;
 
 use crate::lib_error_handling::SpriteShrinkError;
+use crate::parsing::check_entry_name;
 use crate::lib_structs::{
     ALGORITHM_ZSTD, SSMC_UID,
     CompressionResult, FileHeader, FileManifestParent,
@@ -204,10 +205,13 @@ where
 ///
 /// # Errors
 ///
-/// Returns `SerializationError::ArchiveTooLarge` if there are more than
-/// `u32::MAX` files, or the encoded table of contents is too large for the
-/// header's 32-bit offsets.
+/// Returns `ParsingError::InvalidEntryName` if a file name fails
+/// [`check_entry_name`], since readers would refuse the archive, or
+/// `SerializationError::ArchiveTooLarge` if there are more than `u32::MAX`
+/// files, or the encoded table of contents is too large for the header's
+/// 32-bit offsets.
 ///
+/// [`check_entry_name`]: crate::check_entry_name
 /// [`ArchiveBuilder::build`]: crate::ArchiveBuilder::build
 /// [`HASH_TYPE_XXH3_64`]: crate::HASH_TYPE_XXH3_64
 /// [`HASH_TYPE_XXH3_128`]: crate::HASH_TYPE_XXH3_128
@@ -220,6 +224,10 @@ pub fn build_ssmc_prefix<H>(
 where
     H: Encode,
 {
+    for entry in toc {
+        check_entry_name(&entry.filename)?;
+    }
+
     let enc_toc = encode(toc);
     let enc_manifest = encode(manifests);
 

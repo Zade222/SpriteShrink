@@ -5,7 +5,10 @@ use std::{
 use bitcode::{
     Decode, decode
 };
-use sprite_shrink::{ChunkLocation, FileHeader, FileRegion, parse_file_header};
+use sprite_shrink::{
+    ChunkLocation, FileHeader, FileRegion, SpriteShrinkError,
+    check_entry_name, parse_file_header
+};
 use thiserror::Error;
 
 use crate::{
@@ -105,7 +108,8 @@ pub fn decode_ssmd_format_data(
 /// # Errors
 ///
 /// Returns an error if the header is invalid or isn't for an SSMD
-/// archive, a section lies outside `prefix`, a section fails to decode,
+/// archive, a section lies outside `prefix`, a section fails to decode, a
+/// disc's name fails `check_entry_name`,
 /// a disc lists more than `MAX_DISC_SECTORS` sectors, the subheader
 /// table's length isn't a multiple of 8, or a chunk's absolute offset
 /// doesn't fit in a `u64`.
@@ -132,9 +136,8 @@ where
         offset: header.enc_toc_offset.into(),
         length: header.enc_toc_length.into(),
     };
-    let toc: Vec<SSMDTocEntry> = decode_section(
-        toc_region.bytes_in(prefix, "table of contents")?,
-        "Table of Contents"
+    let toc = parse_ssmd_toc(
+        toc_region.bytes_in(prefix, "table of contents")?
     )?;
 
     let format_data_region = FileRegion {
@@ -232,6 +235,25 @@ where
     } else {
         decode_section(bytes, "Disc Manifest")
     }
+}
+
+/// Decodes an SSMD table of contents and checks each disc's name with
+/// `check_entry_name`.
+///
+/// # Errors
+///
+/// Returns `DecodeError::MetadataDecode` if the bytes don't decode, or
+/// `ParsingError::InvalidEntryName` (inside
+/// `SpriteShrinkCDError::SpriteShrink`) for the first disc whose name can't
+/// be used as a file name.
+pub fn parse_ssmd_toc(
+    bytes: &[u8]
+) -> Result<Vec<SSMDTocEntry>, SpriteShrinkCDError> {
+    let toc: Vec<SSMDTocEntry> = decode_section(bytes, "Table of Contents")?;
+    for entry in &toc {
+        check_entry_name(&entry.filename).map_err(SpriteShrinkError::from)?;
+    }
+    Ok(toc)
 }
 
 /// Decodes one bitcode section, naming it in the error.

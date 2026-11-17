@@ -18,7 +18,7 @@ use std::{
 
 use clap::{CommandFactory, FromArgMatches};
 use ctrlc::set_handler;
-use sprite_shrink::IsCancelled;
+use sprite_shrink::{IsCancelled, check_entry_name};
 use tracing::{
     debug,
     error,
@@ -168,7 +168,7 @@ fn run(
                 return Err(CliError::NoFilesFound());
             }
 
-            check_unique_names(&file_paths, &args.mode)?;
+            check_input_names(&file_paths, &args.mode)?;
 
             let out_dir = args.output
                 .as_ref()
@@ -217,19 +217,31 @@ fn run(
     Ok(())
 }
 
-/// Checks that no two inputs would be stored under the same name: the file
-/// name in default mode, the CUE file's stem in optical mode. Each archive
-/// entry is keyed by name, so all but one would be lost.
+/// Checks the names inputs would be stored under: the file name in default
+/// mode, the CUE file's stem in optical mode. Each name must pass
+/// `check_entry_name`, which the archive writer applies too, so a bad name
+/// fails here instead of after compression. And no two inputs may share a
+/// name: each archive entry is keyed by name, so all but one would be lost.
 ///
 /// # Errors
 ///
-/// Returns `CliError::DuplicateNames`, listing each shared name and the
-/// paths that share it, one name per line.
-fn check_unique_names(
+/// Returns `CliError::UnusableName` for the first input whose name fails
+/// `check_entry_name`, or `CliError::DuplicateNames`, listing each shared
+/// name and the paths that share it, one name per line.
+fn check_input_names(
     file_paths: &[PathBuf],
     mode: &str,
 ) -> Result<(), CliError> {
     let name_of = if mode == "optical" { disc_title } else { entry_name };
+    for path in file_paths {
+        if let Some(name) = name_of(path) {
+            check_entry_name(&name).map_err(|err| CliError::UnusableName(
+                path.display().to_string(),
+                err.to_string(),
+            ))?;
+        }
+    }
+
     let duplicates = duplicate_names(file_paths, name_of);
     if duplicates.is_empty() {
         return Ok(());

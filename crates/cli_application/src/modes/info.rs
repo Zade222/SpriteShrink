@@ -18,12 +18,14 @@ use serde_json::{self, json, Value, to_string_pretty};
 
 use sprite_shrink::{
     SSMC_UID,
-    FileHeader, SSMCTocEntry
+    FileHeader, SSMCTocEntry,
+    parse_file_toc
 };
 
 use sprite_shrink_cd::{
     SSMD_UID,
-    SSMDTocEntry
+    SSMDTocEntry,
+    parse_ssmd_toc
 };
 
 use crate::error_handling::CliError;
@@ -93,7 +95,8 @@ fn dispatch_print_info(
             let toc: Vec<SSMCTocEntry> = get_toc(
                 file_path,
                 header.enc_toc_offset,
-                header.enc_toc_length as usize
+                header.enc_toc_length as usize,
+                parse_file_toc
             )?;
 
             if metadata {
@@ -106,7 +109,8 @@ fn dispatch_print_info(
             let toc: Vec<SSMDTocEntry> = get_toc(
                 file_path,
                 header.enc_toc_offset,
-                header.enc_toc_length as usize
+                header.enc_toc_length as usize,
+                parse_ssmd_toc
             )?;
 
             if metadata {

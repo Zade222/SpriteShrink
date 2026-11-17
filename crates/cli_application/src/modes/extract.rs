@@ -25,8 +25,8 @@ use tracing::{
 use sprite_shrink::{
     SSMC_UID,
     HashType,
-    Hashable, FileHeader, ParsedSSMC,
-    decompress_chunk_checked
+    Hashable, FileHeader, ParsedSSMC, SpriteShrinkError,
+    check_entry_name, decompress_chunk_checked
 };
 
 use sprite_shrink_cd::{
@@ -40,7 +40,7 @@ use crate::{
     arg_handling::Args,
     cli_types::TempFileGuard,
     error_handling::CliError,
-    storage_io::read_file_data,
+    storage_io::{create_replacing, read_file_data},
 };
 
 /// Executes the file extraction process from an archive.
@@ -261,13 +261,16 @@ where
             format!("ROM index {} is out of bounds.", index + 1)
         ))?;
 
+        /*The prefix parser has checked every name already. Check again
+        here, where a bad name would write outside out_dir.*/
+        check_entry_name(&entry.filename).map_err(SpriteShrinkError::from)?;
         let final_output_path = out_dir.join(&entry.filename);
 
         let tmp_output_path = final_output_path.with_extension("tmp");
 
         let _guard = TempFileGuard::new(&tmp_output_path);
 
-        let file = File::create(&tmp_output_path)?;
+        let file = create_replacing(&tmp_output_path)?;
         let mut writer = BufWriter::new(file);
 
         fmp.chunk_metadata
@@ -362,13 +365,16 @@ where
                 format!("Disc index {} is out of bounds.", index + 1)
             ))?;
 
+        /*The prefix parser has checked every name already. Check again
+        here, where a bad name would write outside out_dir.*/
+        check_entry_name(&entry.filename).map_err(SpriteShrinkError::from)?;
         let final_output_path = out_dir.join(&entry.filename);
 
         let tmp_output_path = final_output_path.with_extension("tmp");
 
         let _guard = TempFileGuard::new(&tmp_output_path);
 
-        let file = File::create(&tmp_output_path)?;
+        let file = create_replacing(&tmp_output_path)?;
 
         const WRITE_BUFFER_SIZE: usize = 2048 * 2352;
         let mut writer = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
@@ -393,7 +399,7 @@ where
 
         rename(&tmp_output_path, final_output_path)?;
 
-        let mut cue_file = File::create(&cue_path)?;
+        let mut cue_file = create_replacing(&cue_path)?;
         cue_file.write_all(cue_content.as_bytes())?;
 
         debug!("{} extracted successfully", entry.filename);

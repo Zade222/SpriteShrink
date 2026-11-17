@@ -197,6 +197,27 @@ pub fn files_from_dirs(
     })
 }
 
+/// Creates a new file at `path` for writing, first removing any file
+/// already there, such as a temp file left by a run that crashed.
+///
+/// Removing a symbolic link removes the link, not what it points to, and
+/// `create_new` then fails if anything appears at `path` in between. So a
+/// link planted at `path` can't redirect the write to another file, as
+/// `File::create` would let it.
+///
+/// # Errors
+///
+/// Returns the I/O error if the existing file can't be removed, for example
+/// because `path` is a folder, or the new file can't be created.
+pub fn create_replacing(path: &Path) -> io::Result<File> {
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => return Err(err),
+    }
+    File::options().write(true).create_new(true).open(path)
+}
+
 /// Reads a specific segment of a file into a byte vector.
 ///
 /// This function opens a file, seeks to a specified starting offset,

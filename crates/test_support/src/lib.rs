@@ -123,6 +123,43 @@ pub fn assert_bytes_eq(actual: &[u8], expected: &[u8], what: &str) {
     );
 }
 
+/// Archive entry names that would lead extraction out of its folder, or
+/// into the terminal when listed. Writers refuse them, so tests build an
+/// archive with a stand-in name and swap it with [`with_name`].
+pub const UNSAFE_NAMES: [&str; 4] = ["../x", "/abs", "C:\\x", "a\u{1b}[2J"];
+
+/// A stand-in for `name`: `Q`s of the same length, to build an archive
+/// with before [`with_name`] puts `name` in its place.
+#[must_use]
+pub fn stand_in_for(name: &str) -> String {
+    "Q".repeat(name.len())
+}
+
+/// `bytes` with the stand-in for `name`, which must appear exactly once,
+/// replaced by `name`.
+///
+/// # Panics
+///
+/// Panics if the stand-in appears in `bytes` more or less than once.
+#[must_use]
+#[expect(clippy::panic, reason = "a test helper: the panic fails the test")]
+pub fn with_name(bytes: &[u8], name: &str) -> Vec<u8> {
+    let stand_in = stand_in_for(name);
+    let found: Vec<usize> = bytes
+        .windows(stand_in.len())
+        .enumerate()
+        .filter(|(_, window)| *window == stand_in.as_bytes())
+        .map(|(at, _)| at)
+        .collect();
+    let &[at] = found.as_slice() else {
+        panic!("{stand_in:?} found at {found:?}, expected once");
+    };
+
+    let mut bytes = bytes.to_vec();
+    bytes.splice(at..at + name.len(), name.bytes());
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

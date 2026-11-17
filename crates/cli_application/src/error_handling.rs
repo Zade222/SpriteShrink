@@ -76,6 +76,9 @@ pub enum CliError {
     #[error("Files with duplicate file names aren't allowed.\n{0}")]
     DuplicateNames(String),
 
+    #[error("{0} can't be archived. {1}")]
+    UnusableName(String, String),
+
     #[error("This operation requires at least two input files.")]
     NotEnoughFiles,
 

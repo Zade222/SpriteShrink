@@ -27,6 +27,9 @@ pub enum ParsingError {
     #[error("Failed to decode chunk index: {0}")]
     IndexDecodeError(String),
 
+    #[error("Entry name {name:?} can't be used as a file name: {reason}.")]
+    InvalidEntryName { name: String, reason: &'static str },
+
     #[error("Read file is of a newer version than what this library supports.")]
     InvalidFileVersion(),
 
@@ -67,6 +70,77 @@ fn supported_hash_types() -> String {
         }
         _ => entries.concat(),
     }
+}
+
+/// Checks that an archive entry name is a single ordinary file name, so a
+/// host that extracts the entry into a folder creates a file in that folder
+/// and nowhere else.
+///
+/// Names are checked against the rules of every platform the CLI runs on,
+/// so an archive made on one can be extracted on the others. A name that
+/// fails is rejected, never rewritten.
+///
+/// # Errors
+///
+/// Returns `ParsingError::InvalidEntryName` if the name is empty, is `.` or
+/// `..`, contains `/`, `\`, `:` or a control character, ends with a dot or
+/// a space, or is a Windows device name such as `CON` or `com1.bin`.
+pub fn check_entry_name(name: &str) -> Result<(), ParsingError> {
+    match entry_name_problem(name) {
+        None => Ok(()),
+        Some(reason) => Err(ParsingError::InvalidEntryName {
+            name: name.to_owned(),
+            reason,
+        }),
+    }
+}
+
+/// Why `name` can't be an entry name, or `None` if it can.
+fn entry_name_problem(name: &str) -> Option<&'static str> {
+    if name.is_empty() {
+        Some("it is empty")
+    } else if name == "." || name == ".." {
+        Some("it names a folder")
+    } else if name.contains(['/', '\\']) {
+        Some("it contains a path separator")
+    } else if name.contains(':') {
+        Some("it contains a colon, which Windows reads as a drive or a stream")
+    } else if name.chars().any(char::is_control) {
+        Some("it contains a control character")
+    } else if name.ends_with(['.', ' ']) {
+        Some("it ends with a dot or a space, which Windows removes")
+    } else if is_windows_device_name(name) {
+        Some("it is a Windows device name")
+    } else {
+        None
+    }
+}
+
+/// Whether Windows opens a device instead of a file for `name`. Windows
+/// ignores the extension and trailing spaces, so `nul.bin` and `COM1 .txt`
+/// are devices too.
+fn is_windows_device_name(name: &str) -> bool {
+    let stem = name
+        .split_once('.')
+        .map_or(name, |(stem, _)| stem)
+        .trim_end_matches(' ');
+
+    if ["CON", "PRN", "AUX", "NUL"]
+        .iter()
+        .any(|device| stem.eq_ignore_ascii_case(device))
+    {
+        return true;
+    }
+
+    let Some((prefix, number)) = stem.split_at_checked(3) else {
+        return false;
+    };
+    let mut number = number.chars();
+    (prefix.eq_ignore_ascii_case("COM") || prefix.eq_ignore_ascii_case("LPT"))
+        && matches!(
+            (number.next(), number.next()),
+            (Some('0'..='9' | '¹' | '²' | '³'), None)
+        )
 }
 
 /// The magic number used to identify a sprite-shrink archive file.
@@ -206,11 +280,23 @@ where
 }
 
 
+/// Decodes an SSMC table of contents and checks each entry's name with
+/// [`check_entry_name`].
+///
+/// # Errors
+///
+/// Returns `ParsingError::TOCDecodeError` if the bytes don't decode, or
+/// `ParsingError::InvalidEntryName` for the first entry whose name can't be
+/// used as a file name.
 pub fn parse_file_toc(
     enc_toc_data: &[u8]
 ) -> Result<Vec<SSMCTocEntry>, SpriteShrinkError> {
     let bin_toc: Vec<SSMCTocEntry> = decode(enc_toc_data)
         .map_err(|e| ParsingError::TOCDecodeError(e.to_string()))?;
+
+    for entry in &bin_toc {
+        check_entry_name(&entry.filename)?;
+    }
 
     Ok(bin_toc)
 }
@@ -361,6 +447,72 @@ mod tests {
                 assert_eq!(am.length, em.length);
             }
         }
+    }
+
+    #[test]
+    fn entry_names_that_are_not_one_plain_file_name_are_rejected() {
+        let rejected = [
+            "",
+            ".",
+            "..",
+            "../x",
+            "a/b",
+            "/abs",
+            "a\\b",
+            "C:\\x",
+            "C:x",
+            "\\\\server\\share",
+            "game.bin:stream",
+            "a\u{1b}[2J",
+            "a\nb",
+            "a\u{7f}",
+            "a\u{85}",
+            "game.",
+            "game ",
+            "CON",
+            "con.bin",
+            "Nul.tar.gz",
+            "AUX .bin",
+            "COM0",
+            "lpt9.bin",
+            "COM\u{b9}.bin",
+        ];
+
+        for name in rejected {
+            let err = check_entry_name(name).unwrap_err();
+            assert!(
+                matches!(&err, ParsingError::InvalidEntryName { name: n, .. } if n == name),
+                "{name:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_entry_names_are_accepted() {
+        let accepted = [
+            "Game (USA) [!].gba",
+            "a b.c",
+            ".hidden",
+            "a..b",
+            "\u{30b2}\u{30fc}\u{30e0}.bin",
+            "CONSOLE.bin",
+            "nul_x.bin",
+            "COM10.bin",
+            "LPT.bin",
+            "COMx.bin",
+        ];
+
+        for name in accepted {
+            assert!(check_entry_name(name).is_ok(), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn the_error_shows_control_characters_escaped() {
+        let err = check_entry_name("a\u{1b}[2J").unwrap_err();
+
+        assert!(!err.to_string().contains('\u{1b}'), "{err}");
+        assert!(err.to_string().contains(r"a\u{1b}[2J"), "{err}");
     }
 
     #[test]

@@ -180,23 +180,29 @@ fn read_archive_prefix(
     read_file_data(file_path, 0, prefix_len)
 }
 
-pub fn get_toc<T> (
+/// Reads the table of contents at `toc_offset` and decodes it with
+/// `parse_toc`, which also checks each entry's name.
+///
+/// # Errors
+///
+/// Returns an I/O error if the bytes can't be read, or the error from
+/// `parse_toc`.
+pub fn get_toc<T, E>(
     file_path: &Path,
     toc_offset: u32,
-    toc_length: usize
+    toc_length: usize,
+    parse_toc: impl FnOnce(&[u8]) -> Result<Vec<T>, E>,
 ) -> Result<Vec<T>, CliError>
 where
-    T: for<'de> Decode<'de>,
+    CliError: From<E>,
 {
     let enc_toc_data = read_file_data(
         file_path,
-        toc_offset as u64,
+        toc_offset.into(),
         toc_length
     )?;
 
-    bitcode::decode(&enc_toc_data).map_err(|e| {
-        CliError::InternalError(format!("Failed to decode TOC: {}", e))
-    })
+    Ok(parse_toc(&enc_toc_data)?)
 }
 
 #[cfg(test)]

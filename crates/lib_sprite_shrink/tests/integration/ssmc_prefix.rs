@@ -15,6 +15,7 @@ use sprite_shrink::{
     parse_file_header, parse_file_metadata, parse_file_toc, parse_format_data,
     parse_ssmc_prefix,
 };
+use sprite_shrink_test_support::{UNSAFE_NAMES, stand_in_for, with_name};
 
 fn sample_toc() -> Vec<SSMCTocEntry> {
     vec![
@@ -449,4 +450,46 @@ fn parse_ssmc_prefix_chunk_offset_overflow_returns_error() {
     });
 
     assert_parse_error(&near_max, "chunk offset overflow");
+}
+
+#[test]
+fn parse_ssmc_prefix_rejects_names_that_leave_the_folder() {
+    for name in UNSAFE_NAMES {
+        let mut toc = sample_toc();
+        toc[1].filename = stand_in_for(name);
+        let prefix = build_ssmc_prefix(
+            &toc,
+            &sample_manifests([1_u64, 2, 3]),
+            &sample_comp([1_u64, 2, 3]),
+            HASH_TYPE_XXH3_64,
+        ).unwrap();
+
+        let err = parse_ssmc_prefix::<u64>(&with_name(&prefix, name))
+            .unwrap_err();
+
+        assert!(
+            err.to_string().contains(&format!("Entry name {name:?} can't")),
+            "{name:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn build_ssmc_prefix_rejects_names_readers_would_refuse() {
+    for name in UNSAFE_NAMES {
+        let mut toc = sample_toc();
+        toc[1].filename = name.to_string();
+
+        let err = build_ssmc_prefix(
+            &toc,
+            &sample_manifests([1_u64, 2, 3]),
+            &sample_comp([1_u64, 2, 3]),
+            HASH_TYPE_XXH3_64,
+        ).unwrap_err();
+
+        assert!(
+            err.to_string().contains(&format!("Entry name {name:?} can't")),
+            "{name:?}: {err}"
+        );
+    }
 }

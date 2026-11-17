@@ -22,7 +22,7 @@ pub use lib_structs::{
 
 mod parsing;
 pub use parsing::{
-    SUPPORTED_VERSION, MAGIC_NUMBER, SS_SEED,
+    SUPPORTED_VERSION, MAGIC_NUMBER, SS_SEED, check_entry_name,
     parse_file_chunk_index, parse_file_header, parse_file_metadata,
     parse_file_toc, parse_format_data, parse_ssmc_prefix
 };

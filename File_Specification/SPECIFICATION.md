@@ -107,6 +107,13 @@ A serialized vector containing basic metadata for listing archive contents witho
       uncompressed_size: u64,
   }
 
+Each `filename` is the name extraction gives the file, so it must be a single file name that every supported platform accepts. Writers must not store, and readers reject, a name that:
+
+*   is empty, `.` or `..`
+*   contains `/`, `\`, `:` or a control character (Unicode category Cc)
+*   ends with `.` or a space
+*   is a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, or `COM`/`LPT` followed by `¹`, `²` or `³`), in any case and with or without an extension or trailing spaces before it
+
 
 ### 4.2. SSMC Manifests & Indexes
 

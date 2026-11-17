@@ -7,7 +7,8 @@
 use bitcode::{Encode, encode};
 use sprite_shrink::{
     ALGORITHM_ZSTD,
-    ChunkLocation, CompressionResult, FileHeader
+    ChunkLocation, CompressionResult, FileHeader, SpriteShrinkError,
+    check_entry_name
 };
 
 use crate::{
@@ -64,15 +65,20 @@ pub struct SSMDPrefix<'a, H> {
 ///
 /// # Errors
 ///
-/// Returns `SpriteShrinkCDError::SpriteShrink` if there are more than
-/// `u32::MAX` discs, or the encoded table of contents is too large for the
-/// header's 32-bit offsets.
+/// Returns `SpriteShrinkCDError::SpriteShrink` if a disc's name fails
+/// `check_entry_name`, since readers would refuse the archive, there are
+/// more than `u32::MAX` discs, or the encoded table of contents is too
+/// large for the header's 32-bit offsets.
 pub fn build_ssmd_prefix<H>(
     parts: &SSMDPrefix<H>
 ) -> Result<Vec<u8>, SpriteShrinkCDError>
 where
     H: Encode,
 {
+    for entry in parts.toc {
+        check_entry_name(&entry.filename).map_err(SpriteShrinkError::from)?;
+    }
+
     let enc_toc = encode(parts.toc);
     let enc_disc_manifest = encode(parts.disc_manifests);
     let enc_audio_index = if parts.audio_block_index.is_empty() {

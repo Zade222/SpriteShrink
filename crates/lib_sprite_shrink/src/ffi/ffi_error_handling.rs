@@ -5,6 +5,7 @@ use crate::processing::ProcessingError;
 use crate::serialization::SerializationError;
 
 /// Represents the status of an FFI operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 #[must_use]
 pub enum FFIStatus {
@@ -39,6 +40,7 @@ pub enum FFIStatus {
     ArchiveEncodeError = -28,
     ArchiveTooLarge = -29,
     CallbackError = -30,
+    InvalidEntryName = -31,
 }
 
 
@@ -91,6 +93,9 @@ impl From<ParsingError> for FFIStatus {
     fn from(err: ParsingError) -> Self {
         match err {
             ParsingError::IndexDecodeError(_) => FFIStatus::IndexDecodeError,
+            ParsingError::InvalidEntryName { .. } => {
+                FFIStatus::InvalidEntryName
+            }
             ParsingError::InvalidFileVersion() => {
                 FFIStatus::UnsupportedVersion
             }
@@ -151,6 +156,7 @@ impl From<SerializationError> for FFIStatus {
 }
 
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(C)]
 pub enum FFICallbackStatus {
     CallbackOk = 0,
@@ -196,6 +202,13 @@ mod tests {
             (ParsingError::IndexDecodeError(String::new()).into(), -24),
             (ParsingError::TOCDecodeError(String::new()).into(), -25),
             (ParsingError::InvalidFormatData(String::new()).into(), -26),
+            (
+                ParsingError::InvalidEntryName {
+                    name: String::new(),
+                    reason: "",
+                }.into(),
+                -31,
+            ),
             (ArchiveError::Dictionary(String::new()).into(), -6),
             (ArchiveError::CompressionError(String::new()).into(), -7),
             (ArchiveError::ZstdError(String::new()).into(), -7),

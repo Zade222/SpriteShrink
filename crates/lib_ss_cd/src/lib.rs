@@ -15,7 +15,7 @@ mod cue_parser;
 
 mod decode;
 pub use decode::{
-    decode_ssmd_format_data, parse_ssmd_prefix
+    decode_ssmd_format_data, parse_ssmd_prefix, parse_ssmd_toc
 };
 
 mod ecc;
