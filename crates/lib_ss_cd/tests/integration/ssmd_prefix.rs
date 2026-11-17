@@ -10,7 +10,7 @@ use sprite_shrink::{
 };
 use sprite_shrink_cd::{
     MAX_DISC_SECTORS, SSMD_UID,
-    ContentBlock, DataChunkLayout, DiscFile, DiscIndex, DiscManifest,
+    ContentBlock, DataChunkLayout, DiscArea, DiscFile, DiscIndex, DiscManifest,
     DiscTrack, RleSectorMap, SSMDFormatData, SSMDPrefix, SSMDTocEntry,
     SectorType, SpriteShrinkCDError, SubHeaderEntry, TrackType,
     build_ssmd_prefix, decode_ssmd_format_data, parse_ssmd_prefix,
@@ -55,11 +55,17 @@ fn manifest<H: Copy>(data_hash: H, audio_hash: H) -> DiscManifest<H> {
                     number: 1,
                     track_type: TrackType::Mode2_2352,
                     indices: vec![DiscIndex { number: 1, sector: 0 }],
+                    pregap: 0,
+                    postgap: 0,
+                    area: DiscArea::SingleDensity,
                 },
                 DiscTrack {
                     number: 2,
                     track_type: TrackType::Audio,
                     indices: vec![DiscIndex { number: 1, sector: 300 }],
+                    pregap: 0,
+                    postgap: 0,
+                    area: DiscArea::SingleDensity,
                 },
             ],
         }],

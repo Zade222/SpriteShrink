@@ -721,6 +721,40 @@ fn discs_from_different_folders_read_their_own_bin_files() {
     assert_bytes_eq(&fs::read(out_dir.join("two.bin")).unwrap(), &two, "two");
 }
 
+/// The only CLI test of a CUE sheet the parser refuses, so it also covers
+/// parse errors in general stopping the run.
+#[test]
+fn a_multi_session_disc_is_refused_before_anything_is_written() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = tmp.path().join("input");
+    let archive = tmp.path().join("disc.ssmd");
+    write_blank_disc(&input_dir, "disc", 300);
+    fs::write(input_dir.join("extra.bin"), vec![0_u8; 300 * 2352]).unwrap();
+    fs::write(
+        input_dir.join("disc.cue"),
+        "REM SESSION 01\n\
+         FILE \"disc.bin\" BINARY\n\
+         \x20 TRACK 01 MODE2/2352\n\
+         \x20   INDEX 01 00:00:00\n\
+         REM SESSION 02\n\
+         FILE \"extra.bin\" BINARY\n\
+         \x20 TRACK 02 MODE2/2352\n\
+         \x20   INDEX 01 00:00:00\n",
+    )
+    .unwrap();
+
+    let printed = failure_output(&[
+        "--mode", "optical",
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    assert!(
+        printed.contains("Multi-session discs aren't supported yet"),
+        "output:\n{printed}"
+    );
+    assert!(!archive.exists());
+}
+
 #[test]
 fn optical_mode_without_cue_files_says_what_is_missing() {
     let tmp = TempDir::new().unwrap();

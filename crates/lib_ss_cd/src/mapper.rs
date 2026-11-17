@@ -301,6 +301,9 @@ pub fn disc_files(
                             sector: index.position.to_total_frames(),
                         })
                         .collect(),
+                    pregap: track.pregap,
+                    postgap: track.postgap,
+                    area: track.area,
                 })
                 .collect(),
         })

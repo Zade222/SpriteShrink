@@ -82,14 +82,41 @@ impl CueSheet {
 
 impl Display for CueSheet {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        let tracks = || self.files.iter().flat_map(|file| &file.tracks);
+        let is_gdrom = tracks()
+            .any(|track| track.area == DiscArea::HighDensity);
+        if is_gdrom {
+            writeln!(f, "REM SINGLE-DENSITY AREA")?;
+        }
+        let mut area = DiscArea::SingleDensity;
+
         for file in &self.files {
+            /*The marker goes before the FILE line when the area starts with
+            the file, as Redump's sheets have it.*/
+            if let Some(first) = file.tracks.first()
+                && first.area != area
+            {
+                writeln!(f, "REM HIGH-DENSITY AREA")?;
+                area = first.area;
+            }
             writeln!(f, "FILE \"{}\" BINARY", file.name)?;
 
             for track in &file.tracks {
+                if track.area != area {
+                    writeln!(f, "REM HIGH-DENSITY AREA")?;
+                    area = track.area;
+                }
                 writeln!(f, "  TRACK {:02} {}", track.number, track.track_type)?;
-
+                if track.pregap > 0 {
+                    let gap = MsfTime::from_total_frames(track.pregap);
+                    writeln!(f, "    PREGAP {gap}")?;
+                }
                 for index in &track.indices {
                     writeln!(f, "    INDEX {:02} {}", index.number, index.position)?;
+                }
+                if track.postgap > 0 {
+                    let gap = MsfTime::from_total_frames(track.postgap);
+                    writeln!(f, "    POSTGAP {gap}")?;
                 }
             }
         }
@@ -152,6 +179,30 @@ pub struct DiscTrack {
     pub number: u8,
     pub track_type: TrackType,
     pub indices: Vec<DiscIndex>,
+    /// Sectors of silence before the track that aren't in its file, from
+    /// the CUE sheet's PREGAP command. 0 when it has none.
+    pub pregap: u32,
+    /// Sectors of silence after the track that aren't in its file, from
+    /// the CUE sheet's POSTGAP command. 0 when it has none.
+    pub postgap: u32,
+    pub area: DiscArea,
+}
+
+
+/// The area of a GD-ROM a track is in. Every track of a CD is in the
+/// single-density area.
+///
+/// A GD-ROM's CUE sheet marks its areas with `REM SINGLE-DENSITY AREA`
+/// before the first track and `REM HIGH-DENSITY AREA` before the first
+/// track of the high-density area, which starts at sector 45000.
+#[derive(
+    Clone, Copy, Debug, Decode, Default, Deserialize, Encode, Eq, PartialEq,
+    Serialize
+)]
+pub enum DiscArea {
+    #[default]
+    SingleDensity,
+    HighDensity,
 }
 
 
@@ -916,6 +967,11 @@ pub struct Track {
     pub number: u8,
     pub track_type: TrackType,
     pub indices: Vec<TrackIndex>,
+    /// PREGAP length in sectors; 0 when the sheet gives none.
+    pub pregap: u32,
+    /// POSTGAP length in sectors; 0 when the sheet gives none.
+    pub postgap: u32,
+    pub area: DiscArea,
 }
 
 

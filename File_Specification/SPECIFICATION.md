@@ -153,12 +153,24 @@ SSMD uses a complex manifest to reconstruct CD sectors.
       number: u8,
       track_type: TrackType, // Audio, Mode1_2352 or Mode2_2352
       indices: Vec<DiscIndex>,
+      pregap: u32,           // PREGAP sectors not in the file; 0 = none
+      postgap: u32,          // POSTGAP sectors not in the file; 0 = none
+      area: DiscArea,        // SingleDensity or HighDensity (GD-ROM)
   }
 
   struct DiscIndex {
       number: u8,
       sector: u32,           // Sectors from the start of its file
   }
+
+*   **Gaps and areas:** `pregap` and `postgap` come from the CUE sheet's
+    PREGAP and POSTGAP commands. Their sectors aren't in any file, so they
+    add nothing to the sector map; the sector headers after them jump, and
+    `lba_map` records the jump. `area` is `HighDensity` for the tracks of a
+    GD-ROM's high-density area (the sheet's `REM HIGH-DENSITY AREA`, which
+    starts at sector 45000) and `SingleDensity` otherwise, including every
+    track of a CD. Other CUE commands (FLAGS, CATALOG, ISRC, CD-Text, other
+    REM lines) aren't stored.
 
 *   **Manifest layout by version:** `files` was added in format 2.1.
     bitcode stores no field names, so a reader picks the layout from the

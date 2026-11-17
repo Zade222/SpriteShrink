@@ -2,15 +2,16 @@ use std::fmt::Write;
 
 use sprite_shrink::Hashable;
 
-use crate::lib_structs::{DiscManifest, MsfTime, TrackMode};
+use crate::lib_structs::{DiscArea, DiscManifest, MsfTime, TrackMode};
 
 /// Writes the CUE sheet for a disc extracted to the single file
 /// `bin_filename`.
 ///
 /// The tracks and indices come from the manifest's file layout, moved to
-/// their positions in the joined file. Archives written before format
-/// version 2.1 have no layout, and their tracks are inferred from the
-/// sector map instead (see `infer_cue_string`).
+/// their positions in the joined file, with each track's PREGAP and
+/// POSTGAP and, for a GD-ROM, the area markers. Archives written before
+/// format version 2.1 have no layout, and their tracks are inferred from
+/// the sector map instead (see `infer_cue_string`).
 ///
 /// # Errors
 ///
@@ -24,18 +25,33 @@ pub fn generate_cue_string<H: Hashable>(
     }
 
     let mut output = String::new();
+    let is_gdrom = manifest.files.iter()
+        .flat_map(|file| &file.tracks)
+        .any(|track| track.area == DiscArea::HighDensity);
+    if is_gdrom {
+        writeln!(output, "REM SINGLE-DENSITY AREA")?;
+    }
     writeln!(output, "FILE \"{bin_filename}\" BINARY")?;
 
+    let mut area = DiscArea::SingleDensity;
     //Where each file starts in the joined file.
     let mut file_start: u32 = 0;
     for file in &manifest.files {
         for track in &file.tracks {
+            if track.area != area {
+                writeln!(output, "REM HIGH-DENSITY AREA")?;
+                area = track.area;
+            }
             writeln!(
                 output,
                 "  TRACK {:02} {}",
                 track.number,
                 track.track_type
             )?;
+            if track.pregap > 0 {
+                let gap = MsfTime::from_total_frames(track.pregap);
+                writeln!(output, "    PREGAP {gap}")?;
+            }
             for index in &track.indices {
                 let sector = file_start.saturating_add(index.sector);
                 writeln!(
@@ -44,6 +60,10 @@ pub fn generate_cue_string<H: Hashable>(
                     index.number,
                     MsfTime::from_total_frames(sector)
                 )?;
+            }
+            if track.postgap > 0 {
+                let gap = MsfTime::from_total_frames(track.postgap);
+                writeln!(output, "    POSTGAP {gap}")?;
             }
         }
         file_start = file_start.saturating_add(file.sector_count);
@@ -195,6 +215,41 @@ FILE \"disc.bin\" BINARY
             \x20 TRACK 02 AUDIO\n\
             \x20   INDEX 00 00:40:00\n\
             \x20   INDEX 01 00:42:00\n"
+        );
+    }
+
+    #[test]
+    fn gaps_and_gdrom_areas_are_printed_for_the_joined_file() {
+        // The gaps add no sectors to the files; track 3 starts after
+        // 300 + 450 sectors (00:10:00).
+        let (_, generated) = from_layout("\
+REM SINGLE-DENSITY AREA
+FILE \"t1.bin\" BINARY
+  TRACK 01 MODE1/2352
+    INDEX 01 00:00:00
+    POSTGAP 00:02:00
+FILE \"t2.bin\" BINARY
+  TRACK 02 AUDIO
+    PREGAP 00:02:00
+    INDEX 01 00:00:00
+REM HIGH-DENSITY AREA
+FILE \"t3.bin\" BINARY
+  TRACK 03 MODE1/2352
+    INDEX 01 00:00:00
+", &[300, 450, 300], &[]);
+        assert_eq!(
+            generated,
+            "REM SINGLE-DENSITY AREA\n\
+            FILE \"game.bin\" BINARY\n\
+            \x20 TRACK 01 MODE1/2352\n\
+            \x20   INDEX 01 00:00:00\n\
+            \x20   POSTGAP 00:02:00\n\
+            \x20 TRACK 02 AUDIO\n\
+            \x20   PREGAP 00:02:00\n\
+            \x20   INDEX 01 00:04:00\n\
+            REM HIGH-DENSITY AREA\n\
+            \x20 TRACK 03 MODE1/2352\n\
+            \x20   INDEX 01 00:10:00\n"
         );
     }
 

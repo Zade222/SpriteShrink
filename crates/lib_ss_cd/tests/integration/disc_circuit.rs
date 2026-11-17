@@ -761,3 +761,79 @@ fn header_numbers_that_jump_mid_disc_are_mapped_where_they_jump() {
 fn a_disc_whose_header_numbers_jump_reads_back() {
     assert_reads_back(&archive(jumping_disc(), ONE_TRACK_MODE2_CUE));
 }
+
+/// A Dreamcast disc as Redump stores it, one BIN per track, with the
+/// high-density area at sector 45000. Track 5 has a two-second PREGAP
+/// that isn't in its file, so its sector headers jump past it.
+const GDROM_CUE: &str = r#"REM SINGLE-DENSITY AREA
+FILE "track01.bin" BINARY
+  TRACK 01 MODE1/2352
+    INDEX 01 00:00:00
+FILE "track02.bin" BINARY
+  TRACK 02 AUDIO
+    INDEX 00 00:00:00
+    INDEX 01 00:02:00
+REM HIGH-DENSITY AREA
+FILE "track03.bin" BINARY
+  TRACK 03 MODE1/2352
+    INDEX 01 00:00:00
+FILE "track04.bin" BINARY
+  TRACK 04 AUDIO
+    INDEX 00 00:00:00
+    INDEX 01 00:02:00
+FILE "track05.bin" BINARY
+  TRACK 05 MODE1/2352
+    PREGAP 00:02:00
+    INDEX 01 00:00:00
+"#;
+
+#[test]
+fn a_gdrom_keeps_its_areas_and_gaps() {
+    // `first_lba` is the sector's address on the disc; headers hold it
+    // plus the 150-sector lead-in.
+    let data = |first_lba: u32, len: u32| -> Vec<u8> {
+        (0..len)
+            .flat_map(|k| {
+                numbered_sector(first_lba + k + LEAD_IN, SectorType::Mode1, [0; 8])
+            })
+            .collect()
+    };
+    let pcm = |seed: usize, len: usize| image(len, |i| audio(seed + i));
+    let disc = archive_files(
+        vec![
+            ("track01.bin", data(0, 300)),
+            ("track02.bin", pcm(10_000, 225)),
+            ("track03.bin", data(45_000, 300)),
+            ("track04.bin", pcm(20_000, 225)),
+            ("track05.bin", data(45_525 + 150, 300)),
+        ],
+        GDROM_CUE,
+    );
+
+    // Each jump in the headers, at the high-density area and after the
+    // PREGAP, is recorded where the joined image reaches it.
+    assert_eq!(
+        disc.manifest.lba_map,
+        [(0, LEAD_IN), (525, 44_475 + LEAD_IN), (1050, 44_625 + LEAD_IN)]
+    );
+    assert_reads_back(&disc);
+    assert_eq!(
+        generate_cue_string(&disc.manifest, BIN_NAME).unwrap(),
+        "REM SINGLE-DENSITY AREA\n\
+         FILE \"disc.bin\" BINARY\n\
+         \x20 TRACK 01 MODE1/2352\n\
+         \x20   INDEX 01 00:00:00\n\
+         \x20 TRACK 02 AUDIO\n\
+         \x20   INDEX 00 00:04:00\n\
+         \x20   INDEX 01 00:06:00\n\
+         REM HIGH-DENSITY AREA\n\
+         \x20 TRACK 03 MODE1/2352\n\
+         \x20   INDEX 01 00:07:00\n\
+         \x20 TRACK 04 AUDIO\n\
+         \x20   INDEX 00 00:11:00\n\
+         \x20   INDEX 01 00:13:00\n\
+         \x20 TRACK 05 MODE1/2352\n\
+         \x20   PREGAP 00:02:00\n\
+         \x20   INDEX 01 00:14:00\n"
+    );
+}

@@ -165,6 +165,9 @@ Each file is stored under its file name, so every input must have a different na
    *   **Multi-Disc Collections**: If you include an `.m3u` file containing filenames of `.cue` sheets (e.g., "Final Fantasy VII (Disc 1).cue", etc.), SpriteShrink will link them together into a group. Lines starting with `#` are comments. When you list the archive, discs in a group share a number in the `Grp` column (`group` with `-m`); discs in no group show `-` (`null`).
    *   **Unique Disc Names**: Each disc is stored under its `.cue` file's name, so every `.cue` sheet must have a different name, even when they are in different folders. Each disc's `.bin` files are read from the folder its `.cue` file is in.
    *   **Integrity Verification**: Optical mode calculates specialized hashes (SHA-512 and XXH3) to ensure the reconstructed disc is bit-perfect to the original.
+   *   **CUE Sheet Contents**: The archive keeps each track's type, its `INDEX` positions and any `PREGAP` or `POSTGAP`, which together set where every track sits on the disc. Other commands, such as `FLAGS`, `CATALOG`, `ISRC`, CD-Text and most `REM` lines, don't change the disc's layout and aren't stored; SpriteShrink prints a warning naming the ones it drops.
+   *   **Dreamcast (GD-ROM) Discs**: Sheets in Redump's Dreamcast format, with `REM SINGLE-DENSITY AREA` and `REM HIGH-DENSITY AREA` lines, are supported. The extracted CUE sheet keeps both lines. Like every disc, it is extracted as a single `.bin` file.
+   *   **Not Yet Supported**: Multi-session discs (a sheet with `REM SESSION 02` or later) are refused with an error, so nothing is archived that couldn't be restored correctly.
 
 ### 3. Inspecting an `.ssmc` or `.ssmd` Archive
 
