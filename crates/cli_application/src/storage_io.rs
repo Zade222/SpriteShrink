@@ -8,7 +8,6 @@
 
 use std::{
     collections::{BTreeMap, HashMap},
-    ffi::OsStr,
     fmt::Display,
     fs::{self, File, OpenOptions, metadata, read_dir, remove_file},
     hash::Hash,
@@ -107,11 +106,18 @@ pub fn entry_name(path: &Path) -> Option<String> {
     path.file_name().map(|name| name.to_string_lossy().into_owned())
 }
 
+/// Whether `path`'s extension is `extension` in any case, so `B.CUE` is a
+/// CUE sheet as much as `a.cue`. `extension` is given without the dot.
+pub fn has_extension(path: &Path, extension: &str) -> bool {
+    path.extension()
+        .is_some_and(|found| found.eq_ignore_ascii_case(extension))
+}
+
 /// The title a disc is stored under in an SSMD archive: its CUE file's stem,
 /// cut to the 255 characters `parse_cue` keeps. `None` for a file that
 /// isn't a CUE sheet, since only CUE sheets become discs.
 pub fn disc_title(path: &Path) -> Option<String> {
-    if path.extension() != Some(OsStr::new("cue")) {
+    if !has_extension(path, "cue") {
         return None;
     }
     path.file_stem()
@@ -850,6 +856,16 @@ mod tests {
     fn a_disc_title_is_the_cue_stem_cut_to_255_characters() {
         assert_eq!(disc_title(Path::new("x/game.cue")).as_deref(), Some("game"));
         assert_eq!(disc_title(Path::new("x/game.bin")), None);
+        assert_eq!(disc_title(Path::new("x/GAME.CUE")).as_deref(), Some("GAME"));
+
+        // Before extensions were compared in any case, `game.CUE` wasn't a
+        // disc, so the clash went unreported and that disc was left out.
+        let lower = PathBuf::from("x/game.cue");
+        let upper = PathBuf::from("y/game.CUE");
+        assert_eq!(
+            duplicate_names(&[lower.clone(), upper.clone()], disc_title),
+            [("game".to_string(), vec![lower, upper])]
+        );
 
         // Two long names that only differ past 255 characters get the same
         // title, as `parse_cue` keeps only the first 255.

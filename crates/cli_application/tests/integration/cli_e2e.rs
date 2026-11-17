@@ -157,6 +157,12 @@ fn metadata_lists_each_disc_as_json() {
     let archive = tmp.path().join("discs.ssmd");
     let one = write_blank_disc(&tmp.path().join("first"), "one", 300);
     let two = write_blank_disc(&tmp.path().join("second"), "two", 320);
+    // A CUE sheet is found whatever the case of its extension.
+    fs::rename(
+        tmp.path().join("second/two.cue"),
+        tmp.path().join("second/two.CUE"),
+    )
+    .unwrap();
     run_cli(&[
         "--mode", "optical",
         "-i", tmp.path().join("first").to_str().unwrap(),
@@ -201,7 +207,8 @@ fn discs_in_a_playlist_share_a_group() {
         "#EXTM3U\n\n# second/two.cue\none.cue\n",
     )
     .unwrap();
-    fs::write(dirs[2].join("set.m3u8"), "three.cue\n").unwrap();
+    // A playlist is found whatever the case of its extension.
+    fs::write(dirs[2].join("SET.M3U8"), "three.cue\n").unwrap();
 
     let mut args = vec!["--mode", "optical"];
     for dir in &dirs {

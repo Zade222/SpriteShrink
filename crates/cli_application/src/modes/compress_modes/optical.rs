@@ -1,6 +1,5 @@
 use std::{
     cmp::min, collections::HashMap,
-    ffi::OsStr,
     fmt::{Debug, Display},
     fs::{
         File, read_to_string
@@ -55,7 +54,7 @@ use crate::cli_types::{
 };
 use crate::error_handling::CliError;
 use crate::storage_io::{
-    TempCache, get_cache_paths
+    TempCache, get_cache_paths, has_extension
 };
 use crate::utils::{process_in_memory_check, set_priority};
 
@@ -133,8 +132,7 @@ where
     let mut next_collection_id = 0u8;
 
     for path in &file_paths {
-        if let Some(ext) = path.extension() &&
-            (ext == "m3u" || ext == "m3u8") &&
+        if (has_extension(path, "m3u") || has_extension(path, "m3u8")) &&
             let Ok(content) = read_to_string(path)
         {
             let mut found_any = false;
@@ -167,7 +165,7 @@ where
 
     let prepared_sheets: Vec<(PathBuf, String)> = file_paths
         .into_iter()
-        .filter(|path| path.extension() == Some(OsStr::new("cue")))
+        .filter(|path| has_extension(path, "cue"))
         .map(|path| {
             let content = read_to_string(&path).unwrap();
             (path, content)
