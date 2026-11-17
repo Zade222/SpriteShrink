@@ -96,7 +96,7 @@ impl From<ParsingError> for FFIStatus {
             ParsingError::InvalidEntryName { .. } => {
                 FFIStatus::InvalidEntryName
             }
-            ParsingError::InvalidFileVersion() => {
+            ParsingError::InvalidFileVersion(_) => {
                 FFIStatus::UnsupportedVersion
             }
             ParsingError::InvalidHeader(_) => FFIStatus::InvalidHeader,
@@ -195,7 +195,7 @@ mod tests {
     fn each_error_maps_to_its_documented_status_code() {
         let cases: Vec<(SpriteShrinkError, i32)> = vec![
             (ParsingError::InvalidHeader(String::new()).into(), -2),
-            (ParsingError::InvalidFileVersion().into(), -3),
+            (ParsingError::InvalidFileVersion(0).into(), -3),
             (ParsingError::ManifestDecodeError(String::new()).into(), -4),
             (ParsingError::SectionOutOfBounds(String::new()).into(), -20),
             (ParsingError::UnsupportedHashType(0).into(), -21),

@@ -30,8 +30,14 @@ pub enum ParsingError {
     #[error("Entry name {name:?} can't be used as a file name: {reason}.")]
     InvalidEntryName { name: String, reason: &'static str },
 
-    #[error("Read file is of a newer version than what this library supports.")]
-    InvalidFileVersion(),
+    #[error(
+        "Archive format {} is not supported. This version reads formats \
+        {} to {}.",
+        format_version(*.0),
+        format_version(oldest_supported_version()),
+        format_version(SUPPORTED_VERSION)
+    )]
+    InvalidFileVersion(u32),
 
     #[error("File header is malformed. {0}")]
     InvalidHeader(String),
@@ -54,6 +60,11 @@ pub enum ParsingError {
         supported = supported_hash_types()
     )]
     UnsupportedHashType(u8),
+}
+
+/// A `file_version` as "major.minor", for example `2.1` for `0x0002_0001`.
+fn format_version(version: u32) -> String {
+    format!("{}.{}", version >> 16, version & 0xFFFF)
 }
 
 /// Lists every [`HashType`] as "ID (name)", for error messages, for
@@ -153,10 +164,17 @@ pub static MAGIC_NUMBER: [u8; 8] = *b"SSARCHV1";
 
 /// The latest archive format version that this library supports.
 ///
-/// This constant is used during header parsing to ensure the library
-/// does not attempt to read files created by a newer, incompatible
-/// version of the software.
+/// The major version is in the high 16 bits and the minor in the low 16.
+/// Header parsing accepts every version with the same major version, up
+/// to this one: a newer minor version may store data this library doesn't
+/// know, and a different major version lays the archive out differently.
 pub static SUPPORTED_VERSION: u32 = 0x0002_0001;
+
+/// The first minor version of [`SUPPORTED_VERSION`]'s major version, the
+/// oldest format this library reads.
+fn oldest_supported_version() -> u32 {
+    SUPPORTED_VERSION & 0xFFFF_0000
+}
 
 /// The seed value used for deterministic chunking and hashing.
 ///
@@ -203,10 +221,13 @@ pub fn parse_file_header(
         ).into());
     }
 
-    //Check if the file version is supported by this library version.
-    if file_header.file_version > SUPPORTED_VERSION {
-        return Err(ParsingError::InvalidFileVersion().into());
-    };
+    /*Only versions with this library's major version, up to its own, share
+    the layout read here. Format 1.x archives have the same magic number
+    but a different header, so they must be stopped here.*/
+    let version = file_header.file_version;
+    if !(oldest_supported_version()..=SUPPORTED_VERSION).contains(&version) {
+        return Err(ParsingError::InvalidFileVersion(version).into());
+    }
 
     /*Reject hash types this library can't read here, so every reader stops
     at the header instead of failing later on hashes of an unknown width.*/
@@ -531,29 +552,46 @@ mod tests {
     }
 
     #[test]
-    fn parse_file_header_newer_version_returns_invalid_file_version() {
-        let mut header = sample_header();
-        header.file_version = SUPPORTED_VERSION + 1;
-
-        let err = parse_file_header(&header.to_le_bytes()).unwrap_err();
-
-        assert!(
-            matches!(err, SpriteShrinkError::Parsing(
-                ParsingError::InvalidFileVersion()
-            )),
-            "{err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_file_header_current_and_older_versions_are_accepted() {
-        for version in [SUPPORTED_VERSION, 0x0001_0000, 0] {
+    fn parse_file_header_accepts_format_2_0_and_2_1() {
+        for version in [0x0002_0000, 0x0002_0001] {
             let mut header = sample_header();
             header.file_version = version;
 
             let parsed = parse_file_header(&header.to_le_bytes()).unwrap();
 
             assert_eq!(parsed.file_version, version);
+        }
+    }
+
+    #[test]
+    fn parse_file_header_rejects_other_major_and_newer_versions() {
+        let cases = [
+            (0, "0.0"),
+            (0x0001_0000, "1.0"),
+            (0x0001_FFFF, "1.65535"),
+            (0x0002_0002, "2.2"),
+            (0x0003_0000, "3.0"),
+        ];
+
+        for (version, shown) in cases {
+            let mut header = sample_header();
+            header.file_version = version;
+
+            let err = parse_file_header(&header.to_le_bytes()).unwrap_err();
+
+            assert!(
+                matches!(err, SpriteShrinkError::Parsing(
+                    ParsingError::InvalidFileVersion(v)
+                ) if v == version),
+                "{shown}: {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                format!(
+                    "Archive format {shown} is not supported. This version \
+                    reads formats 2.0 to 2.1."
+                )
+            );
         }
     }
 

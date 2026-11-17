@@ -34,7 +34,7 @@ The header appears at offset 0. It identifies the file type, version, and the fo
 | Offset | Type | Field | Description |
 | :--- | :--- | :--- | :--- |
 | 0 | `[u8; 8]` | `magic_num` | Magic bytes. Default: `b"SSARCHV1"` |
-| 8 | `u32` | `file_version` | Archive format version: major in the high 16 bits, minor in the low 16 (e.g., `0x00020001` = 2.1). Readers reject a version newer than their own. |
+| 8 | `u32` | `file_version` | Archive format version: major in the high 16 bits, minor in the low 16 (e.g., `0x00020001` = 2.1). Readers accept the versions from their major version's x.0 up to their own, and reject a newer version or a different major version. |
 | 12 | `u32` | `file_count` | Total number of files/discs in the archive. |
 | 16 | `u16` | `algorithm` | Compression algorithm ID (e.g., 98 = Zstd). |
 | 18 | `u8` | `hash_type` | Hash type ID (e.g., 1 = xxhash3_64, 2 = xxhash3_128). |

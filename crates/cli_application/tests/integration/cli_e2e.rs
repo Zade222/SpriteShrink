@@ -435,6 +435,29 @@ fn unknown_format_id_is_reported_for_every_read_mode() {
     assert!(fs::read_dir(&out_dir).unwrap().next().is_none());
 }
 
+/// Format 1.x archives have the same magic number as 2.x ones but a
+/// different layout, and used to fail later with a misleading decode error.
+#[test]
+fn a_format_1_archive_is_reported_as_unsupported_by_every_read_mode() {
+    let tmp = TempDir::new().unwrap();
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+    let archive = patched_fixture(tmp.path(), 10, 1);
+    let archive = archive.to_str().unwrap();
+
+    let extract = ["-i", archive, "-o", out_dir.to_str().unwrap(), "-e", "1"];
+    let list = ["-i", archive, "--list"];
+    let metadata = ["-i", archive, "--metadata"];
+    for args in [&extract[..], &list[..], &metadata[..]] {
+        let printed = failure_output(args);
+        assert!(
+            printed.contains("Archive format 1.0 is not supported."),
+            "sprite-shrink {args:?}:\n{printed}"
+        );
+    }
+    assert!(fs::read_dir(&out_dir).unwrap().next().is_none());
+}
+
 /// Two small, unrelated ROMs in `dir/input`, returned as that folder.
 fn two_roms(dir: &Path) -> PathBuf {
     let input_dir = dir.join("input");
