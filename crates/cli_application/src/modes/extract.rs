@@ -8,9 +8,9 @@
 
 use std::{
     fmt::Display,
-    fs::{File, create_dir_all, rename},
+    fs::{File, create_dir_all},
     hash::Hash,
-    io::{BufWriter, Write},
+    io::Write,
     path::Path,
     sync::{
         Arc, atomic::{AtomicBool, Ordering},
@@ -38,10 +38,17 @@ use sprite_shrink_cd::{
 use crate::{
     archive_parser::{get_file_header, get_ssmc_prefix, get_ssmd_prefix},
     arg_handling::Args,
-    cli_types::TempFileGuard,
     error_handling::CliError,
-    storage_io::{create_replacing, read_file_data},
+    storage_io::{read_file_data, write_via_temp},
 };
+
+/// Write buffer for a file from an SSMC archive: 8 KiB, the size
+/// `BufWriter::new` uses.
+const FILE_WRITE_BUFFER_SIZE: usize = 8 * 1024;
+
+/// Write buffer for a disc image: 2048 raw sectors of 2352 bytes (about
+/// 4.6 MiB), so a disc is written in a few large writes.
+const DISC_WRITE_BUFFER_SIZE: usize = 2048 * 2352;
 
 /// Executes the file extraction process from an archive.
 ///
@@ -172,9 +179,9 @@ where
 /// and writing the final files to disk. It handles the creation of the
 /// output directory, validates ROM indices against the manifest, and ensures
 /// data integrity through hash verification. Each file is first written to
-/// a temporary file (`.tmp` extension) and then renamed to its final name
-/// upon successful completion to ensure atomicity and prevent corrupted files
-/// in case of an error or cancellation.
+/// a temporary file in `out_dir` and renamed to its final name once
+/// complete and flushed, so an error or cancellation leaves no partial file
+/// (see [`write_via_temp`]).
 ///
 /// # Type Parameters
 ///
@@ -266,51 +273,46 @@ where
         check_entry_name(&entry.filename).map_err(SpriteShrinkError::from)?;
         let final_output_path = out_dir.join(&entry.filename);
 
-        let tmp_output_path = final_output_path.with_extension("tmp");
+        /*Each file is written to a temp file and renamed once every chunk
+        has passed its hash check, so a failed or cancelled run leaves no
+        partial file.*/
+        write_via_temp(&final_output_path, FILE_WRITE_BUFFER_SIZE, |writer| {
+            fmp.chunk_metadata
+                .iter()
+                .try_for_each(|scm| -> Result<(), CliError> {
+                /*Get the chunk location from the chunk index.*/
+                let chunk_location = chunk_index.get(&scm.hash)
+                    .ok_or_else(|| {
+                    CliError::InternalError(format!(
+                        "Decompression failed: Missing chunk with hash\
+                        {}",
+                        scm.hash
+                    ))
+                })?;
 
-        let _guard = TempFileGuard::new(&tmp_output_path);
+                //The chunk index already holds absolute file offsets.
+                let comp_chunk_data = read_file_data(
+                    file_path,
+                    chunk_location.offset,
+                    chunk_location.compressed_length as usize
+                )?;
 
-        let file = create_replacing(&tmp_output_path)?;
-        let mut writer = BufWriter::new(file);
-
-        fmp.chunk_metadata
-            .iter()
-            .try_for_each(|scm| -> Result<(), CliError> {
-            /*Get the chunk location from the chunk index.*/
-            let chunk_location = chunk_index.get(&scm.hash)
-                .ok_or_else(|| {
-                CliError::InternalError(format!(
-                    "Decompression failed: Missing chunk with hash\
-                    {}",
+                let decomp_chunk_data = decompress_chunk_checked(
+                    &comp_chunk_data,
+                    dictionary,
                     scm.hash
-                ))
-            })?;
+                )?;
 
-            //The chunk index already holds absolute file offsets.
-            let comp_chunk_data = read_file_data(
-                file_path,
-                chunk_location.offset,
-                chunk_location.compressed_length as usize
-            )?;
+                //Check if the user has cancelled the operation
+                if !running.load(Ordering::SeqCst) {
+                    return Err(CliError::Cancelled);
+                }
 
-            let decomp_chunk_data = decompress_chunk_checked(
-                &comp_chunk_data,
-                dictionary,
-                scm.hash
-            )?;
+                writer.write_all(&decomp_chunk_data)?;
 
-            //Check if the user has cancelled the operation
-            if !running.load(Ordering::SeqCst) {
-                return Err(CliError::Cancelled);
-            }
-
-            writer.write_all(&decomp_chunk_data)?;
-
-            Ok(())
+                Ok(())
+            })
         })?;
-
-        //The file is fully written, rename it to final name.
-        rename(&tmp_output_path, final_output_path)?;
 
         debug!("{} extracted successfully", entry.filename);
     }
@@ -370,37 +372,32 @@ where
         check_entry_name(&entry.filename).map_err(SpriteShrinkError::from)?;
         let final_output_path = out_dir.join(&entry.filename);
 
-        let tmp_output_path = final_output_path.with_extension("tmp");
-
-        let _guard = TempFileGuard::new(&tmp_output_path);
-
-        let file = create_replacing(&tmp_output_path)?;
-
-        const WRITE_BUFFER_SIZE: usize = 2048 * 2352;
-        let mut writer = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
-
-        write_disc(
-            dm,
-            &indices,
-            &dictionary,
-            &archive_file,
-            &exception_blob,
-            &subheader_table,
-            &mut writer,
-            || !running.load(Ordering::SeqCst)
-        )?;
-
         let cue_content = generate_cue_string(dm, &entry.filename)
             .map_err(|e| CliError::InternalError(
                 format!("Failed to generate CUE sheet: {}", e)
             ))?;
 
+        /*The BIN and then the CUE sheet are each written to a temp file
+        and renamed when complete, so a failed or cancelled run leaves no
+        partial file.*/
+        write_via_temp(&final_output_path, DISC_WRITE_BUFFER_SIZE, |writer| {
+            write_disc(
+                dm,
+                &indices,
+                &dictionary,
+                &archive_file,
+                &exception_blob,
+                &subheader_table,
+                writer,
+                || !running.load(Ordering::SeqCst)
+            )
+            .map_err(CliError::from)
+        })?;
+
         let cue_path = final_output_path.with_extension("cue");
-
-        rename(&tmp_output_path, final_output_path)?;
-
-        let mut cue_file = create_replacing(&cue_path)?;
-        cue_file.write_all(cue_content.as_bytes())?;
+        write_via_temp(&cue_path, cue_content.len(), |writer| {
+            writer.write_all(cue_content.as_bytes()).map_err(CliError::from)
+        })?;
 
         debug!("{} extracted successfully", entry.filename);
     }

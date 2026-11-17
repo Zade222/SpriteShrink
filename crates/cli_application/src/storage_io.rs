@@ -11,7 +11,7 @@ use std::{
     fmt::Display,
     fs::{self, File, OpenOptions, metadata, read_dir, remove_file},
     hash::Hash,
-    io::{self, Read, Seek, SeekFrom, Write, copy},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write, copy},
     path::{Path, PathBuf},
     process::id,
     sync::{Arc, Mutex},
@@ -20,6 +20,7 @@ use std::{
 
 use dashmap::DashMap;
 use directories::ProjectDirs;
+use tempfile::{Builder, NamedTempFile};
 use tracing::{
     debug,
     error,
@@ -203,25 +204,98 @@ pub fn files_from_dirs(
     })
 }
 
-/// Creates a new file at `path` for writing, first removing any file
-/// already there, such as a temp file left by a run that crashed.
+/// The most bytes of the final file name that go into its temp file's
+/// name. File systems commonly allow 255 bytes per name, and an entry name
+/// can use all of them, so the temp name can't hold the whole of it.
+const TEMP_NAME_MAX: usize = 64;
+
+/// Writes the file at `final_path` through a temp file in the same folder,
+/// so `final_path` is either left as it was or replaced by the complete
+/// new file.
 ///
-/// Removing a symbolic link removes the link, not what it points to, and
-/// `create_new` then fails if anything appears at `path` in between. So a
-/// link planted at `path` can't redirect the write to another file, as
-/// `File::create` would let it.
+/// `write` gets a `BufWriter` with `buffer_size` bytes of buffer over the
+/// temp file. When it returns `Ok`, the buffer is flushed, and only then is
+/// the temp file renamed over `final_path`. On any error, from `write`,
+/// the flush or the rename, the temp file is deleted.
+///
+/// The temp file is named `.<final name>.<random>.tmp`, with the final name
+/// cut to [`TEMP_NAME_MAX`] bytes, and is opened with create-new. It never
+/// replaces or writes through a file that is already there, a symbolic
+/// link included. A process killed outright leaves its temp file behind.
+///
+/// The data isn't synced to disk before the rename, so after a power cut
+/// the file may be empty or short, depending on the file system.
 ///
 /// # Errors
 ///
-/// Returns the I/O error if the existing file can't be removed, for example
-/// because `path` is a folder, or the new file can't be created.
-pub fn create_replacing(path: &Path) -> io::Result<File> {
-    match fs::remove_file(path) {
-        Ok(()) => {}
-        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
-        Err(err) => return Err(err),
+/// Returns `write`'s error, or the I/O error if the temp file can't be
+/// created, flushed or renamed.
+pub fn write_via_temp<E>(
+    final_path: &Path,
+    buffer_size: usize,
+    write: impl FnOnce(&mut BufWriter<NamedTempFile>) -> Result<(), E>,
+) -> Result<(), E>
+where
+    E: From<io::Error>,
+{
+    /*The temp file has to be on the same file system as final_path for the
+    rename to replace it in one step.*/
+    let dir = match final_path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+
+    let prefix = temp_prefix(final_path);
+    let mut builder = Builder::new();
+    builder.prefix(&prefix).suffix(".tmp");
+    /*tempfile creates files only the owner can read (0o600). Ask for what
+    File::create asks for, so the finished file gets the usual permissions
+    (0o666 less the umask).*/
+    #[cfg(unix)]
+    builder.permissions(
+        std::os::unix::fs::PermissionsExt::from_mode(0o666)
+    );
+
+    let tmp = builder.tempfile_in(dir)?;
+    let tmp = write_buffered(tmp, buffer_size, write)?;
+    tmp.persist(final_path).map_err(|err| E::from(err.error))?;
+    Ok(())
+}
+
+/// Runs `write` on a `BufWriter` over `inner`, then flushes it and returns
+/// `inner`.
+///
+/// A `BufWriter` flushes itself when dropped but discards any error, so
+/// the end of the data could go missing without notice.
+/// `into_inner` flushes and returns that error.
+fn write_buffered<W, E>(
+    inner: W,
+    buffer_size: usize,
+    write: impl FnOnce(&mut BufWriter<W>) -> Result<(), E>,
+) -> Result<W, E>
+where
+    W: Write,
+    E: From<io::Error>,
+{
+    let mut writer = BufWriter::with_capacity(buffer_size, inner);
+    write(&mut writer)?;
+    writer.into_inner().map_err(|err| E::from(err.into_error()))
+}
+
+/// Returns `.<final name>.`, the start of a temp file's name, with the
+/// final name cut to at most [`TEMP_NAME_MAX`] bytes on a character
+/// boundary.
+fn temp_prefix(final_path: &Path) -> String {
+    let name = final_path.file_name().unwrap_or_default().to_string_lossy();
+    let mut prefix = String::from(".");
+    for c in name.chars() {
+        if prefix.len() + c.len_utf8() > TEMP_NAME_MAX + 1 {
+            break;
+        }
+        prefix.push(c);
     }
-    File::options().write(true).create_new(true).open(path)
+    prefix.push('.');
+    prefix
 }
 
 /// Reads a specific segment of a file into a byte vector.
@@ -970,5 +1044,82 @@ mod tests {
             drop(cache);
             assert!(!path.exists(), "in memory: {use_in_memory}");
         }
+    }
+
+    /// A writer that fails every write, as a full disk does.
+    struct FullDisk;
+
+    impl Write for FullDisk {
+        fn write(&mut self, _: &[u8]) -> io::Result<usize> {
+            Err(io::Error::other("disk full"))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /*The data fits in the buffer, so the closure's writes succeed and only
+    the final flush reaches the disk.*/
+    #[test]
+    fn a_failed_final_flush_is_reported() {
+        let result = write_buffered(FullDisk, 64, |writer| {
+            writer.write_all(b"the last bytes")
+        });
+
+        assert_eq!(result.err().unwrap().to_string(), "disk full");
+    }
+
+    #[test]
+    fn a_failed_write_leaves_the_old_file_and_no_temp_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("game.bin");
+        fs::write(&path, b"old").unwrap();
+
+        let result = write_via_temp(&path, 64, |writer| {
+            writer.write_all(b"new")?;
+            Err(io::Error::other("hash mismatch"))
+        });
+
+        assert_eq!(result.unwrap_err().to_string(), "hash mismatch");
+        assert_eq!(fs::read(&path).unwrap(), b"old");
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    /*An entry name can use all 255 bytes a file system allows, so the temp
+    name can't be the whole name plus more. The name is cut inside a
+    two-byte character to check the cut lands on a character boundary.*/
+    #[test]
+    fn a_255_byte_name_can_be_written() {
+        let tmp = TempDir::new().unwrap();
+        let name = format!("x{}", "é".repeat(127));
+        assert_eq!(name.len(), 255);
+        let path = tmp.path().join(&name);
+
+        write_via_temp(&path, 64, |writer| writer.write_all(b"data"))
+            .unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"data");
+        // 1 + 31 × 2 = 63 bytes; the 32nd "é" would pass TEMP_NAME_MAX.
+        assert_eq!(temp_prefix(&path), format!(".x{}.", "é".repeat(31)));
+    }
+
+    /*tempfile makes owner-only files by default; the extracted file should
+    get the permissions any other new file gets.*/
+    #[cfg(unix)]
+    #[test]
+    fn a_written_file_gets_the_usual_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = TempDir::new().unwrap();
+        let reference = tmp.path().join("reference");
+        File::create(&reference).unwrap();
+        let path = tmp.path().join("game.bin");
+
+        write_via_temp(&path, 64, |writer| writer.write_all(b"data"))
+            .unwrap();
+
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode();
+        assert_eq!(mode(&path), mode(&reference));
     }
 }

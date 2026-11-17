@@ -592,11 +592,11 @@ fn an_archive_with_an_unsafe_name_is_refused_by_every_read_mode() {
     }
 }
 
-/// Extraction writes `a.bin` through the temp file `a.tmp`. A link planted
-/// there is replaced, not written through.
-#[cfg(unix)]
+/// Extraction writes `a.bin` through a temp file. Files already in the
+/// output folder under names a temp file once used, a link among them, are
+/// left alone.
 #[test]
-fn a_link_at_the_temp_path_is_not_followed() {
+fn files_already_in_the_output_folder_are_left_alone() {
     let tmp = TempDir::new().unwrap();
     let input_dir = two_roms(tmp.path());
     let archive = tmp.path().join("roms.ssmc");
@@ -606,18 +606,22 @@ fn a_link_at_the_temp_path_is_not_followed() {
     ]);
     let out_dir = tmp.path().join("extract");
     fs::create_dir_all(&out_dir).unwrap();
+    fs::write(out_dir.join("a.tmp"), b"keep me").unwrap();
     let victim = tmp.path().join("victim");
-    fs::write(&victim, b"keep me").unwrap();
-    std::os::unix::fs::symlink(&victim, out_dir.join("a.tmp")).unwrap();
+    fs::write(&victim, b"keep me too").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&victim, out_dir.join("a.bin.tmp")).unwrap();
 
     extract_first(&archive, &out_dir);
 
-    assert_eq!(fs::read(&victim).unwrap(), b"keep me");
+    assert_eq!(fs::read(out_dir.join("a.tmp")).unwrap(), b"keep me");
+    assert_eq!(fs::read(&victim).unwrap(), b"keep me too");
+    #[cfg(unix)]
+    assert!(out_dir.join("a.bin.tmp").is_symlink());
     assert_eq!(
         fs::read(out_dir.join("a.bin")).unwrap(),
         fs::read(input_dir.join("a.bin")).unwrap()
     );
-    assert!(!out_dir.join("a.tmp").exists());
 }
 
 /// A file name Windows can't use is refused before anything is compressed,

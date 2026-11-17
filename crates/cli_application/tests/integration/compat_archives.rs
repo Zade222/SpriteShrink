@@ -172,10 +172,10 @@ fn v2_1_ssmd_archive_extracts() {
 /// Extracting a truncated copy of `archive` has to fail with the CLI's
 /// error message, not a panic.
 ///
-/// Each file is written to a `.tmp` file and renamed only once every chunk
+/// Each file is written to a temp file and renamed only once every chunk
 /// has passed its hash check, so files finished before the error stay. Any
 /// file left behind has to be one of `expected` and match its hash, and no
-/// `.tmp` file may be left.
+/// temp file may be left.
 fn assert_truncated_copies_fail_cleanly(
     archive: &Path,
     indices: &str,
