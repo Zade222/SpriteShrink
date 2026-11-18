@@ -478,6 +478,36 @@ fn a_damaged_audio_block_is_not_read_back() {
     }
 }
 
+/// A manifest that doesn't cover every sector fails on the uncovered ones,
+/// rather than returning sectors rebuilt around zeros. The data stream is
+/// cut by 3000 bytes, which leaves the last 2048-byte sector uncovered and
+/// the one before it partly covered. The audio cut drops the last block.
+#[test]
+fn sectors_the_manifest_does_not_cover_are_not_made_up() {
+    let mut short_data = archive(full_disc(), FULL_DISC_CUE);
+    let layout = &mut short_data.manifest.data_stream_layout;
+    let mut cut = 3000;
+    while let Some(last) = layout.last_mut() {
+        if last.uncomp_len > cut {
+            last.uncomp_len -= cut;
+            break;
+        }
+        cut -= last.uncomp_len;
+        layout.pop();
+    }
+
+    let mut short_audio = archive(full_disc(), FULL_DISC_CUE);
+    short_audio.manifest.audio_block_map.pop().unwrap();
+
+    for disc in [short_data, short_audio] {
+        let errors = failed_sector_reads(&disc);
+        assert!(!errors.is_empty(), "no sector read failed");
+        for e in &errors {
+            assert!(e.contains("doesn't hold all the data for sector"), "{e}");
+        }
+    }
+}
+
 /// The full disc with each track in its own file, as Redump stores discs.
 /// Index times are relative to the file they're in.
 const SPLIT_DISC_CUE: &str = r#"FILE "track1.bin" BINARY

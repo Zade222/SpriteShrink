@@ -458,9 +458,25 @@ where
                     target_slice.copy_from_slice(&decomp[start..start + len]);
                     write_cursor += len;
                 }
+
+                /*The chunks found may cover only part of the sector, if
+                the manifest's data stream ends early or has a gap.*/
+                if write_cursor != usize::from(sector_type.data_size()) {
+                    return Err(
+                        ReconstructionError::MissingSectorData(sector_idx)
+                            .into()
+                    );
+                }
             },
-            Some(ReconstructionInfo::None) | None => {
-                //Data already zeroed
+            //A zeroed sector stores no data; it is rebuilt from zeros.
+            Some(ReconstructionInfo::None) => {}
+            /*A sector type that stores data, but no audio block or data
+            chunk covers it. Filling it with zeros would return a sector
+            that was never on the disc.*/
+            None => {
+                return Err(
+                    ReconstructionError::MissingSectorData(sector_idx).into()
+                );
             }
         }
 

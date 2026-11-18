@@ -60,6 +60,9 @@ pub enum ReconstructionError {
     #[error("Missing subheader data for Mode 2 sector number {0}")]
     MissingSubheader(usize),
 
+    #[error("The disc manifest doesn't hold all the data for sector {0}")]
+    MissingSectorData(u32),
+
     #[error("Missing exception data for Exception sector type")]
     MissingExceptionData,
 
