@@ -300,7 +300,8 @@ where
                 let decomp_chunk_data = decompress_chunk_checked(
                     &comp_chunk_data,
                     dictionary,
-                    scm.hash
+                    scm.hash,
+                    scm.length as usize
                 )?;
 
                 //Check if the user has cancelled the operation

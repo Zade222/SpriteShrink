@@ -79,6 +79,14 @@ pub const MIN_WINDOW_SIZE: u64 = AVERAGE_MIN as u64;
 /// [`MIN_WINDOW_SIZE`].
 pub const MAX_WINDOW_SIZE: u64 = AVERAGE_MAX as u64;
 
+/// The longest chunk, in bytes, the chunker can cut: four times
+/// [`MAX_WINDOW_SIZE`], or 16 MiB. No valid archive holds a longer chunk,
+/// so decompression never decodes past it.
+// Written out rather than derived from `AVERAGE_MAX`, which cbindgen would
+// copy into the C header, where it isn't defined. A unit test checks it
+// against the chunker.
+pub const MAX_CHUNK_LEN: usize = 16 * 1024 * 1024;
+
 /// The most sample data, in bytes, that dictionary training is given, set
 /// to prevent an overflow in the zstd library.
 const MAX_SAMPLES_SIZE: u64 = 4 * 1024 * 1024 * 1024;
@@ -902,6 +910,12 @@ mod tests {
     // The CLI streams files through StreamCDC with these settings
     // (`default.rs` and `optical.rs`). If they drift apart, the same file is
     // cut differently depending on which path compressed it.
+    #[test]
+    fn max_chunk_len_is_the_largest_window_s_largest_chunk() {
+        let (_, _, max_size) = chunker_sizes(MAX_WINDOW_SIZE).unwrap();
+        assert_eq!(usize::try_from(max_size).unwrap(), MAX_CHUNK_LEN);
+    }
+
     #[test]
     fn chunk_data_matches_cli_stream_chunker() {
         let window_size: u64 = 4096;

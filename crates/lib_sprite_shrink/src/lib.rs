@@ -29,7 +29,7 @@ pub use parsing::{
 
 mod processing;
 pub use processing::{
-    MAX_WINDOW_SIZE, MIN_WINDOW_SIZE,
+    MAX_CHUNK_LEN, MAX_WINDOW_SIZE, MIN_WINDOW_SIZE,
     Hashable,
     create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory,
     verify_single_file, test_compression};

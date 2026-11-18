@@ -479,21 +479,18 @@ fn a_damaged_audio_block_is_not_read_back() {
 }
 
 /// A manifest that doesn't cover every sector fails on the uncovered ones,
-/// rather than returning sectors rebuilt around zeros. The data stream is
-/// cut by 3000 bytes, which leaves the last 2048-byte sector uncovered and
-/// the one before it partly covered. The audio cut drops the last block.
+/// rather than returning sectors rebuilt around zeros. The data cut drops
+/// whole chunks, at least 3000 bytes, so at least the last 2048-byte
+/// sector is uncovered. (Shortening a chunk's recorded length instead
+/// fails earlier, as a chunk too long for its record.) The audio cut drops
+/// the last block.
 #[test]
 fn sectors_the_manifest_does_not_cover_are_not_made_up() {
     let mut short_data = archive(full_disc(), FULL_DISC_CUE);
     let layout = &mut short_data.manifest.data_stream_layout;
-    let mut cut = 3000;
-    while let Some(last) = layout.last_mut() {
-        if last.uncomp_len > cut {
-            last.uncomp_len -= cut;
-            break;
-        }
-        cut -= last.uncomp_len;
-        layout.pop();
+    let mut cut = 0;
+    while cut < 3000 {
+        cut += layout.pop().unwrap().uncomp_len;
     }
 
     let mut short_audio = archive(full_disc(), FULL_DISC_CUE);
@@ -653,6 +650,20 @@ fn a_failed_write_stops_write_disc() {
     let (cancelled, err) = result.unwrap_err();
     assert!(!cancelled, "{err}");
     assert!(err.contains("no space left on device"), "{err}");
+}
+
+/// `write_disc` stops decoding a data chunk at the length the manifest
+/// records for it.
+#[test]
+fn write_disc_rejects_a_chunk_longer_than_its_record() {
+    let mut disc = archive(full_disc(), FULL_DISC_CUE);
+    disc.manifest.data_stream_layout[0].uncomp_len -= 1;
+
+    let result = write_disc_or_hang(disc, std::io::sink(), || false)
+        .expect("write_disc hung after a chunk failed");
+    let (cancelled, err) = result.unwrap_err();
+    assert!(!cancelled, "{err}");
+    assert!(err.contains("Chunk decodes to more than"), "{err}");
 }
 
 #[test]

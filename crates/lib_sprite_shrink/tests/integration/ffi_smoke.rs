@@ -2041,6 +2041,39 @@ fn ffi_damaged_chunks_are_never_extracted_u128() {
     assert_damaged_chunks_are_never_extracted::<u128>();
 }
 
+/// A chunk that decodes to more than the output buffer holds returns
+/// `BufferTooSmall` from every decompress export, and writes nothing.
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn decompressing_into_a_buffer_one_byte_short_writes_nothing() {
+    let payload = vec![7_u8; 4096];
+    let compressed = zstd::bulk::compress(&payload, 3).unwrap();
+    let mut out = vec![0xEE_u8; payload.len() - 1];
+
+    let statuses = [
+        decompress_unchecked(&compressed, &[], 0_u64, &mut out),
+        decompress_checked_u64(
+            &compressed,
+            &[],
+            u64::from_bytes_with_seed(&payload),
+            &mut out,
+        ),
+        decompress_checked_u128(
+            &compressed,
+            &[],
+            u128::from_bytes_with_seed(&payload),
+            &mut out,
+        ),
+    ];
+    for status in statuses {
+        assert_eq!(
+            status_code(status),
+            status_code(FFIStatus::BufferTooSmall)
+        );
+    }
+    assert!(out.iter().all(|&byte| byte == 0xEE));
+}
+
 #[test]
 fn checked_decompress_rejects_each_null_pointer() {
     let compressed = [0_u8; 4];

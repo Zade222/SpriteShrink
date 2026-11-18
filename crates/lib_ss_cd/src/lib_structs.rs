@@ -267,6 +267,7 @@ impl<H: Copy + Eq> DiscManifest<H> {
 
                 needed_chunks.push(StreamChunkInfo {
                     chunk_hash: chunk_layout.hash,
+                    uncomp_len: chunk_layout.uncomp_len,
                     read_from_offset: (
                         overlap_start_in_stream - chunk_start
                     ) as u32,
@@ -441,7 +442,8 @@ where
                     let decomp = decompress_chunk_checked(
                         &comp_data,
                         self.dictionary,
-                        chunk.chunk_hash
+                        chunk.chunk_hash,
+                        chunk.uncomp_len as usize
                     )?;
 
                     let start = chunk.read_from_offset as usize;
@@ -967,8 +969,11 @@ pub struct SSMDTocEntry {
 }
 
 
+/// The part of one data chunk that a sector's user data needs.
 pub struct StreamChunkInfo<H> {
     pub chunk_hash: H,
+    /// The whole chunk's decoded length, from the disc manifest.
+    pub uncomp_len: u32,
     pub read_from_offset: u32,
     pub read_length: u32,
 }

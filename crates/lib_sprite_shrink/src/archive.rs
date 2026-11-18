@@ -36,7 +36,9 @@ use crate::{IsCancelled, SpriteShrinkError,
 };
 
 use crate::processing::{
-    build_train_samples, gen_zstd_opt_dict, Hashable, ProcessingError
+    MAX_CHUNK_LEN,
+    Hashable, ProcessingError,
+    build_train_samples, gen_zstd_opt_dict,
 };
 
 #[derive(Error, Debug)]
@@ -77,6 +79,14 @@ pub enum ArchiveError {
     #[error("Chunk failed its integrity check (expected hash {expected}, \
         got {actual}). The archive may be damaged.")]
     ChunkHashMismatch { expected: String, actual: String },
+
+    #[error("Chunk decodes to more than the {limit} bytes allowed. The \
+        archive may be damaged.")]
+    ChunkTooLong { limit: usize },
+
+    #[error("Chunk decodes to {actual} bytes, not the {expected} recorded \
+        for it. The archive may be damaged.")]
+    ChunkTooShort { expected: usize, actual: usize },
 
     #[error("Operation cancelled by user.")]
     Cancelled,
@@ -904,6 +914,11 @@ where
 /// * `comp_chunk_data` – A byte slice containing the compressed chunk data.
 /// * `dictionary` – A byte slice containing the ZSTD dictionary that was used
 ///   during compression.
+/// * `max_len` – The most bytes the chunk may decode to, normally its
+///   recorded length. Values above [`MAX_CHUNK_LEN`] (16 MiB) are lowered to
+///   it, since no valid chunk is longer. Decoding stops one byte past the
+///   limit, so a small chunk that expands without end can't use more memory
+///   than this.
 ///
 /// # Returns
 ///
@@ -913,32 +928,49 @@ where
 /// # Errors
 ///
 /// This function will return an error if:
-/// * The ZSTD decoder cannot be created with the supplied dictionary, or
-/// * The decompression process fails while reading the compressed data.
+/// * The ZSTD decoder cannot be created with the supplied dictionary,
+/// * The decompression process fails while reading the compressed data, or
+/// * The chunk decodes to more than `max_len` bytes, or more than
+///   [`MAX_CHUNK_LEN`] (`ArchiveError::ChunkTooLong`, with the limit that
+///   applied).
 ///
-/// The output is not checked against the chunk's hash. Chunks are written
-/// without a zstd checksum, so most damage to `comp_chunk_data` decodes to
-/// wrong bytes with no error. Use `decompress_chunk_checked` unless the
-/// caller checks the output itself.
+/// The output is not checked against the chunk's hash or its recorded
+/// length. Chunks are written without a zstd checksum, so most damage to
+/// `comp_chunk_data` decodes to wrong bytes with no error. Use
+/// `decompress_chunk_checked` unless the caller checks the output itself.
 pub fn decompress_chunk(
     comp_chunk_data: &[u8],
-    dictionary: &[u8]
+    dictionary: &[u8],
+    max_len: usize,
 ) -> Result<Vec<u8>, SpriteShrinkError> {
     /*Create a zstd decoder with the prepared dictionary from the file
     archive.*/
-    let mut decoder = zstd::stream::Decoder::with_dictionary(
+    let decoder = zstd::stream::Decoder::with_dictionary(
         comp_chunk_data,
         dictionary)?;
 
-    //Decompress the data into a new vector.
+    let max_len = max_len.min(MAX_CHUNK_LEN);
+
+    /*Read one byte more than allowed, so output past `max_len` is seen
+    without decoding the rest of it.*/
+    let limit = u64::try_from(max_len).map_or(u64::MAX, |len| len.saturating_add(1));
     let mut decompressed_chunk_data = Vec::new();
-    decoder.read_to_end(&mut decompressed_chunk_data)?;
+    decoder.take(limit).read_to_end(&mut decompressed_chunk_data)?;
+
+    if decompressed_chunk_data.len() > max_len {
+        return Err(ArchiveError::ChunkTooLong { limit: max_len }.into());
+    }
 
     Ok(decompressed_chunk_data)
 }
 
 /// Decompresses a chunk like `decompress_chunk`, then checks that the
-/// output hashes to `expected`, the hash the chunk is stored under.
+/// output is exactly `len` bytes and hashes to `expected`, the hash the
+/// chunk is stored under.
+///
+/// `len` is the chunk's length as the archive records it
+/// (`SSAChunkMeta::length`, or `DataChunkLayout::uncomp_len` in a disc
+/// archive). Decoding stops just past it.
 ///
 /// The chunk's key is the hash of its uncompressed bytes, so this catches
 /// damage that zstd decodes without an error, including two frames that
@@ -946,24 +978,46 @@ pub fn decompress_chunk(
 ///
 /// # Errors
 ///
-/// Returns the errors of `decompress_chunk`, or
-/// `ArchiveError::ChunkHashMismatch` (inside `SpriteShrinkError::Archive`)
-/// if the output doesn't hash to `expected`.
+/// Returns the errors of `decompress_chunk`, with `len` as its limit,
+/// `ArchiveError::ChunkTooShort` if the output is shorter than `len`, or
+/// `ArchiveError::ChunkHashMismatch` if it doesn't hash to `expected` (all
+/// inside `SpriteShrinkError::Archive`).
 pub fn decompress_chunk_checked<H: Hashable>(
     comp_chunk_data: &[u8],
     dictionary: &[u8],
     expected: H,
+    len: usize,
 ) -> Result<Vec<u8>, SpriteShrinkError> {
-    let data = decompress_chunk(comp_chunk_data, dictionary)?;
-    let actual = H::from_bytes_with_seed(&data);
+    let data = decompress_chunk(comp_chunk_data, dictionary, len)?;
+    if data.len() != len {
+        return Err(ArchiveError::ChunkTooShort {
+            expected: len,
+            actual: data.len(),
+        }
+        .into());
+    }
+    check_chunk_hash(&data, expected)?;
+    Ok(data)
+}
+
+/// Checks that `data` hashes to `expected`, the hash its chunk is stored
+/// under.
+///
+/// # Errors
+///
+/// Returns `ArchiveError::ChunkHashMismatch` if it doesn't.
+pub(crate) fn check_chunk_hash<H: Hashable>(
+    data: &[u8],
+    expected: H,
+) -> Result<(), ArchiveError> {
+    let actual = H::from_bytes_with_seed(data);
     if actual != expected {
         return Err(ArchiveError::ChunkHashMismatch {
             expected: format!("{expected:?}"),
             actual: format!("{actual:?}"),
-        }
-        .into());
+        });
     }
-    Ok(data)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1045,7 +1099,7 @@ mod tests {
 
             let compressed = compress(&payload, dict, level)
                 .map_err(|e| TestCaseError::fail(e.to_string()))?;
-            let decompressed = decompress_chunk(&compressed, dict)
+            let decompressed = decompress_chunk(&compressed, dict, payload.len())
                 .map_err(|e| TestCaseError::fail(e.to_string()))?;
             prop_assert_eq!(decompressed, payload);
         }
@@ -1056,7 +1110,7 @@ mod tests {
         for dict in [dictionary(), &[]] {
             let compressed = compress(&[], dict, 3).unwrap();
             assert!(!compressed.is_empty(), "no zstd frame was written");
-            assert_eq!(decompress_chunk(&compressed, dict).unwrap(), []);
+            assert_eq!(decompress_chunk(&compressed, dict, 0).unwrap(), []);
         }
     }
 
@@ -1067,7 +1121,8 @@ mod tests {
             let compressed =
                 compress(&payload, dictionary(), level).unwrap();
             assert_eq!(
-                decompress_chunk(&compressed, dictionary()).unwrap(),
+                decompress_chunk(&compressed, dictionary(), payload.len())
+                    .unwrap(),
                 payload,
                 "level {level}"
             );
@@ -1076,7 +1131,7 @@ mod tests {
 
     #[test]
     fn decompressing_without_the_same_dictionary_fails() {
-        let (_, compressed) = compressed_payload();
+        let (payload, compressed) = compressed_payload();
         let other = zstd::dict::from_continuous(
             &tiled_bytes(0x0BAD_D1C7, 64 * 1024),
             &[1024; 64],
@@ -1086,27 +1141,31 @@ mod tests {
 
         // The frame records the dictionary's ID, so zstd notices.
         for dict in [&other[..], &[]] {
-            let e = io_error(decompress_chunk(&compressed, dict));
+            let e = io_error(decompress_chunk(&compressed, dict, payload.len()));
             assert_eq!(e.to_string(), "Dictionary mismatch");
         }
     }
 
     #[test]
     fn a_truncated_chunk_fails() {
-        let (_, compressed) = compressed_payload();
+        let (payload, compressed) = compressed_payload();
         for len in 0..compressed.len() {
-            let e =
-                io_error(decompress_chunk(&compressed[..len], dictionary()));
+            let e = io_error(decompress_chunk(
+                &compressed[..len],
+                dictionary(),
+                payload.len(),
+            ));
             assert_eq!(e.kind(), ErrorKind::UnexpectedEof, "{len} bytes");
         }
     }
 
     #[test]
     fn bytes_after_the_frame_fail() {
-        let (_, mut compressed) = compressed_payload();
+        let (payload, mut compressed) = compressed_payload();
         compressed.extend_from_slice(b"junk");
 
-        let e = io_error(decompress_chunk(&compressed, dictionary()));
+        let e =
+            io_error(decompress_chunk(&compressed, dictionary(), payload.len()));
         assert_eq!(e.to_string(), "Unknown frame descriptor");
     }
 
@@ -1125,13 +1184,15 @@ mod tests {
         let (payload, compressed) = compressed_payload();
         let key = u64::from_bytes_with_seed(&payload);
         assert_eq!(
-            decompress_chunk_checked(&compressed, dictionary(), key).unwrap(),
+            decompress_chunk_checked(&compressed, dictionary(), key, payload.len())
+                .unwrap(),
             payload
         );
 
         let key = u128::from_bytes_with_seed(&payload);
         assert_eq!(
-            decompress_chunk_checked(&compressed, dictionary(), key).unwrap(),
+            decompress_chunk_checked(&compressed, dictionary(), key, payload.len())
+                .unwrap(),
             payload
         );
     }
@@ -1140,7 +1201,8 @@ mod tests {
     fn a_checked_chunk_fails_under_the_wrong_key() {
         let (payload, compressed) = compressed_payload();
         let key = u64::from_bytes_with_seed(&payload) ^ 1;
-        let result = decompress_chunk_checked(&compressed, dictionary(), key);
+        let result =
+            decompress_chunk_checked(&compressed, dictionary(), key, payload.len());
         assert!(is_hash_mismatch(&result), "{result:?}");
     }
 
@@ -1156,8 +1218,12 @@ mod tests {
             for bit in 0..8 {
                 let mut corrupted = compressed.clone();
                 corrupted[index] ^= 1 << bit;
-                let result =
-                    decompress_chunk_checked(&corrupted, dictionary(), key);
+                let result = decompress_chunk_checked(
+                    &corrupted,
+                    dictionary(),
+                    key,
+                    payload.len(),
+                );
                 if let Ok(data) = &result {
                     assert_eq!(data, &payload, "byte {index} bit {bit}");
                 }
@@ -1169,12 +1235,72 @@ mod tests {
 
     #[test]
     fn two_frames_fail_a_checked_chunk() {
-        // zstd decodes two frames back to back as one stream.
+        // zstd decodes two frames back to back as one stream, twice the
+        // chunk's length.
         let (payload, compressed) = compressed_payload();
         let key = u64::from_bytes_with_seed(&payload);
         let doubled = [compressed.as_slice(), &compressed].concat();
-        let result = decompress_chunk_checked(&doubled, dictionary(), key);
-        assert!(is_hash_mismatch(&result), "{result:?}");
+        let result =
+            decompress_chunk_checked(&doubled, dictionary(), key, payload.len());
+        assert!(
+            matches!(
+                result,
+                Err(SpriteShrinkError::Archive(ArchiveError::ChunkTooLong {
+                    limit
+                })) if limit == payload.len()
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn a_chunk_that_decodes_short_fails_a_checked_chunk() {
+        let (payload, compressed) = compressed_payload();
+        let key = u64::from_bytes_with_seed(&payload);
+        let len = payload.len() + 1;
+        let result = decompress_chunk_checked(&compressed, dictionary(), key, len);
+        assert!(
+            matches!(
+                result,
+                Err(SpriteShrinkError::Archive(ArchiveError::ChunkTooShort {
+                    expected,
+                    actual,
+                })) if expected == len && actual == payload.len()
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn decoding_stops_just_past_max_len() {
+        // 4096 frames of 1 MiB of zeros decode as one 4 GiB stream from
+        // under 200 KB. Without the limit this would run out of memory.
+        let frame = compress(&vec![0; 1024 * 1024], &[], 1).unwrap();
+        let bomb = frame.repeat(4096);
+        assert!(bomb.len() < 200 * 1024, "{} bytes", bomb.len());
+
+        let result = decompress_chunk(&bomb, &[], 4096);
+        assert!(
+            matches!(
+                result,
+                Err(SpriteShrinkError::Archive(ArchiveError::ChunkTooLong {
+                    limit: 4096
+                }))
+            ),
+            "{result:?}"
+        );
+
+        // A caller asking for more still stops at the longest valid chunk.
+        let result = decompress_chunk(&bomb, &[], usize::MAX);
+        assert!(
+            matches!(
+                result,
+                Err(SpriteShrinkError::Archive(ArchiveError::ChunkTooLong {
+                    limit: MAX_CHUNK_LEN
+                }))
+            ),
+            "{result:?}"
+        );
     }
 
     type ReadResult = Result<Vec<Vec<u8>>, SpriteShrinkError>;
@@ -1264,7 +1390,8 @@ mod tests {
             );
             offset += u64::from(location.compressed_length);
             assert_eq!(
-                decompress_chunk(compressed, dictionary()).unwrap(),
+                decompress_chunk(compressed, dictionary(), chunks[hash].len())
+                    .unwrap(),
                 chunks[hash],
                 "chunk {hash}"
             );
@@ -1445,7 +1572,8 @@ mod tests {
         assert_eq!(indexed, hashes);
         for (hash, compressed) in hashes.iter().zip(&written) {
             assert_eq!(
-                decompress_chunk(compressed, dictionary()).unwrap(),
+                decompress_chunk(compressed, dictionary(), chunks[hash].len())
+                    .unwrap(),
                 chunks[hash]
             );
         }
@@ -1742,8 +1870,12 @@ mod tests {
             let location = &index[hash];
             let start = usize::try_from(location.offset).unwrap();
             let end = start + location.compressed_length as usize;
-            let decompressed =
-                decompress_chunk(&blob[start..end], &result.dictionary).unwrap();
+            let decompressed = decompress_chunk(
+                &blob[start..end],
+                &result.dictionary,
+                chunk.len(),
+            )
+            .unwrap();
             assert!(decompressed == *chunk, "chunk {hash}");
         }
     }

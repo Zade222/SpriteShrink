@@ -855,9 +855,9 @@ where
     let (data_tx, data_rx) = bounded(4);
     let (audio_tx, audio_rx) = bounded(4);
 
-    let chunk_hashes: Vec<H> = manifest.data_stream_layout.iter().map(|data| {
-        data.hash
-    }).collect();
+    let chunks: Vec<(H, usize)> = manifest.data_stream_layout.iter()
+        .map(|data| (data.hash, data.uncomp_len as usize))
+        .collect();
 
     let audio_hashes: Vec<H> = manifest.audio_block_map.iter().map(|block| {
         block.content_hash
@@ -901,7 +901,7 @@ where
 
         let data_fetch_handle = spawn_chunk_decomp_worker(
             scope,
-            chunk_hashes,
+            chunks,
             &indices.chunk_index,
             dictionary,
             archive_file,

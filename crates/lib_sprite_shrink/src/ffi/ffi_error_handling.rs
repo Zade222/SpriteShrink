@@ -81,9 +81,11 @@ impl From<ArchiveError> for FFIStatus {
             ArchiveError::WorkerError(_) => FFIStatus::InternalError,
             ArchiveError::ProcessingError(e) => e.into(),
             ArchiveError::External(_) => FFIStatus::CallbackError,
-            ArchiveError::ChunkHashMismatch { .. } => {
+            ArchiveError::ChunkHashMismatch { .. }
+            | ArchiveError::ChunkTooShort { .. } => {
                 FFIStatus::VerificationHashMismatch
             }
+            ArchiveError::ChunkTooLong { .. } => FFIStatus::BufferTooSmall,
             ArchiveError::Cancelled => FFIStatus::StatusCancelled,
         }
     }

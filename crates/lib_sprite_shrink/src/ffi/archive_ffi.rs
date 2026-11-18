@@ -12,7 +12,8 @@ use std::{
 use bitcode::Encode;
 
 use crate::archive::{
-    ArchiveBuilder, decompress_chunk, decompress_chunk_checked
+    ArchiveBuilder, ArchiveError,
+    check_chunk_hash, decompress_chunk
 };
 use crate::ffi::ffi_error_handling::{
     FFIResult
@@ -399,8 +400,9 @@ pub unsafe extern "C" fn archive_builder_new_u128(
 }
 
 /// Decompresses the chunk in `buffers` with `decompress` and copies the
-/// result into the host's output buffer. Errors from `decompress` become
-/// the status `on_error` returns.
+/// result into the host's output buffer. `decompress` gets the output
+/// buffer's length as its limit, so it never decodes more than fits.
+/// Errors from `decompress` become the status `on_error` returns.
 ///
 /// # Safety
 ///
@@ -409,7 +411,8 @@ pub unsafe extern "C" fn archive_builder_new_u128(
 /// whole call. `out` must not overlap `comp` or `dict`.
 unsafe fn decompress_into(
     buffers: HostBuffers,
-    decompress: impl FnOnce(&[u8], &[u8]) -> Result<Vec<u8>, SpriteShrinkError>,
+    decompress: impl FnOnce(&[u8], &[u8], usize)
+        -> Result<Vec<u8>, SpriteShrinkError>,
     on_error: impl FnOnce(SpriteShrinkError) -> FFIResult,
 ) -> FFIResult {
     if buffers.comp.is_null() || buffers.dict.is_null() || buffers.out.is_null()
@@ -426,7 +429,7 @@ unsafe fn decompress_into(
     // alignment 1, so any non-null pointer is aligned.
     let dict = unsafe { slice::from_raw_parts(buffers.dict, buffers.dict_len) };
 
-    let data = match decompress(comp, dict) {
+    let data = match decompress(comp, dict, buffers.out_len) {
         Ok(data) => data,
         Err(err) => return on_error(err),
     };
@@ -488,6 +491,9 @@ unsafe fn read_u128_hash(ptr: *const u8) -> u128 {
 ///   written.
 /// - `data_out_len`: Capacity of the output buffer. This is known prior to
 ///   calling this function as it is stored as part of the chunk's metadata.
+///   Decoding stops one byte past it, or past `MAX_CHUNK_LEN` (16 MiB) if
+///   that's smaller, so a chunk that expands without end can't use more
+///   memory than this.
 ///
 /// # Return Value
 ///
@@ -496,8 +502,9 @@ unsafe fn read_u128_hash(ptr: *const u8) -> u128 {
 /// * `FFIResult::StatusOk`: Decompression succeeded and the output was
 ///   written.
 /// * `FFIResult::NullArgument`: One or more supplied pointers were null.
-/// * `FFIResult::BufferTooSmall`: The output buffer is not large enough to
-///   hold the decompressed data.
+/// * `FFIResult::BufferTooSmall`: The chunk decodes to more than
+///   `data_out_len` bytes, or more than `MAX_CHUNK_LEN`, which no valid
+///   chunk does. Nothing was written to the output buffer.
 /// * `FFIResult::InternalError`: Decompression failed for an internal reason
 ///   (e.g., invalid data).
 #[unsafe(no_mangle)]
@@ -528,8 +535,11 @@ pub unsafe extern "C" fn decompress_chunk_c(
     // output doesn't overlap the inputs, which is what `decompress_into`
     // needs. It checks for null itself.
     unsafe {
-        decompress_into(buffers, decompress_chunk, |_err| {
-            FFIResult::InternalError
+        decompress_into(buffers, decompress_chunk, |err| match err {
+            SpriteShrinkError::Archive(ArchiveError::ChunkTooLong { .. }) => {
+                FFIResult::BufferTooSmall
+            }
+            _ => FFIResult::InternalError,
         })
     }
 }
@@ -582,7 +592,11 @@ pub unsafe extern "C" fn decompress_chunk_checked_c_u64(
     unsafe {
         decompress_into(
             buffers,
-            |comp, dict| decompress_chunk_checked(comp, dict, expected_hash),
+            |comp, dict, max_len| {
+                let data = decompress_chunk(comp, dict, max_len)?;
+                check_chunk_hash(&data, expected_hash)?;
+                Ok(data)
+            },
             FFIResult::from,
         )
     }
@@ -642,7 +656,11 @@ pub unsafe extern "C" fn decompress_chunk_checked_c_u128(
     unsafe {
         decompress_into(
             buffers,
-            |comp, dict| decompress_chunk_checked(comp, dict, expected_hash),
+            |comp, dict, max_len| {
+                let data = decompress_chunk(comp, dict, max_len)?;
+                check_chunk_hash(&data, expected_hash)?;
+                Ok(data)
+            },
             FFIResult::from,
         )
     }
@@ -1253,7 +1271,11 @@ mod tests {
         reason = "it stands in for a decompress function, which returns a \
                   Result"
     )]
-    fn concat(comp: &[u8], dict: &[u8]) -> Result<Vec<u8>, SpriteShrinkError> {
+    fn concat(
+        comp: &[u8],
+        dict: &[u8],
+        _max_len: usize,
+    ) -> Result<Vec<u8>, SpriteShrinkError> {
         Ok([comp, dict].concat())
     }
 
@@ -1271,6 +1293,24 @@ mod tests {
         };
         assert!(matches!(status, FFIResult::StatusOk));
         assert_eq!(&out, b"abcd\xEE\xEE");
+    }
+
+    #[test]
+    fn the_output_buffer_length_is_the_decode_limit() {
+        let mut out = [0_u8; 5];
+        // SAFETY: every pointer comes from a live local slice of its stated
+        // length, and `out` is a separate array.
+        let status = unsafe {
+            decompress_into(
+                buffers(b"abc", b"d", &mut out),
+                |_comp, _dict, max_len| {
+                    assert_eq!(max_len, 5);
+                    Ok(Vec::new())
+                },
+                |_err| FFIResult::InternalError,
+            )
+        };
+        assert!(matches!(status, FFIResult::StatusOk));
     }
 
     #[test]
@@ -1297,7 +1337,7 @@ mod tests {
         let status = unsafe {
             decompress_into(
                 buffers(b"abc", b"d", &mut out),
-                |_comp, _dict| Err(SpriteShrinkError::Cancelled),
+                |_comp, _dict, _max_len| Err(SpriteShrinkError::Cancelled),
                 FFIResult::from,
             )
         };
@@ -1335,7 +1375,9 @@ mod tests {
             let status = unsafe {
                 decompress_into(
                     buffers,
-                    |_comp, _dict| panic!("decompressed with a null buffer"),
+                    |_comp, _dict, _max_len| {
+                        panic!("decompressed with a null buffer")
+                    },
                     |_err| FFIResult::InternalError,
                 )
             };

@@ -236,9 +236,12 @@ where
 }
 
 
+/// Spawns a worker that reads, decodes and buffers each data chunk in
+/// `chunks`, given as its hash and its length from the disc manifest.
+/// Decoding stops just past that length.
 pub fn spawn_chunk_decomp_worker<'scope, 'env, H>(
     scope: &'scope thread::Scope<'scope, 'env>,
-    hash_list: Vec<H>,
+    chunks: Vec<(H, usize)>,
     chunk_index: &'env HashMap<H, ChunkLocation>,
     dictionary: &'env [u8],
     archive_file: &'env File,
@@ -254,7 +257,7 @@ where
             shared_state: shared_state.clone(),
         };
 
-        for hash in hash_list {
+        for (hash, len) in chunks {
             let result = (|| -> Result<Vec<u8>, SpriteShrinkCDError> {
                 let chunk_loc = chunk_index.get(&hash)
                     .ok_or_else(|| UtilError::MissingHash(hash.to_string()))?;
@@ -272,7 +275,8 @@ where
 
                 decompress_chunk(
                     &comp_data,
-                    dictionary
+                    dictionary,
+                    len
                 ).map_err(|e| SpriteShrinkCDError::External(Box::new(e)))
             })();
 
