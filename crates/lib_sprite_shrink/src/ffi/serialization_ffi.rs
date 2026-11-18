@@ -169,7 +169,10 @@ where
 /// * `FFIResult::InvalidString` – A filename isn't valid UTF-8.
 /// * `FFIResult::DuplicateFilename` – Two manifests have the same filename.
 #[unsafe(no_mangle)]
-#[allow(clippy::double_must_use)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks only #[must_use] functions SPRITE_SHRINK_MUST_USE"
+)]
 #[must_use]
 pub unsafe extern "C" fn serialize_uncompressed_data_u64(
     args: *const SerializeUncompressedDataArgsU64,
@@ -178,8 +181,10 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
     if args.is_null()
         || out_ptr.is_null() {
             return FFIResult::NullArgument;
-    };
+    }
 
+    // SAFETY: `args` was checked for null above, and the caller guarantees
+    // it points to a valid args struct for the whole call.
     let args_int = unsafe{&*args};
 
     if args_int.manifest_array_ptr.is_null() ||
@@ -212,9 +217,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 
     // SAFETY: `out_ptr` was checked for null above, and the caller
     // guarantees it's valid for writes.
-    unsafe {
-        *out_ptr = Box::into_raw(Box::new(output));
-    };
+    unsafe { *out_ptr = Box::into_raw(Box::new(output)) };
     FFIResult::StatusOk
 }
 
@@ -259,7 +262,10 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u64(
 /// * `FFIResult::InvalidString` – A filename isn't valid UTF-8.
 /// * `FFIResult::DuplicateFilename` – Two manifests have the same filename.
 #[unsafe(no_mangle)]
-#[allow(clippy::double_must_use)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks only #[must_use] functions SPRITE_SHRINK_MUST_USE"
+)]
 #[must_use]
 pub unsafe extern "C" fn serialize_uncompressed_data_u128(
     args: *const SerializeUncompressedDataArgsU128,
@@ -268,8 +274,10 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
     if args.is_null()
         || out_ptr.is_null() {
             return FFIResult::NullArgument;
-    };
+    }
 
+    // SAFETY: `args` was checked for null above, and the caller guarantees
+    // it points to a valid args struct for the whole call.
     let args_int = unsafe{&*args};
 
     if args_int.manifest_array_ptr.is_null() ||
@@ -302,9 +310,7 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
 
     // SAFETY: `out_ptr` was checked for null above, and the caller
     // guarantees it's valid for writes.
-    unsafe {
-        *out_ptr = Box::into_raw(Box::new(output));
-    };
+    unsafe { *out_ptr = Box::into_raw(Box::new(output)) };
     FFIResult::StatusOk
 }
 
@@ -348,22 +354,44 @@ pub unsafe extern "C" fn serialize_uncompressed_data_u128(
 unsafe fn free_serialized_output_internal<H>(
     ptr: *mut FFISerializedOutput<H>
 ) {
-    unsafe {
-        let output = Box::from_raw(ptr);
-        //Deallocate all the vectors whose memory was passed to C
-        free_toc(output.toc_ptr, output.toc_len, output.toc_cap);
-        free_manifests(
-            output.ser_manifest_ptr,
-            output.ser_manifest_len,
-            output.ser_manifest_cap,
-        );
+    // SAFETY: the caller guarantees `ptr` came from `Box::into_raw` in
+    // `serialize_uncompressed_data_*` and hasn't been freed.
+    let output = unsafe { Box::from_raw(ptr) };
+    let FFISerializedOutput {
+        toc_ptr,
+        toc_len,
+        toc_cap,
+        ser_manifest_ptr,
+        ser_manifest_len,
+        ser_manifest_cap,
+        sorted_hashes_ptr,
+        sorted_hashes_len,
+        sorted_hashes_cap,
+    } = *output;
 
-        let _ = Vec::from_raw_parts(
-            output.sorted_hashes_ptr as *mut H,
-            output.sorted_hashes_len,
-            output.sorted_hashes_cap
-        );
-    }
+    //Deallocate all the vectors whose memory was passed to C
+    // SAFETY: the TOC parts came from `vec_into_raw_parts` on a
+    // `toc_into_ffi` result in `into_ffi_output`, and the caller guarantees
+    // they're unchanged and not yet freed.
+    unsafe { free_toc(toc_ptr, toc_len, toc_cap) };
+
+    // SAFETY: the manifest parts came from `vec_into_raw_parts` on a
+    // `manifests_into_ffi` result in `into_ffi_output`, and the caller
+    // guarantees they're unchanged and not yet freed.
+    unsafe { free_manifests(ser_manifest_ptr, ser_manifest_len, ser_manifest_cap) };
+
+    /*The pointer was stored as `*const` for C; it came from a `Vec`'s
+    `*mut` pointer, so casting back is sound.*/
+    // SAFETY: the hash parts came from `vec_into_raw_parts` on a `Vec<H>`
+    // in `into_ffi_output`, and the caller guarantees they're unchanged and
+    // not yet freed.
+    drop(unsafe {
+        Vec::from_raw_parts(
+            sorted_hashes_ptr.cast_mut(),
+            sorted_hashes_len,
+            sorted_hashes_cap,
+        )
+    });
 }
 
 /// Frees the memory allocated by `serialize_uncompressed_data_u64`.
@@ -385,9 +413,11 @@ pub unsafe extern "C" fn free_serialized_output_u64(
         return;
     }
 
+    // SAFETY: `ptr` isn't null, and the caller guarantees it came from a
+    // successful `serialize_uncompressed_data_u64` and hasn't been freed.
     unsafe {free_serialized_output_internal::<u64>(
         ptr,
-    )}
+    );}
 }
 
 /// Frees the memory allocated by `serialize_uncompressed_data_u128`.
@@ -409,9 +439,11 @@ pub unsafe extern "C" fn free_serialized_output_u128(
         return;
     }
 
+    // SAFETY: `ptr` isn't null, and the caller guarantees it came from a
+    // successful `serialize_uncompressed_data_u128` and hasn't been freed.
     unsafe {free_serialized_output_internal::<U128Bytes>(
         ptr,
-    )}
+    );}
 }
 
 /// Copies the table of contents from C.
