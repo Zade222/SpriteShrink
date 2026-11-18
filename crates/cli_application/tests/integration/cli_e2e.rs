@@ -879,6 +879,47 @@ fn a_multi_session_disc_is_refused_before_anything_is_written() {
     assert!(!archive.exists());
 }
 
+/// CUE sheets saved as Shift-JIS or Windows-1252 aren't UTF-8. The CLI
+/// used to abort on them. Text in dropped lines such as TITLE doesn't
+/// matter; a FILE name that isn't UTF-8 is reported with the path it
+/// looked for.
+#[test]
+fn a_cue_sheet_that_is_not_utf8_is_read() {
+    let tmp = TempDir::new().unwrap();
+
+    let titled = tmp.path().join("titled");
+    write_blank_disc(&titled, "game", 300);
+    let mut sheet = b"TITLE \"\x83Q\x81[\x83\x80\"\n".to_vec();
+    sheet.extend(fs::read(titled.join("game.cue")).unwrap());
+    fs::write(titled.join("game.cue"), sheet).unwrap();
+    let archive = tmp.path().join("titled.ssmd");
+    run_cli(&[
+        "--mode", "optical",
+        "-i", titled.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    assert!(archive.exists());
+
+    let named = tmp.path().join("named");
+    fs::create_dir_all(&named).unwrap();
+    fs::write(
+        named.join("game.cue"),
+        b"FILE \"g\xffme.bin\" BINARY\n\
+          \x20 TRACK 01 MODE2/2352\n\
+          \x20   INDEX 01 00:00:00\n",
+    )
+    .unwrap();
+    let printed = failure_output(&[
+        "--mode", "optical",
+        "-i", named.to_str().unwrap(),
+        "-o", tmp.path().join("named.ssmd").to_str().unwrap(),
+    ]);
+    assert!(
+        printed.contains("g\u{FFFD}me.bin") && !printed.contains("panicked"),
+        "output:\n{printed}"
+    );
+}
+
 #[test]
 fn optical_mode_without_cue_files_says_what_is_missing() {
     let tmp = TempDir::new().unwrap();

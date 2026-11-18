@@ -2,7 +2,7 @@ use std::{
     cmp::min, collections::HashMap,
     fmt::{Debug, Display},
     fs::{
-        File, read_to_string
+        self, File, read_to_string
     },
     hash::Hasher, io::{
         self, BufWriter, Read, Seek, SeekFrom, Write
@@ -164,14 +164,20 @@ where
         }
     }
 
-    let prepared_sheets: Vec<(PathBuf, String)> = file_paths
+    /*Sheets are decoded lossily. Ones saved as Shift-JIS or Windows-1252
+    usually have non-ASCII text only in TITLE, PERFORMER or REM lines,
+    which the parser drops. A FILE name that isn't UTF-8 decodes with
+    U+FFFD and is then reported as a file that can't be found.*/
+    let prepared_sheets = file_paths
         .into_iter()
         .filter(|path| has_extension(path, "cue"))
         .map(|path| {
-            let content = read_to_string(&path).unwrap();
-            (path, content)
+            let bytes = fs::read(&path)
+                .map_err(|err| CliError::CueRead(path.clone(), err))?;
+            let content = String::from_utf8_lossy(&bytes).into_owned();
+            Ok((path, content))
         })
-        .collect();
+        .collect::<Result<Vec<(PathBuf, String)>, CliError>>()?;
 
     let size_resolver = |path: &Path| -> Result<u64, io::Error> {
         let metadata = std::fs::metadata(path)?;

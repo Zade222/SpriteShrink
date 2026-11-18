@@ -73,6 +73,13 @@ pub enum CliError {
         in the input paths.")]
     NoCueFiles,
 
+    #[error(
+        "Can't read the CUE sheet {path}: {err}",
+        path = .0.display(),
+        err = .1
+    )]
+    CueRead(PathBuf, #[source] io::Error),
+
     #[error("Files with duplicate file names aren't allowed.\n{0}")]
     DuplicateNames(String),
 

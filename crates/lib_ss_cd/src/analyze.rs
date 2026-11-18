@@ -225,7 +225,12 @@ where
         for file_entry in &sheet.files {
             let data_file_path = cue_dir.join(&file_entry.name);
 
-            let size = size_resolver(&data_file_path)?;
+            let size = size_resolver(&data_file_path).map_err(|err| {
+                AnalysisError::FileSizeError(
+                    data_file_path.display().to_string(),
+                    err,
+                )
+            })?;
             /*Only used to decide whether the input fits in memory, which a
             total past u64::MAX doesn't.*/
             total_data_size = total_data_size.saturating_add(size);
