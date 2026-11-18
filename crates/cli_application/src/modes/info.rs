@@ -23,7 +23,7 @@ use sprite_shrink::{
 };
 
 use sprite_shrink_cd::{
-    SSMD_UID,
+    NO_COLLECTION, SSMD_UID,
     SSMDTocEntry,
     parse_ssmd_toc
 };
@@ -222,9 +222,9 @@ fn ssmd_print_info_table(
 }
 
 /// The 1-based group number of a disc in a collection, or `None` for a disc
-/// in no collection, which the TOC marks with 255.
+/// in no collection, which the TOC marks with [`NO_COLLECTION`].
 fn ssmd_group(collection_id: u8) -> Option<u16> {
-    (collection_id != 255).then(|| u16::from(collection_id) + 1)
+    (collection_id != NO_COLLECTION).then(|| u16::from(collection_id) + 1)
 }
 
 /// Prints the discs in an ssmd archive as JSON: the same keys as for an ssmc

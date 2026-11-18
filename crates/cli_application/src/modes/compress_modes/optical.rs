@@ -33,6 +33,7 @@ use sprite_shrink::{
     ArchiveBuilder, ChunkLocation, HashType,
 };
 use sprite_shrink_cd::{
+    NO_COLLECTION,
     ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
     FileSizeProvider, ExceptionRegistry, MultiBinStream,
     ReconstructionError, SectorDataProvider, SectorRegionStream, SectorMap,
@@ -128,41 +129,7 @@ where
 
     set_priority()?;
 
-    let mut collection_map: HashMap<String, u8> = HashMap::new();
-
-    let mut next_collection_id = 0u8;
-
-    for path in &file_paths {
-        if (has_extension(path, "m3u") || has_extension(path, "m3u8")) &&
-            let Ok(content) = read_to_string(path)
-        {
-            let mut found_any = false;
-            for line in content.lines() {
-                let line = line.trim();
-
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-
-                let entry_path = Path::new(line);
-
-                if let Some(stem) = entry_path.file_stem() {
-                    collection_map.insert(
-                        stem.to_string_lossy().to_string(),
-                        next_collection_id
-                    );
-                    found_any = true;
-                }
-            }
-
-            if found_any {
-                if next_collection_id == 255 {
-                    debug!("Max collection count reached, wrapping ids");
-                }
-                next_collection_id = next_collection_id.wrapping_add(1);
-            }
-        }
-    }
+    let collection_map = playlist_groups(&file_paths)?;
 
     /*Sheets are decoded lossily. Ones saved as Shift-JIS or Windows-1252
     usually have non-ASCII text only in TITLE, PERFORMER or REM lines,
@@ -298,7 +265,9 @@ where
             .map(|(run, _)| *run as u64)
             .sum();
 
-        let collection_id = collection_map.get(&title).copied().unwrap_or(255);
+        let collection_id = collection_map.get(&title)
+            .copied()
+            .unwrap_or(NO_COLLECTION);
 
         archive_toc.push(SSMDTocEntry {
             filename: title,
@@ -508,6 +477,50 @@ where
     Ok(())
 }
 
+
+/// Reads the M3U playlists among `file_paths` and returns the group each
+/// listed disc belongs to, by CUE file stem.
+///
+/// Each playlist that lists at least one entry gets the next group ID, from
+/// 0. Blank lines and `#` comments aren't entries. A playlist that can't be
+/// read as UTF-8 is skipped.
+///
+/// # Errors
+///
+/// Returns `CliError::TooManyPlaylists` for a playlist with entries after
+/// the 255th: the IDs left are taken by [`NO_COLLECTION`].
+fn playlist_groups(
+    file_paths: &[PathBuf],
+) -> Result<HashMap<String, u8>, CliError> {
+    let mut groups = HashMap::new();
+    let mut next_id = 0u8;
+
+    for path in file_paths {
+        if (has_extension(path, "m3u") || has_extension(path, "m3u8")) &&
+            let Ok(content) = read_to_string(path)
+        {
+            let stems: Vec<String> = content.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .filter_map(|line| Path::new(line).file_stem())
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .collect();
+
+            if stems.is_empty() {
+                continue;
+            }
+            if next_id == NO_COLLECTION {
+                return Err(CliError::TooManyPlaylists(path.clone()));
+            }
+            for stem in stems {
+                groups.insert(stem, next_id);
+            }
+            next_id += 1;
+        }
+    }
+
+    Ok(groups)
+}
 
 /// Pairs each parsed CUE sheet with the folder of the CUE file it was parsed
 /// from. A sheet's `FILE` paths are relative to that folder.
@@ -997,5 +1010,36 @@ mod tests {
             &[cue_file("first/one.cue"), cue_file("second/two.cue")],
         );
         assert!(matches!(result, Err(CliError::InternalError(_))));
+    }
+
+    /*Group IDs are a u8 and 255 means no group, so 255 playlists fit. The
+    old code wrapped: the 256th got 255 and the 257th shared group 0.*/
+    #[test]
+    fn playlists_past_the_255th_are_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut paths = Vec::new();
+        // Comments and blank lines aren't entries, so this takes no group.
+        let comments = tmp.path().join("comments.m3u");
+        fs::write(&comments, "#EXTM3U\n\n").unwrap();
+        paths.push(comments);
+        for set in 0..255 {
+            let path = tmp.path().join(format!("set{set}.m3u"));
+            fs::write(&path, format!("# set {set}\nset{set}.cue\n")).unwrap();
+            paths.push(path);
+        }
+
+        let groups = playlist_groups(&paths).unwrap();
+        assert_eq!(groups.len(), 255);
+        for set in 0..255_u8 {
+            assert_eq!(groups[&format!("set{set}")], set);
+        }
+
+        let extra = tmp.path().join("SET255.M3U8");
+        fs::write(&extra, "set255.cue\n").unwrap();
+        paths.push(extra.clone());
+        assert!(matches!(
+            playlist_groups(&paths),
+            Err(CliError::TooManyPlaylists(path)) if path == extra
+        ));
     }
 }

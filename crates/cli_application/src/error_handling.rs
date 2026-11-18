@@ -15,7 +15,7 @@ use sprite_shrink::{
     MAX_WINDOW_SIZE, MIN_WINDOW_SIZE,
     IsCancelled, SpriteShrinkError
 };
-use sprite_shrink_cd::SpriteShrinkCDError;
+use sprite_shrink_cd::{NO_COLLECTION, SpriteShrinkCDError};
 use directories::ProjectDirs;
 use range_parser::RangeError;
 use thiserror::Error;
@@ -72,6 +72,15 @@ pub enum CliError {
     #[error("Optical mode needs a .cue file for each disc; none were found \
         in the input paths.")]
     NoCueFiles,
+
+    #[error(
+        "{} would be playlist {max_plus_one}, but an archive holds at most \
+         {max} playlists.",
+        .0.display(),
+        max = NO_COLLECTION,
+        max_plus_one = u16::from(NO_COLLECTION) + 1
+    )]
+    TooManyPlaylists(PathBuf),
 
     #[error(
         "Can't read the CUE sheet {path}: {err}",

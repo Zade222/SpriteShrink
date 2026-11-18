@@ -103,7 +103,7 @@ A serialized vector containing basic metadata for listing archive contents witho
 *   **SSMD:** `Vec<SSMDTocEntry>`
   struct SSMDTocEntry {
       filename: String,
-      collection_id: u8, // Group ID for multi-disc sets
+      collection_id: u8, // Group ID for multi-disc sets, 0-254; 255 = none
       uncompressed_size: u64,
   }
 

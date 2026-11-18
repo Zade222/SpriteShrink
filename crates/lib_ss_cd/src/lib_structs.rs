@@ -939,6 +939,10 @@ pub struct SSMDIndices<H> {
 }
 
 
+/// The `collection_id` of a disc in no collection (no playlist). Groups
+/// use 0 to 254, so an archive holds at most 255 of them.
+pub const NO_COLLECTION: u8 = u8::MAX;
+
 #[derive(Decode, Encode, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub struct SSMDTocEntry {
     pub filename: String,
