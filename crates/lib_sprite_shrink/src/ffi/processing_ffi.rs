@@ -15,6 +15,7 @@ use fastcdc::v2020::Chunk;
 use crate::ffi::ffi_error_handling::{
     FFIResult
 };
+use crate::ffi::ffi_ownership::copy_host_chunks;
 use crate::ffi::ffi_types::{
     CreateFileManifestAndChunksArgs, FFIChunk, FFIChunkDataArray,
     ChunkIndexMap, FFIChunkLocation,
@@ -38,7 +39,7 @@ use crate::processing::{
     create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory,
     verify_single_file, test_compression};
 use crate::lib_structs::{
-    FileData, FileManifestParent, SSAChunkMeta
+    FileData, FileManifestParent
 };
 
 /// Creates a file manifest and a list of data chunks via an FFI‑safe interface
@@ -445,6 +446,9 @@ pub unsafe extern "C" fn free_file_manifest_and_chunks_u128(
 /// Processes a single file from memory via an FFI-safe interface.
 ///
 /// On success, returns `FFIResult::StatusOk` and populates `out_ptr`.
+/// Returns `FFIResult::NoDataToProcess` for an empty file, and
+/// `FFIResult::InvalidWindowSize` if `window_size` is outside 256 to
+/// 4194304 bytes.
 ///
 /// # Safety
 /// - `file_data` must be valid for reads. Its pointers must not be null.
@@ -482,8 +486,9 @@ pub unsafe extern "C" fn process_file_in_memory_ffi(
     let processed_data = match process_file_in_memory(
         native_file_data,
         window_size){
-        Some(data) => data,
-        None => return FFIResult::NoDataToProcess,
+        Ok(Some(data)) => data,
+        Ok(None) => return FFIResult::NoDataToProcess,
+        Err(e) => return e.into(),
     };
 
     /*Convert filename String to *mut c_char to be compatible with return
@@ -595,8 +600,9 @@ pub unsafe extern "C" fn free_processed_file_data_ffi(
 ///
 /// * All pointer arguments **must** be non‑null and point to valid memory that
 ///   lives at least for the duration of the call.
-/// * The `get_chunks_cb` must not unwind across the FFI boundary and must return a
-///   correctly‑populated `FFIChunkDataArray`.
+/// * The callbacks must not unwind across the FFI boundary. `get_chunks_cb`
+///   must fill `out_chunks` and `free_chunks_cb` must free it, as
+///   `VerifySingleFileArgsU64` describes.
 ///
 /// If any pointer is null, the function returns `FFIResult::NullArgument`.
 ///
@@ -617,72 +623,64 @@ pub unsafe extern "C" fn verify_single_file_u64(
 
     let args_int = unsafe{&*args};
 
-    if args_int.file_manifest_parent.is_null() ||
+    if args_int.filename.is_null() ||
+        args_int.file_manifest_parent.is_null() ||
         args_int.veri_hash_array_ptr.is_null() {
             return FFIResult::NullArgument;
     }
 
-    let(fmp, veri_hash, filename) = unsafe {
-        /*Dereference the main struct pointer and convert using from.*/
-        let ffi_fmp = &*args_int.file_manifest_parent;
-
-        let chunk_metadata_slice = slice::from_raw_parts(
-            ffi_fmp.chunk_metadata,
-            ffi_fmp.chunk_metadata_len
-        );
-
-        let chunk_metadata = chunk_metadata_slice
-            .iter()
-            .map(|meta| SSAChunkMeta {
-                hash: meta.hash,
-                offset: meta.offset,
-                length: meta.length,
-            })
-            .collect();
-
-        let fmp = FileManifestParent {
-            chunk_metadata,
-            chunk_count: ffi_fmp.chunk_metadata_len as u64,
-        };
-
-        /*Prepare and reconstruct veri_hash, which is the fourth
-        parameter of the original verify_single_file
-        function, from C input.*/
-        let veri_hash: [u8; 64] = *(args_int.veri_hash_array_ptr as *const [u8; 64]);
-
-        let filename = std::ffi::CStr::from_ptr(args_int.filename)
-            .to_string_lossy()
-            .into_owned();
-
-        (fmp, veri_hash, filename)
+    // SAFETY: `file_manifest_parent` was checked for null above, and the
+    // caller guarantees it points to a valid manifest.
+    let ffi_fmp = unsafe { &*args_int.file_manifest_parent };
+    let fmp = match FileManifestParent::<u64>::try_from(ffi_fmp) {
+        Ok(fmp) => fmp,
+        Err(status) => return status,
     };
 
+    /*Prepare and reconstruct veri_hash, which is the fourth parameter of the
+    original verify_single_file function, from C input.*/
+    // SAFETY: `veri_hash_array_ptr` was checked for null above, and the
+    // caller guarantees it points to 64 readable bytes. `[u8; 64]` has an
+    // alignment of 1, so any address is aligned for it.
+    let veri_hash = unsafe {
+        *args_int.veri_hash_array_ptr.cast::<[u8; 64]>()
+    };
+
+    // SAFETY: `filename` was checked for null above, and the caller
+    // guarantees it's a null-terminated string.
+    let filename = unsafe { std::ffi::CStr::from_ptr(args_int.filename) }
+        .to_string_lossy()
+        .into_owned();
+
     let get_chunks_cb = args_int.get_chunks_cb;
+    let free_chunks_cb = args_int.free_chunks_cb;
     let progress_cb = args_int.progress_cb;
     let user_data_addr = args_int.user_data as usize;
 
     let get_chunks_closure = move |hashes: &[u64]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
-        let ffi_chunks_array = unsafe {
-            get_chunks_cb(
-                user_data_addr as *mut c_void,
-                hashes.as_ptr(),
-                hashes.len()
-            )};
-
-        let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len
-        )};
-
-        let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
-        }).collect();
-
-        let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len,
-            ffi_chunks_array.cap)};
-        Ok(chunks)
+        let user_data = user_data_addr as *mut c_void;
+        let get = |out_chunks: *mut FFIChunkDataArray| {
+            /*SAFETY: `VerifySingleFileArgsU64` requires `get_chunks_cb` and
+            `user_data` to stay valid for the whole call, and this closure
+            only runs during it. The hash pointer covers `hashes.len()`
+            hashes until the callback returns, and `out_chunks` points to
+            `copy_host_chunks`' local array, valid for writes.*/
+            unsafe {
+                get_chunks_cb(
+                    user_data,
+                    hashes.as_ptr(),
+                    hashes.len(),
+                    out_chunks,
+                )
+            }
+        };
+        /*SAFETY: `VerifySingleFileArgsU64` requires `get_chunks_cb` to fill
+        the array with one readable buffer per hash, all valid until
+        `free_chunks_cb` takes them back, and `free_chunks_cb` to accept
+        that array with `user_data`.*/
+        unsafe {
+            copy_host_chunks(hashes.len(), get, free_chunks_cb, user_data)
+        }
     };
 
     let progress_closure = move |bytes_processed: u64| {
@@ -716,8 +714,9 @@ pub unsafe extern "C" fn verify_single_file_u64(
 ///
 /// * All pointer arguments **must** be non‑null and point to valid memory that
 ///   lives at least for the duration of the call.
-/// * The `get_chunks_cb` must not unwind across the FFI boundary and must
-///   return a correctly‑populated `FFIChunkDataArray`.
+/// * The callbacks must not unwind across the FFI boundary. `get_chunks_cb`
+///   must fill `out_chunks` and `free_chunks_cb` must free it, as
+///   `VerifySingleFileArgsU128` describes.
 ///
 /// If any pointer is null, the function returns `FFIResult::NullArgument`.
 ///
@@ -738,77 +737,68 @@ pub unsafe extern "C" fn verify_single_file_u128(
 
     let args_int = unsafe{&*args};
 
-    if args_int.file_manifest_parent.is_null() ||
+    if args_int.filename.is_null() ||
+        args_int.file_manifest_parent.is_null() ||
         args_int.veri_hash_array_ptr.is_null() {
             return FFIResult::NullArgument;
     }
 
-    let(fmp, veri_hash, filename) = unsafe {
-        /*Dereference the main struct pointer and convert using from.*/
-        let ffi_fmp = &*args_int.file_manifest_parent;
-
-        let chunk_metadata_slice = slice::from_raw_parts(
-            ffi_fmp.chunk_metadata,
-            ffi_fmp.chunk_metadata_len
-        );
-
-        let chunk_metadata = chunk_metadata_slice
-            .iter()
-            .map(|meta| SSAChunkMeta {
-                hash: meta.hash.into(),
-                offset: meta.offset,
-                length: meta.length,
-            })
-            .collect();
-
-        let fmp = FileManifestParent {
-            chunk_metadata,
-            chunk_count: ffi_fmp.chunk_metadata_len as u64,
-        };
-
-        /*Prepare and reconstruct veri_hash, which is the fourth
-        parameter of the original verify_single_file
-        function, from C input.*/
-        let veri_hash: [u8; 64] = *(args_int.veri_hash_array_ptr as *const [u8; 64]);
-
-        let filename = std::ffi::CStr::from_ptr(args_int.filename)
-            .to_string_lossy()
-            .into_owned();
-
-        (fmp, veri_hash, filename)
+    // SAFETY: `file_manifest_parent` was checked for null above, and the
+    // caller guarantees it points to a valid manifest.
+    let ffi_fmp = unsafe { &*args_int.file_manifest_parent };
+    let fmp = match FileManifestParent::<u128>::try_from(ffi_fmp) {
+        Ok(fmp) => fmp,
+        Err(status) => return status,
     };
 
+    /*Prepare and reconstruct veri_hash, which is the fourth parameter of the
+    original verify_single_file function, from C input.*/
+    // SAFETY: `veri_hash_array_ptr` was checked for null above, and the
+    // caller guarantees it points to 64 readable bytes. `[u8; 64]` has an
+    // alignment of 1, so any address is aligned for it.
+    let veri_hash = unsafe {
+        *args_int.veri_hash_array_ptr.cast::<[u8; 64]>()
+    };
+
+    // SAFETY: `filename` was checked for null above, and the caller
+    // guarantees it's a null-terminated string.
+    let filename = unsafe { std::ffi::CStr::from_ptr(args_int.filename) }
+        .to_string_lossy()
+        .into_owned();
+
     let get_chunks_cb = args_int.get_chunks_cb;
+    let free_chunks_cb = args_int.free_chunks_cb;
     let progress_cb = args_int.progress_cb;
     let user_data_addr = args_int.user_data as usize;
 
     let get_chunks_closure = move |hashes: &[u128]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
+        let user_data = user_data_addr as *mut c_void;
         let ffi_hash_bytes: Vec<u8> = hashes
             .iter()
             .flat_map(|h| h.to_le_bytes())
             .collect();
-
-        let ffi_chunks_array = unsafe {
-            (get_chunks_cb)(
-                user_data_addr as *mut c_void,
-                ffi_hash_bytes.as_ptr(),
-                hashes.len()
-            )};
-
-        let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len
-        )};
-
-        let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
-        }).collect();
-
-        let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len,
-            ffi_chunks_array.cap)};
-        Ok(chunks)
+        let get = |out_chunks: *mut FFIChunkDataArray| {
+            /*SAFETY: `VerifySingleFileArgsU128` requires `get_chunks_cb` and
+            `user_data` to stay valid for the whole call, and this closure
+            only runs during it. The hash pointer covers `hashes.len()`
+            hashes until the callback returns, and `out_chunks` points to
+            `copy_host_chunks`' local array, valid for writes.*/
+            unsafe {
+                get_chunks_cb(
+                    user_data,
+                    ffi_hash_bytes.as_ptr(),
+                    hashes.len(),
+                    out_chunks,
+                )
+            }
+        };
+        /*SAFETY: `VerifySingleFileArgsU128` requires `get_chunks_cb` to fill
+        the array with one readable buffer per hash, all valid until
+        `free_chunks_cb` takes them back, and `free_chunks_cb` to accept
+        that array with `user_data`.*/
+        unsafe {
+            copy_host_chunks(hashes.len(), get, free_chunks_cb, user_data)
+        }
     };
 
     let progress_closure = move |bytes_processed: u64| {
@@ -864,33 +854,33 @@ pub unsafe extern "C" fn test_compression_u64(
     };
 
     let get_chunks_cb = args_int.get_chunks_cb;
+    let free_chunks_cb = args_int.free_chunks_cb;
     let user_data_addr = args_int.user_data as usize;
 
     let get_chunks_closure = move |hashes: &[u64]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
-        let mut ffi_chunks_array = FFIChunkDataArray { ptr: std::ptr::null_mut(), len: 0, cap: 0 };
-        let status = unsafe {
-            (get_chunks_cb)(
-                user_data_addr as *mut c_void,
-                hashes.as_ptr(),
-                hashes.len(),
-                & mut ffi_chunks_array
-            )
+        let user_data = user_data_addr as *mut c_void;
+        let get = |out_chunks: *mut FFIChunkDataArray| {
+            /*SAFETY: `TestCompressionArgsU64` requires `get_chunks_cb` and
+            `user_data` to stay valid for the whole call, and this closure
+            only runs during it. The hash pointer covers `hashes.len()`
+            hashes until the callback returns, and `out_chunks` points to
+            `copy_host_chunks`' local array, valid for writes.*/
+            unsafe {
+                get_chunks_cb(
+                    user_data,
+                    hashes.as_ptr(),
+                    hashes.len(),
+                    out_chunks,
+                )
+            }
         };
-        Result::from(status)?;
-        let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len
-        )};
-
-        let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
-        }).collect();
-
-        let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len,
-            ffi_chunks_array.cap)};
-        Ok(chunks)
+        /*SAFETY: `TestCompressionArgsU64` requires `get_chunks_cb` to fill
+        the array with one readable buffer per hash, all valid until
+        `free_chunks_cb` takes them back, and `free_chunks_cb` to accept
+        that array with `user_data`.*/
+        unsafe {
+            copy_host_chunks(hashes.len(), get, free_chunks_cb, user_data)
+        }
     };
 
     match test_compression(
@@ -956,40 +946,37 @@ pub unsafe extern "C" fn test_compression_u128(
         .collect();
 
     let get_chunks_cb = args_int.get_chunks_cb;
+    let free_chunks_cb = args_int.free_chunks_cb;
     let user_data_addr = args_int.user_data as usize;
 
     let get_chunks_closure = move |hashes: &[u128]| -> Result<Vec<Vec<u8>>, SpriteShrinkError> {
-        let ffi_hash_bytes: Vec<u8> = hashes.iter().flat_map(|h| h.to_le_bytes()).collect();
-
-        let mut ffi_chunks_array = FFIChunkDataArray {
-            ptr: std::ptr::null_mut(),
-            len: 0,
-            cap: 0
+        let user_data = user_data_addr as *mut c_void;
+        let ffi_hash_bytes: Vec<u8> = hashes
+            .iter()
+            .flat_map(|h| h.to_le_bytes())
+            .collect();
+        let get = |out_chunks: *mut FFIChunkDataArray| {
+            /*SAFETY: `TestCompressionArgsU128` requires `get_chunks_cb` and
+            `user_data` to stay valid for the whole call, and this closure
+            only runs during it. The hash pointer covers `hashes.len()`
+            hashes until the callback returns, and `out_chunks` points to
+            `copy_host_chunks`' local array, valid for writes.*/
+            unsafe {
+                get_chunks_cb(
+                    user_data,
+                    ffi_hash_bytes.as_ptr(),
+                    hashes.len(),
+                    out_chunks,
+                )
+            }
         };
-
-        let status = unsafe {
-            (get_chunks_cb)(
-                user_data_addr as *mut c_void,
-                ffi_hash_bytes.as_ptr(),
-                hashes.len(),
-                & mut ffi_chunks_array
-            )
-        };
-        Result::from(status)?;
-        let ffi_chunks_slice = unsafe {slice::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len
-        )};
-
-        let chunks: Vec<Vec<u8>> = ffi_chunks_slice.iter().map(|c| {
-            unsafe {Vec::from_raw_parts(c.ptr, c.len, c.cap)}
-        }).collect();
-
-        let _ = unsafe {Vec::from_raw_parts(
-            ffi_chunks_array.ptr,
-            ffi_chunks_array.len,
-            ffi_chunks_array.cap)};
-        Ok(chunks)
+        /*SAFETY: `TestCompressionArgsU128` requires `get_chunks_cb` to fill
+        the array with one readable buffer per hash, all valid until
+        `free_chunks_cb` takes them back, and `free_chunks_cb` to accept
+        that array with `user_data`.*/
+        unsafe {
+            copy_host_chunks(hashes.len(), get, free_chunks_cb, user_data)
+        }
     };
 
     match test_compression(
@@ -1034,9 +1021,12 @@ pub unsafe extern "C" fn get_seek_chunks_u64(
         return FFIResult::NullArgument;
     };
 
-    let fmp = unsafe{
-        /*Dereference the main struct pointer and convert using from.*/
-        FileManifestParent::<u64>::from(&*file_manifest_parent)
+    // SAFETY: `file_manifest_parent` was checked for null above, and the
+    // caller guarantees it points to a valid manifest.
+    let ffi_fmp = unsafe { &*file_manifest_parent };
+    let fmp = match FileManifestParent::<u64>::try_from(ffi_fmp) {
+        Ok(fmp) => fmp,
+        Err(status) => return status,
     };
 
     match get_seek_chunks::<u64>(
@@ -1102,9 +1092,12 @@ pub unsafe extern "C" fn get_seek_chunks_u128(
         return FFIResult::NullArgument;
     };
 
-    let fmp: FileManifestParent::<u128> = unsafe{
-        /*Dereference the main struct pointer and convert using from.*/
-        FileManifestParent::<u128>::from(&*file_manifest_parent)
+    // SAFETY: `file_manifest_parent` was checked for null above, and the
+    // caller guarantees it points to a valid manifest.
+    let ffi_fmp = unsafe { &*file_manifest_parent };
+    let fmp = match FileManifestParent::<u128>::try_from(ffi_fmp) {
+        Ok(fmp) => fmp,
+        Err(status) => return status,
     };
 
     match get_seek_chunks::<u128>(
@@ -1231,9 +1224,10 @@ pub unsafe extern "C" fn free_seek_chunks_u128(
 
 /// Looks up the location of a data chunk in the chunk index using a u64 hash.
 ///
-/// This function uses an opaque handle to the `HashMap` (created by
-/// `prepare_chunk_index_u64`) to find the `FFIChunkLocation` corresponding
-/// to the provided hash.
+/// This function uses an opaque handle to the `HashMap` (the `chunk_index`
+/// field of a `parse_ssmc_prefix_u64` result) to find the
+/// `FFIChunkLocation` corresponding to the provided hash. Its `offset` is a
+/// position in the archive file.
 ///
 /// On success (`FFIResult::StatusOk`), the `chunk_location` out-parameter is
 /// populated with the result. If the hash is not found, the function returns
@@ -1241,8 +1235,8 @@ pub unsafe extern "C" fn free_seek_chunks_u128(
 ///
 /// # Arguments
 ///
-/// * `map_ptr`: An opaque handle to the chunk index `HashMap`, originally
-///   obtained from `prepare_chunk_index_u64`.
+/// * `map_ptr`: An opaque handle to the chunk index `HashMap`, from the
+///   `chunk_index` field of a `parse_ssmc_prefix_u64` result.
 /// * `key_hash`: The `u64` hash of the chunk to look up.
 /// * `chunk_location`: An out-parameter; a pointer to an `FFIChunkLocation`
 ///   struct where the result will be written.
@@ -1283,9 +1277,10 @@ pub unsafe extern "C" fn lookup_chunk_location_u64(
 
 /// Looks up the location of a data chunk in the chunk index using a u128 hash.
 ///
-/// This function uses an opaque handle to the `HashMap` (created by
-/// `prepare_chunk_index_u128`) to find the `FFIChunkLocation` corresponding
-/// to the provided hash.
+/// This function uses an opaque handle to the `HashMap` (the `chunk_index`
+/// field of a `parse_ssmc_prefix_u128` result) to find the
+/// `FFIChunkLocation` corresponding to the provided hash. Its `offset` is a
+/// position in the archive file.
 ///
 /// On success (`FFIResult::StatusOk`), the `chunk_location` out-parameter is
 /// populated with the result. If the hash is not found, the function returns
@@ -1293,10 +1288,10 @@ pub unsafe extern "C" fn lookup_chunk_location_u64(
 ///
 /// # Arguments
 ///
-/// * `map_ptr`: An opaque handle to the chunk index `HashMap`, originally
-///   obtained from `prepare_chunk_index_u128`.
-/// * `key_hash`: A 16-byte array representing the `u128` hash of the chunk
-///   to look up.
+/// * `map_ptr`: An opaque handle to the chunk index `HashMap`, from the
+///   `chunk_index` field of a `parse_ssmc_prefix_u128` result.
+/// * `key_hash_ptr`: A pointer to the 16 bytes of the `u128` hash of the
+///   chunk to look up, little-endian as in `U128Bytes`.
 /// * `chunk_location`: An out-parameter; a pointer to an `FFIChunkLocation`
 ///   struct where the result will be written.
 ///
@@ -1313,7 +1308,9 @@ pub unsafe extern "C" fn lookup_chunk_location_u128(
     key_hash_ptr: *const u8,
     chunk_location: *mut FFIChunkLocation
 ) -> FFIResult {
-    if map_ptr.is_null() ||chunk_location.is_null() {
+    if map_ptr.is_null() || key_hash_ptr.is_null() ||
+        chunk_location.is_null()
+    {
         return FFIResult::NullArgument
     }
 

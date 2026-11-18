@@ -2,29 +2,23 @@
 //!
 //! This module centralizes the definitions of fundamental structs used across
 //! the application's lifecycle. These structures facilitate communication
-//! between threads, manage database interactions, and handle temporary
-//! resources, ensuring a clean and organized architecture.
+//! between threads and manage database interactions.
 
 use std::{
     collections::HashMap,
-    fs::{metadata, remove_file},
     hash::Hash,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
 };
 
 use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
-use tracing::{
-    debug,
-    error
-};
 
 use sprite_shrink::{
     FileManifestParent, Hashable, SSAChunkMeta
 };
 use sprite_shrink_cd::{
-    ContentBlock, DataChunkLayout, RleSectorMap, SubHeaderEntry
+    ContentBlock, DataChunkLayout, DiscFile, RleSectorMap, SubHeaderEntry
 };
 
 
@@ -44,7 +38,6 @@ pub enum CacheBackend<H: Hash + Eq> {
 pub struct CacheInfo {
     pub cache_path: PathBuf,
     pub at_cache_path: PathBuf,
-    pub id: u32,
 }
 
 #[derive(Debug)]
@@ -73,6 +66,7 @@ pub struct ChunkMessage<H: Hashable> {
 #[derive(Debug)]
 pub struct DiscCompleteData<H: Hashable> {
     pub title: String,
+    pub files: Vec<DiscFile>,
     pub lba_map: Vec<(u32, u32)>,
     pub rle_sector_map: RleSectorMap,
     pub audio_block_map: Vec<ContentBlock<H>>,
@@ -205,75 +199,3 @@ impl Default for SpriteShrinkConfig {
     }
 }
 
-/// A resource guard that ensures a temporary file is deleted when it goes out
-/// of scope.
-///
-/// This struct implements the **RAII** (Resource Acquisition Is
-/// Initialization) pattern. When an instance of `TempFileGuard` is created, it
-/// holds a reference to a temporary file's path. When the guard is dropped
-/// (i.e., it goes out of scope), its `drop` implementation is automatically
-/// called, ensuring the temporary file is cleaned up from the filesystem.
-///
-/// This is particularly useful for handling temporary data that should not
-/// persist if an operation is interrupted, cancelled, or fails.
-///
-/// # Fields
-///
-/// * `path`: A reference to the `Path` of the temporary file to be managed.
-pub struct TempFileGuard<'a> {
-    path: &'a Path,
-}
-
-/// Creates a new `TempFileGuard` for the specified file path.
-///
-/// This function does not create the file itself, but rather establishes
-/// the guard that will be responsible for deleting the file at `path` when
-/// the guard is dropped.
-///
-/// # Arguments
-///
-/// * `path`: A reference to the `Path` of the temporary file to manage.
-impl<'a> TempFileGuard<'a> {
-    pub fn new(path: &'a Path) -> Self {
-        Self { path }
-    }
-
-
-    pub fn size(&self) -> u64 {
-        metadata(self.path).map_or(0, |meta| meta.len())
-    }
-}
-
-/// The drop implementation for `TempFileGuard`.
-///
-/// This method is called automatically when the `TempFileGuard` instance
-/// goes out of scope. It attempts to remove the temporary file at the
-/// stored path.
-///
-/// /// # Arguments
-///
-/// * `path`: A reference to the `Path` of the temporary file being managed.
-///
-/// If the file has already been removed or was renamed (e.g., after a
-/// successful operation), this method does nothing. If an error occurs
-/// during file removal, it is logged, but the program will not panic.
-impl<'a> Drop for TempFileGuard<'a> {
-    fn drop(&mut self) {
-        /*Only remove the file if it still exists. If the operation
-        succeeded, it will have been renamed, and this will do nothing.*/
-        if self.path.exists() {
-            if let Err(e) = remove_file(self.path) {
-                error!(
-                    "Failed to remove temporary file at {:?}: {}",
-                    self.path,
-                    e
-                );
-            } else {
-                debug!(
-                    "Successfully removed temporary file: {:?}",
-                    self.path
-                );
-            }
-        }
-    }
-}

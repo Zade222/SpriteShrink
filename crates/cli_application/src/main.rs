@@ -9,6 +9,8 @@
 
 use std::{
     fs::{self, create_dir_all},
+    path::PathBuf,
+    process::ExitCode,
     sync::{
         Arc, atomic::{AtomicBool, Ordering}
     },
@@ -16,6 +18,7 @@ use std::{
 
 use clap::{CommandFactory, FromArgMatches};
 use ctrlc::set_handler;
+use sprite_shrink::{IsCancelled, check_entry_name};
 use tracing::{
     debug,
     error,
@@ -31,7 +34,7 @@ use modes::{
 };
 
 mod archive_parser;
-use archive_parser::{get_max_rom_index};
+use archive_parser::{get_file_header, parse_rom_indices};
 mod arg_handling;
 use arg_handling::{merge_config_and_args, validate_args, Args};
 mod auto_tune;
@@ -44,7 +47,8 @@ use crate::{
     cli_types::SpriteShrinkConfig,
     modes::compress_modes::run_optical_compression,
     storage_io::{
-    cleanup_old_logs, files_from_dirs, load_config, organize_paths
+    entry_name, cleanup_old_logs, disc_title, duplicate_names,
+    files_from_dirs, load_config, organize_paths
     }
 };
 mod utils;
@@ -55,6 +59,10 @@ use dhat::Profiler;
 #[cfg(feature = "dhat-heap")]
 #[global_allocator]
 static ALLOC: dhat::Alloc = dhat::Alloc;
+
+/// Exit status for a run the user cancelled: 128 plus SIGINT's number, which
+/// is what shells report for a command stopped with Ctrl+C.
+const EXIT_CANCELLED: u8 = 130;
 
 /// Dispatches the primary application logic based on parsed arguments.
 ///
@@ -113,21 +121,8 @@ fn run(
                 CliError::NoFilesFound
             )?;
 
-            let indices: Vec<u8> = range_parser::parse::<u8>(
-                extract_str
-            )?;
-
-            if let Some(max_arg_index) = indices.iter().max().cloned() {
-                let file_max_index: u8 = get_max_rom_index(file_path)?;
-
-                if file_max_index < max_arg_index {
-                    return Err(CliError::InvalidRomIndex(format!(
-                    "One or more ROM indexes are invalid. The requested index \
-                        {max_arg_index} is out of the valid range \
-                        (1-{file_max_index})."
-                    )));
-                }
-            }
+            let file_count = get_file_header(file_path)?.file_count;
+            let indices = parse_rom_indices(extract_str, file_count)?;
 
             let output_path = args.output.as_ref().ok_or_else(|| {
                 CliError::MissingFlag("Output path (-o, --output) is required \
@@ -136,7 +131,7 @@ fn run(
 
             debug!("Mode: Extract");
             run_extraction(
-                &file_paths[0],
+                file_path,
                 output_path,
                 &indices,
                 args,
@@ -145,12 +140,12 @@ fn run(
         }
 
         (None, true) =>{
-            match file_paths.len() {
-                1 => {
+            match file_paths.as_slice() {
+                [file_path] => {
                     debug!("Mode: Info");
-                    run_info(&file_paths[0], args.metadata)?
+                    run_info(file_path, args.metadata || args.json_output)?;
                 },
-                0 => return Err(CliError::NoFilesFound()),
+                [] => return Err(CliError::NoFilesFound()),
                 _ => {
                     if !dir_paths.is_empty() {
                         return Err(CliError::DirectoryNotSupported(
@@ -172,6 +167,8 @@ fn run(
             if file_paths.is_empty() {
                 return Err(CliError::NoFilesFound());
             }
+
+            check_input_names(&file_paths, &args.mode)?;
 
             let out_dir = args.output
                 .as_ref()
@@ -220,6 +217,49 @@ fn run(
     Ok(())
 }
 
+/// Checks the names inputs would be stored under: the file name in default
+/// mode, the CUE file's stem in optical mode. Each name must pass
+/// `check_entry_name`, which the archive writer applies too, so a bad name
+/// fails here instead of after compression. And no two inputs may share a
+/// name: each archive entry is keyed by name, so all but one would be lost.
+///
+/// # Errors
+///
+/// Returns `CliError::UnusableName` for the first input whose name fails
+/// `check_entry_name`, or `CliError::DuplicateNames`, listing each shared
+/// name and the paths that share it, one name per line.
+fn check_input_names(
+    file_paths: &[PathBuf],
+    mode: &str,
+) -> Result<(), CliError> {
+    let name_of = if mode == "optical" { disc_title } else { entry_name };
+    for path in file_paths {
+        if let Some(name) = name_of(path) {
+            check_entry_name(&name).map_err(|err| CliError::UnusableName(
+                path.display().to_string(),
+                err.to_string(),
+            ))?;
+        }
+    }
+
+    let duplicates = duplicate_names(file_paths, name_of);
+    if duplicates.is_empty() {
+        return Ok(());
+    }
+
+    let lines: Vec<String> = duplicates
+        .iter()
+        .map(|(name, paths)| {
+            let paths: Vec<String> = paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect();
+            format!("  {name}: {}", paths.join(", "))
+        })
+        .collect();
+    Err(CliError::DuplicateNames(lines.join("\n")))
+}
+
 /// Sets up a handler to gracefully shut down the application on Ctrl+C.
 ///
 /// This function registers a handler that listens for the Ctrl+C signal. When
@@ -243,6 +283,29 @@ fn setup_ctrlc_handler() -> Arc<AtomicBool> {
     running
 }
 
+/// Reports how `run` ended and picks the process's exit status: success,
+/// [`EXIT_CANCELLED`] for a cancellation (including one wrapped in a library
+/// error), or failure for any other error.
+fn finish(result: Result<(), CliError>) -> ExitCode {
+    match result {
+        Ok(()) => {
+            debug!("Application completed task successfully.");
+            ExitCode::SUCCESS
+        }
+        Err(e) if e.is_cancelled() => {
+            warn!("Operation cancelled by user.");
+            ExitCode::from(EXIT_CANCELLED)
+        }
+        Err(e) => {
+            error!("Application encountered an error and has exited. \
+                Error: {}", e
+            );
+            eprintln!("\nError: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
 /// The main entry point for the command-line application.
 ///
 /// This function initializes the application by parsing and validating
@@ -254,11 +317,11 @@ fn setup_ctrlc_handler() -> Arc<AtomicBool> {
 /// # Returns
 ///
 /// A `Result` which is:
-/// - `Ok(())` if the entire application runs to completion without
-///   any unrecoverable errors.
-/// - `Err(CliError)` if a critical error occurs during argument
-///   parsing, validation, or the main execution flow.
-fn main() -> Result<(), CliError>{
+/// - `Ok(ExitCode)` once the selected operation has run, with the status
+///   [`finish`] picked: non-zero if the operation failed or was cancelled.
+/// - `Err(CliError)` if argument parsing, loading the config or starting
+///   logging fails. Rust prints the error and exits with status 1.
+fn main() -> Result<ExitCode, CliError>{
     #[cfg(feature = "dhat-heap")]
     let _dhat = Profiler::new_heap();
 
@@ -356,21 +419,52 @@ fn main() -> Result<(), CliError>{
     }
 
     //Begin application logic.
-    match run(&final_args, running){
-        Ok(_) => {
-            debug!("Application completed task successfully.");
-        },
-        Err(CliError::Cancelled) => {
-            warn!(
-                "Operation cancelled by user."
-            );
-        }
-        Err(e) => {
-            error!("Application encountered an error and has exited.\
-                Error: {}", e
-            );
-        }
-    };
+    Ok(finish(run(&final_args, running)))
+}
 
-    Ok(())
+#[cfg(test)]
+mod tests {
+    use sprite_shrink::SpriteShrinkError;
+    use sprite_shrink_cd::SpriteShrinkCDError;
+
+    use super::*;
+
+    #[test]
+    fn a_finished_run_exits_successfully() {
+        assert_eq!(finish(Ok(())), ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn a_cancelled_run_exits_with_the_cancel_status() {
+        let cancelled = [
+            CliError::Cancelled,
+            CliError::from(SpriteShrinkError::Cancelled),
+            CliError::from(SpriteShrinkCDError::from(
+                SpriteShrinkError::Cancelled,
+            )),
+        ];
+        for err in cancelled {
+            let shown = err.to_string();
+            assert_eq!(
+                finish(Err(err)),
+                ExitCode::from(EXIT_CANCELLED),
+                "{shown}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failed_run_exits_with_failure() {
+        let failed = [
+            CliError::NoFilesFound(),
+            CliError::from(SpriteShrinkError::External("read".into())),
+            CliError::from(SpriteShrinkCDError::from(
+                SpriteShrinkError::External("read".into()),
+            )),
+        ];
+        for err in failed {
+            let shown = err.to_string();
+            assert_eq!(finish(Err(err)), ExitCode::FAILURE, "{shown}");
+        }
+    }
 }

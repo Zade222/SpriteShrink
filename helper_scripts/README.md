@@ -95,10 +95,10 @@ This script is for use in a PowerShell terminal on Windows.
     ```
 
 2.  **Compression with Extra Flags:**
-    To overwrite any existing archives and get detailed output:
+    To overwrite any existing archives and show progress:
 
     ```powershell
-    .\shrink_library.ps1 -InputRoot "D:\ROMs" -OutputRoot "D:\Compressed ROMs" -ExtraFlags "--force --verbose"
+    .\shrink_library.ps1 -InputRoot "D:\ROMs" -OutputRoot "D:\Compressed ROMs" -ExtraFlags "--force --progress"
     ```
 
 ### B. `shrink_library.sh` (Linux & macOS) 

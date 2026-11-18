@@ -1,9 +1,8 @@
 use std::{
     cmp::min, collections::HashMap,
-    ffi::OsStr,
     fmt::{Debug, Display},
     fs::{
-        File, read_to_string
+        self, File, read_to_string
     },
     hash::Hasher, io::{
         self, BufWriter, Read, Seek, SeekFrom, Write
@@ -17,7 +16,7 @@ use std::{
     thread
 };
 
-use bitcode::{Encode, encode};
+use bitcode::Encode;
 use dashmap::DashMap;
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::bounded;
@@ -25,37 +24,39 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Serialize};
 use sha2::{Digest};
 use sprite_shrink::Hashable;
+use tempfile::tempfile_in;
 use tracing::{
     debug,
 };
 use sprite_shrink::{
     SS_SEED,
-    ArchiveBuilder, ChunkLocation, FileHeader,
+    ArchiveBuilder, ChunkLocation, HashType,
 };
 use sprite_shrink_cd::{
-    SSMD_UID,
+    NO_COLLECTION,
     ContentBlock, CueSheet, DataChunkLayout, DiscManifest,
     FileSizeProvider, ExceptionRegistry, MultiBinStream,
     ReconstructionError, SectorDataProvider, SectorRegionStream, SectorMap,
-    SectorType, SpriteShrinkCDError, SSMDFormatData, SSMDTocEntry,
+    SectorType, SpriteShrinkCDError, SSMDPrefix, SSMDTocEntry,
     SubheaderRegistry, UserDataStream,
-    analyze_cue_sheets, analyze_and_map_disc, compress_audio_blocks,
-    resolve_file_sector_counts, rle_encode_map, verify_disc_integrity
+    analyze_cue_sheets, analyze_and_map_disc, build_ssmd_prefix,
+    compress_audio_blocks, disc_files, resolve_file_sector_counts,
+    rle_encode_map,
+    verify_disc_integrity
 };
 use xxhash_rust::xxh3::Xxh3;
-use zerocopy::IntoBytes;
 
 use crate::{
     arg_handling::Args,
-    cli_types::{DiscCompleteData, TempFileGuard},
-    storage_io::write_final_archive,
+    cli_types::DiscCompleteData,
+    storage_io::{parent_dir, write_archive},
 };
 use crate::cli_types::{
     CacheTarget, OpticalChunkMessage
 };
 use crate::error_handling::CliError;
 use crate::storage_io::{
-    TempCache, get_cache_paths
+    TempCache, get_cache_paths, has_extension
 };
 use crate::utils::{process_in_memory_check, set_priority};
 
@@ -112,7 +113,7 @@ impl<T: Read + Seek + Send> ReadSeekSend for T {}
 pub(super) fn compress_optical_mode<H>(
     file_paths: Vec<PathBuf>,
     args: &Args,
-    hash_type_id: &u8,
+    hash_type: HashType,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
 where
@@ -128,51 +129,22 @@ where
 
     set_priority()?;
 
-    let mut collection_map: HashMap<String, u8> = HashMap::new();
+    let collection_map = playlist_groups(&file_paths)?;
 
-    let mut next_collection_id = 0u8;
-
-    for path in &file_paths {
-        if let Some(ext) = path.extension() &&
-            (ext == "m3u" || ext == "m3u8") &&
-            let Ok(content) = read_to_string(path)
-        {
-            let mut found_any = false;
-            for line in content.lines() {
-                let line = line.trim();
-
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-
-                let entry_path = Path::new(line);
-
-                if let Some(stem) = entry_path.file_stem() {
-                    collection_map.insert(
-                        stem.to_string_lossy().to_string(),
-                        next_collection_id
-                    );
-                    found_any = true;
-                }
-            }
-
-            if found_any {
-                if next_collection_id == 255 {
-                    debug!("Max collection count reached, wrapping ids");
-                }
-                next_collection_id = next_collection_id.wrapping_add(1);
-            }
-        }
-    }
-
-    let prepared_sheets: Vec<(PathBuf, String)> = file_paths
+    /*Sheets are decoded lossily. Ones saved as Shift-JIS or Windows-1252
+    usually have non-ASCII text only in TITLE, PERFORMER or REM lines,
+    which the parser drops. A FILE name that isn't UTF-8 decodes with
+    U+FFFD and is then reported as a file that can't be found.*/
+    let prepared_sheets = file_paths
         .into_iter()
-        .filter(|path| path.extension() == Some(OsStr::new("cue")))
+        .filter(|path| has_extension(path, "cue"))
         .map(|path| {
-            let content = read_to_string(&path).unwrap();
-            (path, content)
+            let bytes = fs::read(&path)
+                .map_err(|err| CliError::CueRead(path.clone(), err))?;
+            let content = String::from_utf8_lossy(&bytes).into_owned();
+            Ok((path, content))
         })
-        .collect();
+        .collect::<Result<Vec<(PathBuf, String)>, CliError>>()?;
 
     let size_resolver = |path: &Path| -> Result<u64, io::Error> {
         let metadata = std::fs::metadata(path)?;
@@ -192,20 +164,18 @@ where
 
     let cache_info = get_cache_paths();
 
-    let pid = cache_info.id;
-
     let base_path = cache_info.cache_path.with_extension("");
     let stem = base_path.file_name().unwrap().to_str().unwrap();
 
-    let first_cue_path = prepared_sheets.first().ok_or(
-        CliError::InternalError("No input CUE files provided.".to_string())
-    )?;
+    if prepared_sheets.is_empty() {
+        return Err(CliError::NoCueFiles);
+    }
 
-    let source_base_dir = first_cue_path.0.parent()
-        .ok_or(CliError::InternalError(
-            format!("Could not determine base directory from CUE path: {}", first_cue_path.0.display())
-        ))?
-        .to_path_buf();
+    /*Each disc reads its BIN files from its own CUE file's folder.*/
+    let discs = pair_with_cue_dirs(
+        cue_analysis.cue_sheets,
+        &prepared_sheets
+    )?;
 
 
     let audio_cache_path = base_path.with_file_name(
@@ -240,8 +210,7 @@ where
         128 * 1024, |byte| byte.as_u64());
 
     let proc_result = process_optical_discs::<H>(
-        &cue_analysis.cue_sheets,
-        &source_base_dir,
+        &discs,
         &data_temp_cache,
         &audio_temp_cache,
         &running,
@@ -296,7 +265,9 @@ where
             .map(|(run, _)| *run as u64)
             .sum();
 
-        let collection_id = collection_map.get(&title).copied().unwrap_or(255);
+        let collection_id = collection_map.get(&title)
+            .copied()
+            .unwrap_or(NO_COLLECTION);
 
         archive_toc.push(SSMDTocEntry {
             filename: title,
@@ -379,24 +350,19 @@ where
     //Compress audio
     let mut audio_block_index: Vec<(H, ChunkLocation)> = Vec::new();
 
-    let tmp_file_path = Arc::new(
-        args.output
+    let final_output_path = args.output
         .as_ref()
         .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("{pid}"))
-        .with_extension("tmp")
-    );
+        .with_extension("ssmd");
 
-    let tmp_file = File::create(tmp_file_path.as_path())?;
+    /*Holds the compressed audio and data until the prefix can be built.
+    The file has no name, so the system deletes it however the run ends.*/
+    let tmp_file = tempfile_in(parent_dir(&final_output_path))?;
 
     let writer = Arc::new(
         Mutex::new(BufWriter::with_capacity(64 * 1024, tmp_file))
     );
 
-    /*Set file guard to clean up tmp files on error. */
-    let _tmp_guard = TempFileGuard::new(&tmp_file_path);
     let audio_blob_size = Arc::new(AtomicU64::new(0));
 
     if audio_data_size > 0 {
@@ -419,7 +385,7 @@ where
         let tmp_audio_write_cb = {
             let blob_size_clone = Arc::clone(&audio_blob_size);
             let writer_clone = Arc::clone(&writer);
-            move |data: &[u8], flush_flag: bool| -> Result<(), CliError>{
+            move |data: &[u8]| -> Result<(), CliError>{
                 blob_size_clone.fetch_add(data.len() as u64, Ordering::SeqCst);
 
                 writer_clone.lock().unwrap().write_all(data)?;
@@ -428,7 +394,7 @@ where
         };
 
         audio_block_index = compress_audio_blocks(
-            audio_chunk_hashes,
+            &audio_chunk_hashes,
             get_audio_data_for_lib,
             tmp_audio_write_cb,
             process_threads
@@ -454,15 +420,11 @@ where
         }
     };
 
-    /*Callback for storing and writing chunk data.
-    Flush flag can be used to force the data to be written if the buffer has
-    not reached the BUFFER_SIZE.*/
-    let tmp_chunk_write_cb = {
-        let writer_clone = Arc::clone(&writer);
-        move |chunk: &[u8], flush_flag: bool| -> Result<(), CliError>{
-            writer_clone.lock().unwrap().write_all(chunk)?;
-            Ok(())
-        }
+    /*Writes each compressed chunk, in order. The builder only borrows the
+    writer, so it's flushed below once the build is done.*/
+    let tmp_chunk_write_cb = |chunk: &[u8]| -> Result<(), CliError> {
+        writer.lock().unwrap().write_all(chunk)?;
+        Ok(())
     };
 
     let mut comp_data_builder = ArchiveBuilder::new(
@@ -478,87 +440,129 @@ where
         .worker_threads(args.threads.unwrap_or(0));
 
     let comp_data = comp_data_builder.build()?;
+    super::note_if_no_dictionary(&comp_data);
 
-    writer.lock().unwrap().flush()?;
-    let blob_size = _tmp_guard.size();
+    /*Flush, then take a second handle to the file. It shares the first
+    one's position, so write_archive's rewind applies to both.*/
+    let mut tmp_file = {
+        let mut writer = writer.lock().unwrap();
+        writer.flush()?;
+        writer.get_ref().try_clone()?
+    };
+    let blob_size = tmp_file.metadata()?.len();
 
     archive_toc.iter_mut().for_each(|toc|{
         toc.filename.push_str(".bin");
     });
 
-    let enc_toc = encode(&archive_toc);
-
-    let enc_disc_manifest = encode(&disc_manifests);
-
-    let enc_audio_index = if !audio_block_index.is_empty() {
-        encode(&audio_block_index)
-    } else {
-        vec![0u8; 0]
-    };
-
-    let enc_excep_index = encode(&exception_index);
-
-    let file_header = FileHeader::build_file_header(
-        archive_toc.len() as u32,
-        98, //zstd
-        *hash_type_id,
-        SSMD_UID,
-        enc_toc.len() as u32
-    );
-
-    let format_data = SSMDFormatData::build_format_data(
-        FileHeader::HEADER_SIZE as usize + enc_toc.len(),
-        enc_disc_manifest.len(),
-        comp_data.dictionary_size,
-        comp_data.enc_chunk_index_size,
-        enc_audio_index.len() as u64,
-        enc_excep_index.len() as u64,
-        subheader_table.len() as u64 * 8 ,
-        exception_blob.len() as u64,
-        final_audio_blob_size
-    );
-
-    let mut final_data = Vec::with_capacity(
-        FileHeader::HEADER_SIZE as usize + enc_toc.len() +
-            SSMDFormatData::SIZE as usize + enc_disc_manifest.len() +
-            comp_data.dictionary_size as usize +
-            comp_data.enc_chunk_index_size as usize +
-            subheader_table.len()
-    );
-
-    final_data.extend_from_slice(file_header.as_bytes());
-    final_data.extend_from_slice(&enc_toc);
-    final_data.extend_from_slice(format_data.as_bytes());
-    final_data.extend_from_slice(&enc_disc_manifest);
-    final_data.extend_from_slice(&comp_data.dictionary);
-    final_data.extend_from_slice(&comp_data.enc_chunk_index);
-    if !audio_block_index.is_empty() {
-        final_data.extend_from_slice(&enc_audio_index);
-    }
-    final_data.extend_from_slice(&enc_excep_index);
-    final_data.extend_from_slice(subheader_table.as_bytes());
-    final_data.extend_from_slice(&exception_blob);
+    /*Builds every byte of the archive that comes before the compressed
+    audio and data: header, TOC, format data, disc manifest, dictionary,
+    indexes, subheader table and exception data.*/
+    let final_data = build_ssmd_prefix(&SSMDPrefix {
+        toc: &archive_toc,
+        disc_manifests: &disc_manifests,
+        comp: &comp_data,
+        audio_block_index: &audio_block_index,
+        exception_index: &exception_index,
+        subheader_table: &subheader_table,
+        exception_blob: &exception_blob,
+        audio_blob_size: final_audio_blob_size,
+        hash_type: hash_type.id(),
+    })?;
 
     println!("Estimated final data size with blob: {}", final_data.len() + blob_size as usize);
 
-    let final_output_path = args.output
-        .as_ref()
-        .unwrap()
-        .with_extension("ssmd");
-
-    write_final_archive(
-        &final_output_path,
-        &tmp_file_path,
-        &final_data
-    )?;
+    write_archive(&final_output_path, &final_data, &mut tmp_file)?;
 
     Ok(())
 }
 
 
+/// Reads the M3U playlists among `file_paths` and returns the group each
+/// listed disc belongs to, by CUE file stem.
+///
+/// Each playlist that lists at least one entry gets the next group ID, from
+/// 0. Blank lines and `#` comments aren't entries. A playlist that can't be
+/// read as UTF-8 is skipped.
+///
+/// # Errors
+///
+/// Returns `CliError::TooManyPlaylists` for a playlist with entries after
+/// the 255th: the IDs left are taken by [`NO_COLLECTION`].
+fn playlist_groups(
+    file_paths: &[PathBuf],
+) -> Result<HashMap<String, u8>, CliError> {
+    let mut groups = HashMap::new();
+    let mut next_id = 0u8;
+
+    for path in file_paths {
+        if (has_extension(path, "m3u") || has_extension(path, "m3u8")) &&
+            let Ok(content) = read_to_string(path)
+        {
+            let stems: Vec<String> = content.lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty() && !line.starts_with('#'))
+                .filter_map(|line| Path::new(line).file_stem())
+                .map(|stem| stem.to_string_lossy().into_owned())
+                .collect();
+
+            if stems.is_empty() {
+                continue;
+            }
+            if next_id == NO_COLLECTION {
+                return Err(CliError::TooManyPlaylists(path.clone()));
+            }
+            for stem in stems {
+                groups.insert(stem, next_id);
+            }
+            next_id += 1;
+        }
+    }
+
+    Ok(groups)
+}
+
+/// Pairs each parsed CUE sheet with the folder of the CUE file it was parsed
+/// from. A sheet's `FILE` paths are relative to that folder.
+///
+/// `analyze_cue_sheets` returns one sheet per CUE file, in the order it was
+/// given them, so `sheets[i]` came from `cue_files[i]`.
+///
+/// # Errors
+///
+/// Returns `CliError::InternalError` if the counts differ, so no disc is
+/// dropped, or if a CUE path has no parent folder.
+fn pair_with_cue_dirs(
+    sheets: Vec<CueSheet>,
+    cue_files: &[(PathBuf, String)],
+) -> Result<Vec<(CueSheet, PathBuf)>, CliError> {
+    if sheets.len() != cue_files.len() {
+        return Err(CliError::InternalError(format!(
+            "{} CUE sheets were parsed from {} CUE files",
+            sheets.len(),
+            cue_files.len()
+        )));
+    }
+
+    sheets
+        .into_iter()
+        .zip(cue_files)
+        .map(|(sheet, (cue_path, _))| {
+            let cue_dir = cue_path.parent().ok_or_else(|| {
+                CliError::InternalError(format!(
+                    "Could not determine base directory from CUE path: {}",
+                    cue_path.display()
+                ))
+            })?;
+            Ok((sheet, cue_dir.to_path_buf()))
+        })
+        .collect()
+}
+
+/// `discs` pairs each CUE sheet with the folder its `FILE` paths are
+/// relative to, as `pair_with_cue_dirs` returns them.
 fn process_optical_discs<H>(
-    cue_sheets: &[CueSheet],
-    base_dir: &PathBuf,
+    discs: &[(CueSheet, PathBuf)],
     data_cache: &Arc<TempCache<H>>,
     audio_cache: &Arc<TempCache<H>>,
     running: &Arc<AtomicBool>,
@@ -640,18 +644,17 @@ where
     let worker_subheader_reg = shared_subheader_registry.clone();
     let worker_exception_reg = shared_exception_registry.clone();
 
-    let cue_sheets_owned = cue_sheets.to_owned();
-    let base_dir_owned = base_dir.to_owned();
+    let discs_owned = discs.to_owned();
 
     let worker_handle = thread::spawn(move || -> Result<(), CliError>{
         worker_pool.install(|| -> Result<(), CliError> {
-            cue_sheets_owned
+            discs_owned
                 .par_iter()
-                .try_for_each(|cue_sheet| -> Result<(), CliError> {
+                .try_for_each(|(cue_sheet, cue_dir)| -> Result<(), CliError> {
                     let sender_clone = chunk_sender.clone();
                     let dcd = cue_sheet_worker(
                         cue_sheet,
-                        &base_dir_owned,
+                        cue_dir,
                         window_size,
                         sender_clone,
                         &worker_subheader_reg,
@@ -664,6 +667,7 @@ where
                     );
 
                     let dm = DiscManifest {
+                        files: dcd.files,
                         lba_map: dcd.lba_map,
                         rle_sector_map: dcd.rle_sector_map,
                         audio_block_map: dcd.audio_block_map,
@@ -815,6 +819,9 @@ where
         &file_provider
     )?;
 
+    let files = disc_files(cue_sheet, &sector_count)
+        .map_err(SpriteShrinkCDError::from)?;
+
     let sector_result = analyze_and_map_disc(
         cue_sheet,
         &sector_count,
@@ -954,6 +961,7 @@ where
     //  set elsewhere
     Ok(DiscCompleteData {
         title: cue_sheet.source_filename.clone(),
+        files,
         lba_map: sector_result.lba_map,
         rle_sector_map,
         audio_block_map,
@@ -963,4 +971,75 @@ where
         verification_hash: sha_hasher.finalize().into(),
         integrity_hash: xxh3_hasher.finish()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sheet(title: &str) -> CueSheet {
+        CueSheet { source_filename: title.to_string(), files: Vec::new() }
+    }
+
+    fn cue_file(path: &str) -> (PathBuf, String) {
+        (PathBuf::from(path), String::new())
+    }
+
+    #[test]
+    fn each_sheet_gets_its_own_cue_folder() {
+        let discs = pair_with_cue_dirs(
+            vec![sheet("one"), sheet("two")],
+            &[cue_file("first/one.cue"), cue_file("second/two.cue")],
+        )
+        .unwrap();
+
+        let paired: Vec<(&str, &Path)> = discs
+            .iter()
+            .map(|(sheet, dir)| (sheet.source_filename.as_str(), dir.as_path()))
+            .collect();
+        assert_eq!(
+            paired,
+            [("one", Path::new("first")), ("two", Path::new("second"))]
+        );
+    }
+
+    #[test]
+    fn a_count_mismatch_is_an_error() {
+        let result = pair_with_cue_dirs(
+            vec![sheet("one")],
+            &[cue_file("first/one.cue"), cue_file("second/two.cue")],
+        );
+        assert!(matches!(result, Err(CliError::InternalError(_))));
+    }
+
+    /*Group IDs are a u8 and 255 means no group, so 255 playlists fit. The
+    old code wrapped: the 256th got 255 and the 257th shared group 0.*/
+    #[test]
+    fn playlists_past_the_255th_are_refused() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let mut paths = Vec::new();
+        // Comments and blank lines aren't entries, so this takes no group.
+        let comments = tmp.path().join("comments.m3u");
+        fs::write(&comments, "#EXTM3U\n\n").unwrap();
+        paths.push(comments);
+        for set in 0..255 {
+            let path = tmp.path().join(format!("set{set}.m3u"));
+            fs::write(&path, format!("# set {set}\nset{set}.cue\n")).unwrap();
+            paths.push(path);
+        }
+
+        let groups = playlist_groups(&paths).unwrap();
+        assert_eq!(groups.len(), 255);
+        for set in 0..255_u8 {
+            assert_eq!(groups[&format!("set{set}")], set);
+        }
+
+        let extra = tmp.path().join("SET255.M3U8");
+        fs::write(&extra, "set255.cue\n").unwrap();
+        paths.push(extra.clone());
+        assert!(matches!(
+            playlist_groups(&paths),
+            Err(CliError::TooManyPlaylists(path)) if path == extra
+        ));
+    }
 }

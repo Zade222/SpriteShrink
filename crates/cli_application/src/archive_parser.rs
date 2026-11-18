@@ -1,22 +1,26 @@
 //! Parses and extracts data from sprite-shrink archive files.
 //!
 //! This module provides functions to read and interpret the binary
-//! structure of an archive. It is responsible for parsing the file
-//! header, manifest, and chunk index, which are the core components
-//! needed to locate and extract the contained files.
+//! structure of an archive. It is responsible for reading the file
+//! header and the metadata before the compressed data, which are the
+//! core components needed to locate and extract the contained files.
 
 use std::{
-    collections::HashMap,
-    fmt::Display,
+    fs::metadata,
+    hash::Hash,
     path::Path,
 };
 
 use bitcode::Decode;
-use serde::Serialize;
+use serde::Deserialize;
 
 use sprite_shrink::{
-    ChunkLocation, FileHeader, FileManifestParent, Hashable,
-    parse_file_chunk_index, parse_file_header, parse_file_metadata,
+    FileHeader, ParsedSSMC, SSMCFormatData,
+    parse_file_header, parse_format_data, parse_ssmc_prefix,
+};
+use sprite_shrink_cd::{
+    ParsedSSMD, SSMDFormatData,
+    decode_ssmd_format_data, parse_ssmd_prefix,
 };
 
 use crate::error_handling::CliError;
@@ -53,139 +57,206 @@ pub fn get_file_header(file_path: &Path) -> Result<FileHeader, CliError> {
     Ok(header)
 }
 
-/// Reads and parses the file manifest from an archive.
+/// Parses an `--extract` range such as `1,3,5-7` into zero-based positions
+/// in the table of contents of an archive holding `file_count` files.
 ///
-/// This function extracts the binary file manifest from a given location
-/// within an archive. It reads the raw byte data of the manifest, then
-/// deserializes it into a vector of `FileManifestParent` structs, which
-/// describe the contents and structure of the files in the archive.
+/// The user's indices are 1-based, as `--list` prints them, and `u32` like
+/// the header's file count.
 ///
-/// # Arguments
+/// # Errors
 ///
-/// * `file_path`: A `Path` pointing to the archive file.
-/// * `man_offset`: The starting byte offset of the manifest data.
-/// * `man_length`: The total length in bytes of the manifest data.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(Vec<FileManifestParent>)` containing the parsed file manifest.
-/// - `Err(CliError)` if reading or parsing the manifest fails.
-pub fn get_file_manifest<H>(
-    file_path: &Path,
-    man_offset: u64,
-    man_length: usize
-) -> Result<Vec<FileManifestParent<H>>, CliError>
-where
-    H: Hashable
-        + Ord
-        + Display
-        + Serialize
-        + for<'de> serde::Deserialize<'de>
-        + for<'de> Decode<'de>,
+/// - `CliError::RangeParse` if `range` isn't a list of numbers and ranges.
+/// - `CliError::InvalidRomIndex` if an index is 0 or greater than
+///   `file_count`.
+pub fn parse_rom_indices(range: &str, file_count: u32)
+    -> Result<Vec<usize>, CliError>
 {
-    //Read file manifest from file.
-    let bin_vec_manifest = read_file_data(
+    let indices = range_parser::parse::<u32>(range)?;
+
+    if indices.contains(&0) {
+        return Err(CliError::InvalidRomIndex(
+            "ROM indexes start at 1, so 0 names no file.".to_string()
+        ));
+    }
+    if let Some(&max) = indices.iter().max() && max > file_count {
+        return Err(CliError::InvalidRomIndex(format!(
+            "One or more ROM indexes are invalid. The requested index \
+            {max} is out of the valid range (1-{file_count})."
+        )));
+    }
+
+    /*Every index is now at least 1, so `index - 1` can't underflow.*/
+    Ok(indices.into_iter().map(|index| (index - 1) as usize).collect())
+}
+
+/// Reads and parses every part of an SSMC archive's metadata.
+///
+/// Reads the format data to find where the metadata ends, then reads the
+/// archive up to there and parses it with `parse_ssmc_prefix`. The chunk
+/// index it returns holds absolute file offsets.
+///
+/// # Errors
+///
+/// Returns `CliError::DataIntegrity` if the format data says the metadata
+/// ends past the end of the file, or an error from reading the file or
+/// parsing the metadata.
+pub fn get_ssmc_prefix<H>(
+    file_path: &Path,
+    header: &FileHeader,
+) -> Result<ParsedSSMC<H>, CliError>
+where
+    for<'de> H: Eq + Hash + Deserialize<'de> + Decode<'de>,
+{
+    let bin_format_data = read_file_data(
         file_path,
-        man_offset,
-        man_length
+        header.format_data_offset.into(),
+        size_of::<SSMCFormatData>()
+    )?;
+    let format_data = parse_format_data(&bin_format_data)?;
+
+    let prefix = read_archive_prefix(
+        file_path,
+        format_data.metadata_prefix_end()
     )?;
 
-    //Parse it into the required Vec<FileManifestParent> via the library.
-    parse_file_metadata(&bin_vec_manifest).map_err(CliError::from)
+    Ok(parse_ssmc_prefix(&prefix)?)
 }
 
-/// Retrieves the maximum valid ROM index from an archive.
+/// Reads and parses every part of an SSMD archive's metadata.
 ///
-/// This function reads the archive's header to find the total number of
-/// files, which determines the highest possible ROM index. It is used to
-/// validate user-provided indices before extraction to ensure they are
-/// within a valid range. The maximum index is 255.
+/// Reads the format data to find where the metadata ends, then reads the
+/// archive up to there and parses it with `parse_ssmd_prefix`. The chunk
+/// and audio block indexes it returns hold absolute file offsets.
 ///
-/// # Arguments
+/// # Errors
 ///
-/// * `file_path`: A `Path` pointing to the archive file.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(u8)` containing the max ROM index, which is the file count.
-/// - `Err(CliError)` if the header cannot be read or if the file
-///   count exceeds the supported limit of 255.
-pub fn get_max_rom_index(file_path: &Path)
-    -> Result<u8, CliError>
-{
-    let header = get_file_header(file_path)?;
-
-    header.file_count.try_into().map_err(|_| {
-        CliError::InternalError(
-            "The number of files in the archive exceeds the supported limit of\
-                255.".to_string(),
-        )
-    })
-}
-
-/// Reads and parses the chunk index from an archive file.
-///
-/// This function extracts a binary segment containing the chunk index
-/// from an archive. It reads the raw data from a specified offset and
-/// length, then parses it into a `HashMap`. This map associates each
-/// unique chunk hash with its `ChunkLocation`, which provides the offset
-/// and length of the chunk's data within the archive.
-///
-/// # Arguments
-///
-/// * `file_path`: A `Path` pointing to the archive file.
-/// * `chunk_index_offset`: The starting byte offset of the index.
-/// * `chunk_index_length`: The total length in bytes of the index.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(HashMap<u64, ChunkLocation>)` containing the parsed index.
-/// - `Err(CliError)` if reading the file or parsing the data fails.
-pub fn get_chunk_index<H>(
+/// Returns `CliError::DataIntegrity` if the format data says the metadata
+/// ends past the end of the file, or an error from reading the file or
+/// parsing the metadata.
+pub fn get_ssmd_prefix<H>(
     file_path: &Path,
-    chunk_index_offset: u64,
-    chunk_index_length: u64
-) -> Result<HashMap<H, ChunkLocation>, CliError>
+    header: &FileHeader,
+) -> Result<ParsedSSMD<H>, CliError>
 where
-    H: Hashable
-        + Ord
-        + Display
-        + Serialize
-        + for<'de> serde::Deserialize<'de>
-        + for<'de> Decode<'de>,
-    {
-    //Read the chunk_index from the file.
-    let bin_vec_chunk_index = read_file_data(
+    for<'de> H: Eq + Hash + Decode<'de>,
+{
+    let bin_format_data = read_file_data(
         file_path,
-        chunk_index_offset,
-        chunk_index_length as usize
+        header.format_data_offset.into(),
+        size_of::<SSMDFormatData>()
+    )?;
+    let format_data = decode_ssmd_format_data(&bin_format_data)?;
+
+    let prefix = read_archive_prefix(
+        file_path,
+        format_data.metadata_prefix_end()
     )?;
 
-    //Parse the binary data into a chunk index HashMap and return the value.
-    parse_file_chunk_index(
-        &bin_vec_chunk_index
-    ).map_err(CliError::from)
+    Ok(parse_ssmd_prefix(&prefix)?)
 }
 
+/// Reads the first `prefix_end` bytes of an archive. The length comes from
+/// the archive itself, so it's checked against the file size before a
+/// buffer that large is allocated.
+fn read_archive_prefix(
+    file_path: &Path,
+    prefix_end: u64,
+) -> Result<Vec<u8>, CliError> {
+    let file_len = metadata(file_path)?.len();
 
-pub fn get_toc<T> (
+    if prefix_end > file_len {
+        return Err(CliError::DataIntegrity(format!(
+            "the metadata ends at byte {prefix_end}, past the end of the \
+            {file_len}-byte file"
+        )));
+    }
+    let Ok(prefix_len) = usize::try_from(prefix_end) else {
+        return Err(CliError::InternalError(format!(
+            "The archive's {prefix_end}-byte metadata is too large to read \
+            on this platform."
+        )));
+    };
+
+    read_file_data(file_path, 0, prefix_len)
+}
+
+/// Reads the table of contents at `toc_offset` and decodes it with
+/// `parse_toc`, which also checks each entry's name.
+///
+/// # Errors
+///
+/// Returns an I/O error if the bytes can't be read, or the error from
+/// `parse_toc`.
+pub fn get_toc<T, E>(
     file_path: &Path,
     toc_offset: u32,
-    toc_length: usize
+    toc_length: usize,
+    parse_toc: impl FnOnce(&[u8]) -> Result<Vec<T>, E>,
 ) -> Result<Vec<T>, CliError>
 where
-    T: for<'de> Decode<'de>,
+    CliError: From<E>,
 {
     let enc_toc_data = read_file_data(
         file_path,
-        toc_offset as u64,
+        toc_offset.into(),
         toc_length
     )?;
 
-    bitcode::decode(&enc_toc_data).map_err(|e| {
-        CliError::InternalError(format!("Failed to decode TOC: {}", e))
-    })
+    Ok(parse_toc(&enc_toc_data)?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn indices_become_zero_based_positions() {
+        assert_eq!(parse_rom_indices("1", 1).unwrap(), [0]);
+        assert_eq!(
+            parse_rom_indices("1,3-5", 5).unwrap(),
+            [0, 2, 3, 4]
+        );
+    }
+
+    #[test]
+    fn indices_past_255_are_accepted() {
+        assert_eq!(parse_rom_indices("255-256", 256).unwrap(), [254, 255]);
+        assert_eq!(
+            parse_rom_indices("70000", 70_000).unwrap(),
+            [69_999]
+        );
+    }
+
+    #[test]
+    fn index_zero_is_rejected() {
+        for range in ["0", "0-2", "2,0"] {
+            let err = parse_rom_indices(range, 3).unwrap_err();
+            assert!(
+                matches!(err, CliError::InvalidRomIndex(_)),
+                "{range}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_index_past_the_file_count_is_rejected() {
+        let err = parse_rom_indices("2-4", 3).unwrap_err();
+        assert!(
+            err.to_string().contains("requested index 4 is out of the valid \
+                range (1-3)"),
+            "{err}"
+        );
+        assert!(matches!(
+            parse_rom_indices("1", 0),
+            Err(CliError::InvalidRomIndex(_))
+        ));
+    }
+
+    #[test]
+    fn a_malformed_range_is_a_parse_error() {
+        assert!(matches!(
+            parse_rom_indices("one", 3),
+            Err(CliError::RangeParse(_))
+        ));
+    }
 }

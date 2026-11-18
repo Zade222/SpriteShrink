@@ -1,25 +1,18 @@
 use std::{
     borrow::Cow,
-    io::{self, Read, Seek},
-    iter::repeat_n,
-};
-
-use sprite_shrink::{
-    Hashable
+    io,
 };
 
 use crate::lib_error_handling::SpriteShrinkCDError;
 
 use crate::lib_structs::{
-    ContentBlock, CueFile, CueSheet, ExceptionRegistry, ExceptionType, MsfTime,
+    CueFile, CueSheet, DiscFile, DiscIndex, DiscTrack,
+    ExceptionRegistry, ExceptionType, MsfTime,
     RleSectorMap, SectorMap, SectorMapResult, SectorType,
     SubHeaderEntry, SubheaderRegistry, Track, TrackType
 };
 
-use crate::{
-    analyze::analyze_data_sector,
-    stream::SectorRegionStream
-};
+use crate::analyze::analyze_data_sector;
 
 use thiserror::Error;
 
@@ -39,79 +32,6 @@ pub enum MapperError {
 
 pub trait SectorDataProvider {
     fn read_sector(&mut self, sector_index: u32) -> io::Result<[u8; 2352]>;
-}
-
-
-pub fn build_block_map<H, R>(
-    rle_sector_map: &RleSectorMap,
-    source: &mut R,
-) -> Result<Vec<ContentBlock<H>>, io::Error>
-where
-    H: Hashable,
-    R: Read + Seek,
-{
-    let mut block_map = Vec::new();
-    let mut absolute_sector_offset = 0;
-
-    const AUDIO_SEGMENT_SIZE: u32 = 16;
-
-    for (run_count, sector_type) in &rle_sector_map.runs {
-        match sector_type {
-            SectorType::Audio => {
-                let mut sectors_in_run_processed = 0;
-                while sectors_in_run_processed < *run_count {
-                    let segment_start =
-                        absolute_sector_offset + sectors_in_run_processed;
-                    let segment_size = std::cmp::min(
-                        AUDIO_SEGMENT_SIZE,
-                        *run_count - sectors_in_run_processed
-                    );
-
-                    let mut stream = SectorRegionStream::new(
-                        source,
-                        segment_start,
-                        segment_size
-                    );
-
-                    let mut buffer = Vec::new();
-                    stream.read_to_end(&mut buffer)?;
-                    let content_hash = H::from_bytes_with_seed(&buffer);
-
-                    block_map.push(ContentBlock {
-                        start_sector: segment_start,
-                        sector_count: segment_size,
-                        content_hash,
-                        sector_type: *sector_type,
-                    });
-
-                    sectors_in_run_processed += segment_size;
-                }
-            }
-            SectorType::PregapAudio => {
-                let mut stream = SectorRegionStream::new(
-                    source,
-                    absolute_sector_offset,
-                    *run_count
-                );
-                let mut buffer = Vec::new();
-                stream.read_to_end(&mut buffer)?;
-                let content_hash = H::from_bytes_with_seed(&buffer);
-
-                block_map.push(ContentBlock {
-                    start_sector: absolute_sector_offset,
-                    sector_count: *run_count,
-                    content_hash,
-                    sector_type: *sector_type,
-                });
-            }
-            // Ignore all others.
-            _ => {}
-        }
-
-        absolute_sector_offset += run_count;
-    }
-
-    Ok(block_map)
 }
 
 
@@ -220,12 +140,14 @@ pub fn analyze_and_map_disc(
             }
 
 
+            // Mode 2 sectors keep their subheader at 16..24. Mode 1 sectors
+            // have user data there, and their 8 bytes are the reserved area.
             let subheader_val = if matches!(
                 analysis_result.sector_type,
                 SectorType::Mode2Form1 | SectorType::Mode2Form2 |
                 SectorType::Mode2Form1Exception |
                 SectorType::Mode2Form2Exception |
-                SectorType::PregapMode1Exception |
+                SectorType::PregapMode2 |
                 SectorType::PregapMode2Exception
             ) {
                 let mut sh = [0u8; 8];
@@ -275,8 +197,10 @@ pub fn analyze_and_map_disc(
 
             if let Some(data) = analysis_result.exception_data {
                 let excep_type = match analysis_result.sector_type {
-                    SectorType::Mode1Exception => ExceptionType::Mode1,
-                    SectorType::Mode2Form1Exception => ExceptionType::Mode2Form1,
+                    SectorType::Mode1Exception |
+                    SectorType::PregapMode1Exception => ExceptionType::Mode1,
+                    SectorType::Mode2Form1Exception |
+                    SectorType::PregapMode2Exception => ExceptionType::Mode2Form1,
                     SectorType::Mode2Form2Exception => ExceptionType::Mode2Form2,
                     _ => ExceptionType::None
                 };
@@ -334,6 +258,59 @@ fn get_track_start_sector(track: &Track) -> Result<u32, MapperError> {
 }
 
 
+/// Lists a disc's files, tracks and indices for its manifest, so the CUE
+/// sheet can be written back on extraction.
+///
+/// Index positions stay relative to their own file, as the CUE sheet gives
+/// them, so the original file layout can be rebuilt as well as a single
+/// joined file.
+///
+/// # Arguments
+///
+/// * `cue_sheet`: The parsed CUE sheet.
+/// * `file_sec_count`: The length of each of the sheet's files in sectors,
+///   in the same order.
+///
+/// # Errors
+///
+/// Returns `MapperError::FileCountMismatch` if `file_sec_count` doesn't have
+/// one length per file.
+pub fn disc_files(
+    cue_sheet: &CueSheet,
+    file_sec_count: &[u32],
+) -> Result<Vec<DiscFile>, MapperError> {
+    if file_sec_count.len() != cue_sheet.files.len() {
+        return Err(MapperError::FileCountMismatch(
+            file_sec_count.len(),
+            cue_sheet.files.len()
+        ));
+    }
+
+    Ok(cue_sheet.files.iter()
+        .zip(file_sec_count)
+        .map(|(file, &sector_count)| DiscFile {
+            name: file.name.clone(),
+            sector_count,
+            tracks: file.tracks.iter()
+                .map(|track| DiscTrack {
+                    number: track.number,
+                    track_type: track.track_type,
+                    indices: track.indices.iter()
+                        .map(|index| DiscIndex {
+                            number: index.number,
+                            sector: index.position.to_total_frames(),
+                        })
+                        .collect(),
+                    pregap: track.pregap,
+                    postgap: track.postgap,
+                    area: track.area,
+                })
+                .collect(),
+        })
+        .collect())
+}
+
+
 fn normalize_cue_sheet(
     source_sheet: &CueSheet,
     file_sec_count: &[u32],
@@ -379,35 +356,6 @@ fn normalize_cue_sheet(
     })
 }
 
-/// Decompresses a run-length encoded sector map into a full, per-sector vector
-/// for fast lookups.
-///
-/// This function takes an `RleSectorMap` (which is optimized for compact
-/// storage) and expands it into a `SectorMap` (which is optimized for fast,
-/// O(1) lookups in memory).
-///
-/// # Arguments
-/// - `rle_map`: A reference to the `RleSectorMap` to be decoded.
-///
-/// # Returns
-/// A `SectorMap` containing a `Vec<SectorType>` where each element corresponds
-/// to the type of an individual sector on the disc.
-pub fn rle_decode_map(rle_map: &RleSectorMap) -> SectorMap {
-    let total_sectors: usize = rle_map.runs
-        .iter()
-        .map(|(count, _)| *count as usize)
-        .sum();
-
-    let mut sectors = Vec::with_capacity(total_sectors);
-
-    for (count, sector_type) in &rle_map.runs {
-        sectors.extend(repeat_n(*sector_type, *count as usize));
-    }
-
-    SectorMap { sectors }
-}
-
-
 pub fn rle_encode_map(sector_map: &SectorMap) -> RleSectorMap {
     let mut runs: Vec<(u32, SectorType)> = Vec::new();
 
@@ -432,8 +380,83 @@ pub fn rle_encode_map(sector_map: &SectorMap) -> RleSectorMap {
     RleSectorMap { runs }
 }
 
-const fn from_bcd (bcd: u8) -> u8 {
+pub(crate) const fn from_bcd (bcd: u8) -> u8 {
     let tens = (bcd >> 4) * 10;
     let ones = bcd & 0x0F;
     tens + ones
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::iter::repeat_n;
+
+    use proptest::prelude::*;
+
+    use super::*;
+    use crate::reconstruction::expand_sector_map;
+
+    const ALL_SECTOR_TYPES: [SectorType; 16] = [
+        SectorType::Audio,
+        SectorType::Mode1,
+        SectorType::Mode1Exception,
+        SectorType::Mode2Form1,
+        SectorType::Mode2Form1Exception,
+        SectorType::Mode2Form2,
+        SectorType::Mode2Form2Exception,
+        SectorType::PregapMode1,
+        SectorType::PregapMode1Exception,
+        SectorType::PregapMode2,
+        SectorType::PregapMode2Exception,
+        SectorType::PregapAudio,
+        SectorType::ZeroedAudio,
+        SectorType::ZeroedMode1Data,
+        SectorType::ZeroedMode2Data,
+        SectorType::None,
+    ];
+
+    /// A sector map built from runs, so long repeats are common. Adjacent
+    /// runs can share a type, which `rle_encode_map` has to merge.
+    fn sector_map() -> impl Strategy<Value = Vec<SectorType>> {
+        proptest::collection::vec(
+            (proptest::sample::select(ALL_SECTOR_TYPES.to_vec()), 1..40_usize),
+            0..20,
+        ).prop_map(|runs| {
+            runs.into_iter()
+                .flat_map(|(sector_type, count)| repeat_n(sector_type, count))
+                .collect()
+        })
+    }
+
+    fn encode(sectors: &[SectorType]) -> RleSectorMap {
+        rle_encode_map(&SectorMap { sectors: sectors.to_vec() })
+    }
+
+    proptest! {
+        #[test]
+        fn expanding_an_encoded_map_gives_it_back(sectors in sector_map()) {
+            prop_assert_eq!(expand_sector_map(&encode(&sectors)), sectors);
+        }
+
+        #[test]
+        fn encoded_runs_are_as_long_as_possible(sectors in sector_map()) {
+            let rle = encode(&sectors);
+            prop_assert!(rle.runs.iter().all(|&(count, _)| count > 0));
+            prop_assert!(rle.runs.windows(2).all(|pair| pair[0].1 != pair[1].1));
+        }
+    }
+
+    #[test]
+    fn a_map_without_repeats_encodes_as_runs_of_one() {
+        let rle = encode(&ALL_SECTOR_TYPES);
+        assert_eq!(rle.runs.len(), ALL_SECTOR_TYPES.len());
+        for (&(count, sector_type), expected) in rle.runs.iter().zip(ALL_SECTOR_TYPES) {
+            assert_eq!((count, sector_type), (1, expected));
+        }
+    }
+
+    #[test]
+    fn an_empty_map_encodes_as_no_runs() {
+        assert_eq!(encode(&[]).runs.len(), 0);
+    }
 }

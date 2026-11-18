@@ -43,7 +43,7 @@ By using content-defined chunking and deduplication, the `.ssmc` and `.ssmd` for
 
 A complete technical document detailing the binary layout, data structures, and design principles of the format is available for developers and enthusiasts.
 
-[**Read the full .ssmc File Specification**](./SSMC_File_Specification/SPECIFICATION.md)
+[**Read the full archive file specification**](./File_Specification/SPECIFICATION.md)
 
 ---
 
@@ -206,7 +206,7 @@ The guide and the scripts can be found [here](./helper_scripts/):
 
 ## Error Handling & Reliability
 
-SpriteShrink is designed to be robust. It gracefully handles malformed inputs, ensures data integrity (byte-for-byte identical extraction), and provides clear, actionable error messages. Operations are atomic, meaning partially written output files are automatically cleaned up in case of cancellation or failure.
+SpriteShrink is designed to be robust. It gracefully handles malformed inputs, ensures data integrity (byte-for-byte identical extraction), and provides clear, actionable error messages. Archives and extracted files are written to a temporary file in the destination folder and renamed into place only once complete, so a cancelled or failed run leaves no partial file and an existing file keeps its old contents. A process that is killed outright, rather than cancelled, can leave a hidden `.<name>.<random>.tmp` file behind, which is safe to delete.
 
 ---
 

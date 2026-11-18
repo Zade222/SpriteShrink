@@ -10,12 +10,12 @@ use std::{
     ffi::c_void,
     fmt::Debug,
     hash::Hash,
-    sync::{Arc, Mutex},
+    sync::Arc,
     thread
 };
 
 use bitcode::Encode;
-use fastcdc::v2020::{Chunk, FastCDC, Normalization};
+use fastcdc::v2020::{AVERAGE_MAX, AVERAGE_MIN, Chunk, FastCDC, Normalization};
 use thiserror::Error;
 use sha2::{Digest,Sha512};
 use xxhash_rust::xxh3::{xxh3_64_with_seed, xxh3_128_with_seed};
@@ -32,10 +32,10 @@ use crate::parsing::{SS_SEED};
 
 #[derive(Error, Debug)]
 pub enum ProcessingError {
-    #[error("Failed to generate dictionary samples")]
-    SampleGeneration,
+    #[error("Failed to generate dictionary samples: {0}")]
+    SampleGeneration(String),
 
-    #[error("Verification failed for file:  {0}")]
+    #[error("Verification failed for file: {0}")]
     HashMismatchError(String),
 
     #[error("An internal logic error occurred: {0}")]
@@ -46,6 +46,14 @@ pub enum ProcessingError {
 
     #[error("Seek request is outside the file bounds: {0}")]
     SeekOutOfBounds(String),
+
+    #[error(
+        "Window size {0} is outside the supported range of {min} to {max} \
+         bytes",
+        min = MIN_WINDOW_SIZE,
+        max = MAX_WINDOW_SIZE
+    )]
+    InvalidWindowSize(u64),
 
     #[error("File Verification failed: {0}")]
     VerificationError(String),
@@ -59,6 +67,21 @@ pub enum ProcessingError {
     #[error("Operation cancelled by user.")]
     Cancelled,
 }
+
+/// The smallest window size, in bytes, that the chunker accepts.
+///
+/// The chunker cuts chunks between a quarter of the window size and four
+/// times it. `FastCDC`'s limits on those three sizes all reduce to its limits
+/// on the average size, which is the window size itself.
+pub const MIN_WINDOW_SIZE: u64 = AVERAGE_MIN as u64;
+
+/// The largest window size, in bytes, that the chunker accepts. See
+/// [`MIN_WINDOW_SIZE`].
+pub const MAX_WINDOW_SIZE: u64 = AVERAGE_MAX as u64;
+
+/// The most sample data, in bytes, that dictionary training is given, set
+/// to prevent an overflow in the zstd library.
+const MAX_SAMPLES_SIZE: u64 = 4 * 1024 * 1024 * 1024;
 
 pub trait Hashable:
     //Specifies what capabilities H must have.
@@ -94,30 +117,57 @@ impl Hashable for u128 {
 /// # Arguments
 ///
 /// * `file_data`: A `FileData` struct with the in-memory file data.
-/// * `window_size`:
+/// * `window_size`: The target average chunk size in bytes, from
+///   [`MIN_WINDOW_SIZE`] to [`MAX_WINDOW_SIZE`].
 ///
 /// # Returns
 ///
 /// A `Result` which is:
-/// - `Some(ProcessedFileData)` on successful processing.
-/// - `None` if the input file data is empty.
+/// - `Ok(Some(ProcessedFileData))` on successful processing.
+/// - `Ok(None)` if the input file data is empty.
+///
+/// # Errors
+///
+/// Returns `ProcessingError::InvalidWindowSize` if `window_size` is outside
+/// the supported range, even when the file is empty.
 pub fn process_file_in_memory(
     file_data: FileData,
     window_size: u64,
-) -> Option<ProcessedFileData> {
+) -> Result<Option<ProcessedFileData>, SpriteShrinkError> {
+    let chunker_sizes = chunker_sizes(window_size)?;
+
     if file_data.file_data.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let veri_hash = generate_sha_512(&file_data.file_data);
-    let chunks = chunk_data(&file_data, SS_SEED, window_size);
+    let chunks = chunk_data(&file_data, SS_SEED, chunker_sizes);
 
-    Some(ProcessedFileData {
+    Ok(Some(ProcessedFileData {
         file_name: file_data.file_name,
         veri_hash,
         chunks,
         file_data: file_data.file_data,
-    })
+    }))
+}
+
+/// The minimum, average and maximum chunk sizes for `window_size`, as
+/// `FastCDC` takes them.
+///
+/// # Errors
+///
+/// Returns `ProcessingError::InvalidWindowSize` if `window_size` is outside
+/// [`MIN_WINDOW_SIZE`] to [`MAX_WINDOW_SIZE`]. `FastCDC` panics on sizes
+/// outside its limits, and a window size above `u32::MAX` could otherwise
+/// be truncated into the range and chunk with a different size than asked.
+fn chunker_sizes(window_size: u64) -> Result<(u32, u32, u32), ProcessingError> {
+    let avg_size = u32::try_from(window_size)
+        .ok()
+        .filter(|size| (AVERAGE_MIN..=AVERAGE_MAX).contains(size))
+        .ok_or(ProcessingError::InvalidWindowSize(window_size))?;
+
+    // At most 4 MiB, so four times it still fits in a u32.
+    Ok((avg_size / 4, avg_size, avg_size * 4))
 }
 
 /// Generates a SHA-512 hash for a given data slice.
@@ -153,6 +203,12 @@ fn generate_sha_512(data: &[u8]) -> [u8; 64]{
 ///
 /// * `file_data`: A reference to the `FileData` struct to be chunked.
 /// * `seed`: A `u64` value to initialize the chunking algorithm.
+/// * `(min_size, avg_size, max_size)`: The chunk size bounds, from
+///   [`chunker_sizes`].
+///
+/// The size bounds and normalization level match the CLI's `StreamCDC`
+/// chunker, so a file is cut at the same points whether it's chunked in
+/// memory or streamed. Level 0 produced smaller archives than level 1.
 ///
 /// # Returns
 ///
@@ -161,14 +217,14 @@ fn generate_sha_512(data: &[u8]) -> [u8; 64]{
 fn chunk_data(
     file_data: &FileData,
     seed: u64,
-    window_size: u64
+    (min_size, avg_size, max_size): (u32, u32, u32),
 ) -> Vec<Chunk> {
     let chunker = FastCDC::with_level_and_seed(
         &file_data.file_data,
-        (window_size/4) as u32,
-        window_size as u32,
-        (window_size*4) as u32,
-        Normalization::Level1, seed);
+        min_size,
+        avg_size,
+        max_size,
+        Normalization::Level0, seed);
 
     chunker.collect()
 }
@@ -260,9 +316,9 @@ pub fn create_file_manifest_and_chunks<H: Hashable>(
 ///
 /// # Type Parameters
 ///
-/// * `F`: The type of the `get_chunk_data` callback, which must be a closure
+/// * `D`: The type of the `get_chunk_data` callback, which must be a closure
 ///   that is `Send`, `Sync`, and has a `'static` lifetime.
-/// * `H`: The generic hash type, which must be `Eq`, `Hash`, `Display`,
+/// * `H`: The generic hash type, which must be `Eq`, `Hash`,
 ///   `Clone`, `Send`, `Sync`, and have a `'static` lifetime.
 pub fn verify_single_file<D, E, H, P>(
     title: String,
@@ -390,18 +446,10 @@ where
 ///
 /// A `Result` which is:
 /// - `Ok(Vec<u8>)` containing the generated dictionary data.
-/// - `Err(ProcessingError::DictionaryError)` if the underlying zstd library
-///   encounters an error during the dictionary training process.
-///
-/// # Safety
-///
-/// This function is safe because it upholds the contracts of the zstd-sys C
-/// functions:
-/// 1. `dict_buffer` is allocated with sufficient capacity (`max_dict_size`).
-/// 2. The pointers and lengths for `samples_buffer` and `sample_sizes` are
-///    valid as they are derived directly from Rust-managed Vecs and slices.
-/// 3. All potential errors from the C function are checked with
-///    `ZDICT_isError`.
+/// - `Err(ProcessingError::DictionaryError)` if `sample_sizes` doesn't add
+///   up to the length of `samples_buffer`, or if the underlying zstd library
+///   encounters an error during the dictionary training process, such as
+///   when there are too few samples to train on.
 pub fn gen_zstd_opt_dict(
     samples_buffer: &[u8],
     sample_sizes: &[usize],
@@ -409,10 +457,26 @@ pub fn gen_zstd_opt_dict(
     workers: usize,
     compression_level: i32
 ) -> Result<Vec<u8>, ProcessingError> {
-    /*Prepares the samples for the zstd_sys function.*/
+    /*zstd reads each sample at the sum of the sizes before it, so sizes
+    that add up to more than the buffer would make it read past the end.*/
+    let sizes_total = sample_sizes
+        .iter()
+        .try_fold(0_usize, |total, &size| total.checked_add(size));
+    if sizes_total != Some(samples_buffer.len()) {
+        return Err(ProcessingError::DictionaryError(format!(
+            "the sample sizes don't add up to the {}-byte sample buffer",
+            samples_buffer.len()
+        )));
+    }
+    let Ok(sample_count) = u32::try_from(sample_sizes.len()) else {
+        return Err(ProcessingError::DictionaryError(format!(
+            "{} samples is more than zstd accepts",
+            sample_sizes.len()
+        )));
+    };
 
     /*This buffer will store the dictionary to be returned.*/
-    let mut dict_buffer = Vec::with_capacity(max_dict_size);
+    let mut dict_buffer: Vec<u8> = Vec::with_capacity(max_dict_size);
 
     /*Set and store the ZDICT parameters to be used by the cover algorithm.
     Any values marked as default are either not used by
@@ -429,7 +493,7 @@ pub fn gen_zstd_opt_dict(
         k:          0, //Dynamically set by below function.
         d:          0, //Dynamically set by below function.
         steps:      4,
-        nbThreads:  workers as u32,
+        nbThreads:  u32::try_from(workers).unwrap_or(u32::MAX),
         splitPoint: 0.0, //Default
         shrinkDict: 0, //Default, not used
         shrinkDictMaxRegression: 0, //Default, not used
@@ -437,19 +501,30 @@ pub fn gen_zstd_opt_dict(
     };
 
     //Run the C function with the defined paramters and prepared vectors.
+    // SAFETY: `dict_buffer` has capacity for `max_dict_size` bytes, the most
+    // zstd writes. `sample_sizes` holds `sample_count` sizes, checked above
+    // to add up to exactly `samples_buffer.len()`, so every sample zstd
+    // reads lies inside `samples_buffer`. zstd reads `params` and writes the
+    // tuned `k` and `d` back to it; it keeps none of the pointers after it
+    // returns.
     let dict_size = unsafe {
         zstd_sys::ZDICT_optimizeTrainFromBuffer_cover(
-            dict_buffer.as_mut_ptr() as *mut c_void,
+            dict_buffer.as_mut_ptr().cast::<c_void>(),
             max_dict_size,
-            samples_buffer.as_ptr() as *const c_void,
+            samples_buffer.as_ptr().cast::<c_void>(),
             sample_sizes.as_ptr(),
-            sample_sizes.len() as u32,
-            &mut params
+            sample_count,
+            &raw mut params
         )
     };
 
     //Verify if any errors occured in the unsafe function.
+    // SAFETY: `ZDICT_isError` only compares its argument with zstd's
+    // error-code range and touches no memory.
     if unsafe { zstd_sys::ZDICT_isError(dict_size) } != 0 {
+        // SAFETY: `dict_size` is a zstd error code, checked just above, and
+        // `ZDICT_getErrorName` returns a pointer to a static, NUL-terminated
+        // string for every error code, which outlives the borrow here.
         let e = unsafe {
             std::ffi::CStr::from_ptr(zstd_sys::ZDICT_getErrorName(
                 dict_size)).to_string_lossy()
@@ -459,6 +534,9 @@ pub fn gen_zstd_opt_dict(
 
     /*Set final length of buffer so that Rust knows how much data is within
     it as the unsafe C function from zstd has written to it.*/
+    // SAFETY: on success zstd returns the dictionary's size, at most
+    // `max_dict_size` (the buffer's capacity), and has initialised that
+    // many bytes at the start of `dict_buffer`.
     unsafe {
         dict_buffer.set_len(dict_size);
     }
@@ -487,21 +565,32 @@ pub fn gen_zstd_opt_dict(
 ///
 /// # Type Parameters
 ///
-/// * `F`: A closure that takes a chunk hash and returns its corresponding byte
-///   data.
+/// * `F`: A closure that takes a slice of chunk hashes and returns the byte
+///   data of each, in the same order.
 /// * `H`: The hash type, which must be copyable and usable as a hash key.
 ///
 /// # Arguments
 ///
 /// * `sorted_hashes`: A sorted slice of all unique chunk hashes to process.
 /// * `total_data_size`: The total combined size in bytes of all unique chunks.
+/// * `target_dictionary_size`: The size of the dictionary to be trained,
+///   used to reserve space for the samples.
 /// * `get_chunk_data`: A callback function for retrieving a chunk's data by
-///   its hash.
+///   its hash and called with one hash at a time.
 ///
 /// # Returns
 ///
-/// A `Result` containing a `Vec<Vec<u8>>`, where each inner vector is the byte
-/// data of a selected sample chunk.
+/// The selected samples as one continuous buffer, in `sorted_hashes` order,
+/// and the size of each sample in that buffer, as the zstd trainers take
+/// them.
+///
+/// # Errors
+///
+/// - `ProcessingError::Cancelled` if the callback reports a cancellation,
+///   and `ProcessingError::External` with its message for any other error
+///   from it.
+/// - `ProcessingError::SampleGeneration` if the callback returns anything
+///   other than exactly one chunk for a hash.
 pub fn build_train_samples<E, F, H>(
     sorted_hashes: &[H],
     total_data_size: u64,
@@ -513,98 +602,97 @@ where
     F: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + ?Sized,
     H: Copy + Eq + Hash + Send + Sync + 'static,
 {
-    /*Max samples is 4.0 gigabytes. This is delibrately set to prevent an
-    overflow in the zstd library.*/
-    const MAX_SAMPLES_SIZE: usize = 4 * 1024 * 1024 * 1024;
+    sample_chunks(
+        sorted_hashes,
+        total_data_size,
+        target_dictionary_size,
+        MAX_SAMPLES_SIZE,
+        get_chunk_data,
+    )
+}
 
-    //Get and store the number of chunks in sorted hashes.
-    let number_of_chunks = sorted_hashes.len();
-
-    /*If the total data size is less than MAX_SAMPLES_SIZE, use all data to
-    generate the dictionary and return it.*/
-    if total_data_size as usize <= MAX_SAMPLES_SIZE {
-        //Reserve capacity to avoid reallocations.
-        let mut samples_buffer: Vec<u8> = Vec::with_capacity(
-            target_dictionary_size
-        );
-        let mut sample_sizes: Vec<usize> = Vec::with_capacity(
-            number_of_chunks
-        );
-        for hash in sorted_hashes {
-            let sample = &get_chunk_data(&[*hash])
-            .map_err(|e| {
-                if e.is_cancelled() {
-                    ProcessingError::Cancelled
-                } else {
-                    ProcessingError::External(e.to_string())
-                }
-            })?
-            .remove(0);
-
-            sample_sizes.push(sample.len());
-            samples_buffer.extend_from_slice(sample);
-        }
-
-        let mut total_sizes: usize = 0;
-
-        sample_sizes.iter().for_each(|size|{
-            total_sizes += size ;
-        });
-
-        return Ok((samples_buffer, sample_sizes));
-    }
-
-    //If the data size exceeds the limit, sample the chunks.
+/// [`build_train_samples`] with the size limit as a parameter, so the
+/// sampling path can be tested without gigabytes of data.
+///
+/// `max_samples_size` must not be 0.
+fn sample_chunks<E, F, H>(
+    sorted_hashes: &[H],
+    total_data_size: u64,
+    target_dictionary_size: usize,
+    max_samples_size: u64,
+    get_chunk_data: &F,
+) -> Result<(Vec<u8>, Vec<usize>), ProcessingError>
+where
+    E: std::error::Error + IsCancelled,
+    F: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + ?Sized,
+    H: Copy,
+{
+    /*Step through the hashes evenly so that the samples come from the whole
+    set, not only its start. Data that fits under the limit gets a step of
+    1 and uses every chunk.*/
+    let step = total_data_size.div_ceil(max_samples_size).max(1);
+    let step = usize::try_from(step).unwrap_or(usize::MAX);
 
     //Reserve capacity to avoid reallocations.
     let mut samples_buffer: Vec<u8> = Vec::with_capacity(
         target_dictionary_size
     );
     let mut sample_sizes: Vec<usize> = Vec::with_capacity(
-        number_of_chunks
+        sorted_hashes.len().div_ceil(step)
     );
 
     //Variable for tracking sum of the samples.
-    let mut current_samples_size: usize = 0;
+    let mut samples_size: u64 = 0;
 
-    /*Calculate a step value to sample evenly across all chunks.
-    This ensures we select chunks from the beginning, middle, and
-    end.*/
-    let step = (total_data_size as f64 / MAX_SAMPLES_SIZE as f64)
-        .ceil() as u64;
-    let step = step.max(1) as usize;
+    for hash in sorted_hashes.iter().step_by(step) {
+        let sample = fetch_sample(get_chunk_data, *hash)?;
 
-
-    for i in (0..number_of_chunks).step_by(step) {
-        if let Some(hash) = sorted_hashes.get(i) {
-            //Get a sample using the callback.
-            let sample = &get_chunk_data(&[*hash])
-            .map_err(|e| {
-                if e.is_cancelled() {
-                    ProcessingError::Cancelled
-                } else {
-                    ProcessingError::External(e.to_string())
-                }
-            })?
-            .remove(0);
-            let sample_size = sample.len();
-
-            //Check if adding the next sample would exceed the limit.
-            if current_samples_size + (sample_size) >
-                MAX_SAMPLES_SIZE {
-                    break; //Stop if the size limit is exceeded.
-                }
-
-            //Increment total sample size.
-            current_samples_size += sample_size;
-
-            //Add chunk to sample vectors.
-            sample_sizes.push(sample_size);
-            samples_buffer.extend_from_slice(sample);
+        /*Stop before the sample that would take the total over the limit.
+        Chunk sizes vary, so a step chosen from the total size can still
+        select slightly too much.*/
+        samples_size += sample.len() as u64;
+        if samples_size > max_samples_size {
+            break;
         }
+
+        sample_sizes.push(sample.len());
+        samples_buffer.extend_from_slice(&sample);
     }
 
     Ok((samples_buffer, sample_sizes))
+}
+
+/// Reads the chunk stored under `hash` with `get_chunk_data`, mapping the
+/// callback's errors to `ProcessingError`.
+fn fetch_sample<E, F, H>(
+    get_chunk_data: &F,
+    hash: H,
+) -> Result<Vec<u8>, ProcessingError>
+where
+    E: std::error::Error + IsCancelled,
+    F: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + ?Sized,
+    H: Copy,
+{
+    let chunks = get_chunk_data(&[hash]).map_err(|e| {
+        if e.is_cancelled() {
+            ProcessingError::Cancelled
+        } else {
+            ProcessingError::External(e.to_string())
+        }
+    })?;
+
+    /*A hash names exactly one chunk. The conversion from Vec to a
+    one-element array is the count check: it succeeds only when the Vec
+    holds exactly one chunk, and otherwise hands the Vec back so its length
+    can be reported. Any other count means the callback broke its
+    contract.*/
+    match <[Vec<u8>; 1]>::try_from(chunks) {
+        Ok([chunk]) => Ok(chunk),
+        Err(chunks) => Err(ProcessingError::SampleGeneration(format!(
+            "the chunk callback returned {} chunks for one hash",
+            chunks.len()
+        ))),
+    }
 }
 
 /// Estimates the total compressed size of the data store.
@@ -618,6 +706,10 @@ where
 /// size of all compressed chunks. This is used during the auto-tuning
 /// process to evaluate different parameters without creating a full archive.
 ///
+/// If no dictionary can be trained, as happens when the input has too
+/// little distinct data, the estimate is for compressing without one, which
+/// is what `ArchiveBuilder::build` does with the same input.
+///
 /// # Arguments
 ///
 /// * `sorted_hashes`: A sorted slice of all unique chunk hashes to process.
@@ -625,7 +717,9 @@ where
 /// * `worker_count`: The number of threads to use for parallel compression.
 /// * `dictionary_size`: The target size for the temporary dictionary.
 /// * `compression_level`: The Zstandard compression level to be used by the
-///   worker threads. When testing a maximum value of 7 is used.
+///   worker threads, capped at 7. The estimate only has to rank window and
+///   dictionary sizes, and level 7 picks much the same ones as higher levels
+///   for less CPU time.
 /// * `get_chunk_data`: A callback function for retrieving a chunk's data by
 ///   its hash.
 ///
@@ -633,7 +727,7 @@ where
 ///
 /// A `Result` which is:
 /// - `Ok(usize)` containing the total estimated compressed size in bytes.
-/// - `Err(SpriteShrinkError)` if dictionary creation or compression fails.
+/// - `Err(SpriteShrinkError)` if reading the chunks or compression fails.
 pub fn test_compression<E, F, H>(
     sorted_hashes: &[H],
     total_data_size: u64,
@@ -655,55 +749,34 @@ where
         &get_chunk_data
     )?;
 
-    //Build dictionary
+    /*Build dictionary. As in `ArchiveBuilder::build`, training fails when
+    there's too little distinct data (zstd's trainers need at least seven
+    unique chunks), and the chunks are then compressed without one. The
+    estimate matches what `build` would write.*/
     let dictionary = zstd::dict::from_continuous(
         &samples_for_dict,
         &sample_sizes,
         dictionary_size, //Max dictionary size in bytes
-        ).map_err(|e| ProcessingError::DictionaryError(e.to_string()))?;
+        ).unwrap_or_default();
 
-    //Callback wrapper for getting chunk data from host application.
-    let get_chunk_data_wrapper = move |hashes: &[H]| ->
-        Result<Vec<(H, Vec<u8>)>, E> {
-            let ret_chunks = get_chunk_data(hashes)?;
-            let mut chunk_pairs: Vec<(H, Vec<u8>)> =
-                Vec::with_capacity(ret_chunks.len());
-
-            for (index, chunk) in ret_chunks.iter().enumerate(){
-                chunk_pairs.push((hashes[index], chunk.clone()));
-            };
-
-            Ok(chunk_pairs)
-    };
-
-    //Arc(Mutex) for storing the total data size.
-    let final_size = Arc::new(Mutex::new(0usize));
-
-    /*Callback that doesn't store but adds the size of the chunk to
-    final_size.*/
-    let write_chunk_data_cb = {
-        let final_size_clone = Arc::clone(&final_size);
-        move |chunk: &[u8]| -> Result<(), E> {
-            let mut size = final_size_clone.lock().unwrap();
-            *size += chunk.len();
-            Ok(())
-        }
+    //Add up the compressed sizes instead of storing the data.
+    let mut compressed_size = 0usize;
+    let add_chunk_size = |chunk: &[u8]| -> Result<(), E> {
+        compressed_size += chunk.len();
+        Ok(())
     };
 
     //Run compression for data for test data.
-    let _chunk_index = compress_chunks(
+    compress_chunks(
         worker_count,
         &dictionary,
         sorted_hashes,
-        compression_level.max(7),
-        get_chunk_data_wrapper,
-        write_chunk_data_cb
+        compression_level.min(7),
+        &get_chunk_data,
+        add_chunk_size
     )?;
 
-    //Pull the finalize size from the Arc(Mutex)
-    let final_size_val = *final_size.lock().unwrap();
-
-    Ok((dictionary.len() as usize) + final_size_val)
+    Ok(dictionary.len() + compressed_size)
 }
 
 /// Calculates which chunks and what parts of them are needed to satisfy a
@@ -721,6 +794,14 @@ where
 /// - The `hash` of a required chunk.
 /// - The `start` and `end` byte range to copy from that chunk *after* it has
 ///   been decompressed.
+///
+/// A `seek_length` of 0 returns an empty `Vec`.
+///
+/// # Errors
+///
+/// Returns `ProcessingError::SeekOutOfBounds` if the requested range ends
+/// past the end of the file, including when `seek_offset + seek_length`
+/// overflows a `u64`.
 pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     manifest: &FileManifestParent<H>,
     seek_offset: u64,
@@ -733,19 +814,24 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
         .sum();
 
     /*Using the calculated file size, if the seek request is beyond the file
-    size fail early.*/
-    if seek_offset + seek_length > original_file_size {
-        return Err(ProcessingError::SeekOutOfBounds(
-            "Seek request is outside the bounds of the original file."
-                .to_string(),
-        ).into());
+    size fail early. A request whose end doesn't fit in a u64 is beyond it
+    too.*/
+    let seek_end = seek_offset
+        .checked_add(seek_length)
+        .filter(|&end| end <= original_file_size)
+        .ok_or_else(|| ProcessingError::SeekOutOfBounds(format!(
+            "{seek_length} bytes at offset {seek_offset} in a \
+             {original_file_size}-byte file"
+        )))?;
+
+    /*A zero-length read needs no chunks. Without this, a request inside a
+    chunk would return that chunk with an empty range.*/
+    if seek_length == 0 {
+        return Ok(Vec::new());
     }
 
     //Prepare the return vector
     let mut required_chunks: Vec<SeekMetadata<H>> = Vec::new();
-
-    //Calculate the seek end for checking if each chunk is within that range.
-    let seek_end = seek_offset + seek_length;
 
     for chunk_meta in &manifest.chunk_metadata {
         //Calculate start offset of the chunk within the virtual file.
@@ -785,4 +871,834 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     }
 
     Ok(required_chunks)
+}
+
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        collections::HashMap, fmt::Write, io::{self, Cursor}, sync::mpsc,
+    };
+
+    use fastcdc::v2020::StreamCDC;
+    use proptest::{prelude::*, sample::Index};
+    use sprite_shrink_test_support::tiled_bytes;
+
+    use super::*;
+
+    /// Pseudo-random bytes from a fixed-seed xorshift generator.
+    fn test_bytes(len: usize) -> Vec<u8> {
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        (0..len)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                state.to_be_bytes()[0]
+            })
+            .collect()
+    }
+
+    // The CLI streams files through StreamCDC with these settings
+    // (`default.rs` and `optical.rs`). If they drift apart, the same file is
+    // cut differently depending on which path compressed it.
+    #[test]
+    fn chunk_data_matches_cli_stream_chunker() {
+        let window_size: u64 = 4096;
+        let file_data = FileData {
+            file_name: "test.bin".to_string(),
+            file_data: test_bytes(1 << 20),
+        };
+
+        let sizes = chunker_sizes(window_size).unwrap();
+        let in_memory: Vec<(u64, usize)> =
+            chunk_data(&file_data, SS_SEED, sizes)
+                .iter()
+                .map(|c| (u64::try_from(c.offset).unwrap(), c.length))
+                .collect();
+
+        let streamed: Vec<(u64, usize)> = StreamCDC::with_level_and_seed(
+            Cursor::new(&file_data.file_data),
+            u32::try_from(window_size / 4).unwrap(),
+            u32::try_from(window_size).unwrap(),
+            u32::try_from(window_size * 4).unwrap(),
+            Normalization::Level0,
+            SS_SEED,
+        )
+        .map(|c| {
+            let c = c.unwrap();
+            (c.offset, c.length)
+        })
+        .collect();
+
+        assert!(in_memory.len() > 100, "too few chunks to compare");
+        assert_eq!(in_memory, streamed);
+    }
+
+    fn file(file_data: Vec<u8>) -> FileData {
+        FileData { file_name: "test.bin".to_string(), file_data }
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").unwrap();
+            hex
+        })
+    }
+
+    #[test]
+    fn window_size_must_be_within_fastcdc_limits() {
+        for window_size in [MIN_WINDOW_SIZE, 2048, MAX_WINDOW_SIZE] {
+            let processed = process_file_in_memory(
+                file(test_bytes(4096)),
+                window_size,
+            );
+            assert!(
+                matches!(processed, Ok(Some(_))),
+                "window size {window_size}: {:?}",
+                processed.err()
+            );
+        }
+
+        // 2^34 + 2048 used to be truncated to a 2048-byte window.
+        let rejected = [
+            0,
+            MIN_WINDOW_SIZE - 1,
+            MAX_WINDOW_SIZE + 1,
+            u64::from(u32::MAX) + 1,
+            (1 << 34) + 2048,
+            u64::MAX,
+        ];
+        for window_size in rejected {
+            for len in [4096, 0] {
+                let processed =
+                    process_file_in_memory(file(test_bytes(len)), window_size);
+                assert!(
+                    matches!(
+                        processed,
+                        Err(SpriteShrinkError::Processing(
+                            ProcessingError::InvalidWindowSize(size)
+                        )) if size == window_size
+                    ),
+                    "window size {window_size}, {len} bytes: {:?}",
+                    processed.map(|data| data.is_some())
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_window_size_message_names_the_value_and_range() {
+        assert_eq!(
+            ProcessingError::InvalidWindowSize(100).to_string(),
+            "Window size 100 is outside the supported range of 256 to \
+             4194304 bytes"
+        );
+    }
+
+    #[test]
+    fn empty_file_is_skipped() {
+        let processed = process_file_in_memory(file(Vec::new()), 2048);
+        assert!(
+            matches!(processed, Ok(None)),
+            "{:?}",
+            processed.map(|data| data.is_some())
+        );
+    }
+
+    #[test]
+    fn verification_hash_is_sha_512() {
+        // The FIPS 180-2 test vectors.
+        assert_eq!(
+            hex(&generate_sha_512(b"")),
+            "cf83e1357eefb8bdf1542850d66d8007d620e4050b5715dc83f4a921d36ce9ce\
+             47d0d13c5d85f2b0ff8318d2877eec2f63b931bd47417a81a538327af927da3e"
+        );
+
+        let processed =
+            process_file_in_memory(file(b"abc".to_vec()), 2048).unwrap();
+        assert_eq!(
+            hex(&processed.unwrap().veri_hash),
+            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a\
+             2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f"
+        );
+    }
+
+    // Archives store these hashes, and new data only deduplicates against
+    // an existing archive if it hashes and chunks the same way. A failure
+    // here after a dependency upgrade means xxhash or FastCDC changed their
+    // output.
+    #[test]
+    fn chunk_hashes_are_pinned() {
+        assert_eq!(u64::from_bytes_with_seed(b""), 0xa63f_e93c_61f7_8d72);
+        assert_eq!(u64::from_bytes_with_seed(b"abc"), 0x8e4f_aaf4_2353_5806);
+        assert_eq!(
+            u128::from_bytes_with_seed(b""),
+            0xd8d4_5ad7_f57e_c110_9b90_b1dd_4d15_9b1c
+        );
+        assert_eq!(
+            u128::from_bytes_with_seed(b"abc"),
+            0xef42_d376_4298_be2f_8e4f_aaf4_2353_5806
+        );
+    }
+
+    #[test]
+    fn chunk_boundaries_are_pinned() {
+        let processed =
+            process_file_in_memory(file(test_bytes(16 * 1024)), 1024)
+                .unwrap()
+                .unwrap();
+        let lengths: Vec<usize> =
+            processed.chunks.iter().map(|chunk| chunk.length).collect();
+
+        assert_eq!(
+            lengths,
+            [
+                464, 725, 1078, 886, 654, 2545, 1000, 1182, 1058, 2618, 1254,
+                333, 675, 318, 1594
+            ]
+        );
+    }
+
+    /// Checks that `processed`'s chunks tile the file in order, within the
+    /// window's size bounds, and that the manifest built from them hashes
+    /// and locates each chunk's bytes.
+    fn assert_chunks_tile_the_file<H: Hashable>(
+        processed: &ProcessedFileData,
+        window_size: u64,
+    ) -> Result<(), TestCaseError> {
+        let data = &processed.file_data;
+        let (min_size, _, max_size) = chunker_sizes(window_size)
+            .map_err(|err| TestCaseError::fail(err.to_string()))?;
+        // FastCDC tests two bytes per step from `min_size / 2 * 2`, so an
+        // odd minimum can give a chunk one byte shorter.
+        let min_size = min_size as usize / 2 * 2;
+        let max_size = max_size as usize;
+
+        let mut offset = 0;
+        for (index, chunk) in processed.chunks.iter().enumerate() {
+            prop_assert_eq!(chunk.offset, offset);
+            prop_assert!(chunk.length <= max_size, "{chunk:?}");
+            // Only the last chunk may end short, at the end of the file.
+            if index + 1 < processed.chunks.len() {
+                prop_assert!(chunk.length >= min_size, "{chunk:?}");
+            }
+            offset += chunk.length;
+        }
+        prop_assert_eq!(offset, data.len());
+
+        let (manifest, chunk_list) =
+            create_file_manifest_and_chunks::<H>(data, &processed.chunks);
+        prop_assert_eq!(manifest.chunk_count, processed.chunks.len() as u64);
+        prop_assert_eq!(manifest.chunk_metadata.len(), processed.chunks.len());
+        prop_assert_eq!(chunk_list.len(), processed.chunks.len());
+
+        let entries = processed
+            .chunks
+            .iter()
+            .zip(&manifest.chunk_metadata)
+            .zip(&chunk_list);
+        for ((chunk, meta), (hash, bytes)) in entries {
+            let expected = &data[chunk.offset..chunk.offset + chunk.length];
+            prop_assert_eq!(meta.offset, chunk.offset as u64);
+            prop_assert_eq!(meta.length as usize, chunk.length);
+            prop_assert_eq!(meta.hash, H::from_bytes_with_seed(expected));
+            prop_assert_eq!(*hash, meta.hash);
+            prop_assert_eq!(bytes.as_slice(), expected);
+        }
+        Ok(())
+    }
+
+    type ChunkResult = Result<Vec<Vec<u8>>, SpriteShrinkError>;
+
+    /// A file chunked for verification: its manifest, its SHA-512 and the
+    /// bytes of each chunk by hash.
+    struct StoredFile {
+        manifest: FileManifestParent<u64>,
+        veri_hash: [u8; 64],
+        chunks: HashMap<u64, Vec<u8>>,
+    }
+
+    /// `test_bytes(len)`, chunked with the smallest window so it splits
+    /// into many chunks.
+    fn stored_file(len: usize) -> StoredFile {
+        let processed =
+            process_file_in_memory(file(test_bytes(len)), MIN_WINDOW_SIZE)
+                .unwrap()
+                .unwrap();
+        let (manifest, chunk_list) = create_file_manifest_and_chunks::<u64>(
+            &processed.file_data,
+            &processed.chunks,
+        );
+        StoredFile {
+            manifest,
+            veri_hash: processed.veri_hash,
+            chunks: chunk_list.into_iter().collect(),
+        }
+    }
+
+    /// A chunk callback that reads each requested chunk from `chunks`.
+    fn read_from(
+        chunks: HashMap<u64, Vec<u8>>,
+    ) -> impl Fn(&[u64]) -> ChunkResult + Send + Sync + 'static {
+        move |hashes| {
+            Ok(hashes.iter().map(|hash| chunks[hash].clone()).collect())
+        }
+    }
+
+    /// Verifies `stored` as "rom.bin", reading its chunks through `read`.
+    fn verify_with<D>(
+        stored: &StoredFile,
+        read: D,
+    ) -> Result<(), SpriteShrinkError>
+    where
+        D: Fn(&[u64]) -> ChunkResult + Send + Sync + 'static,
+    {
+        verify_single_file(
+            "rom.bin".to_string(),
+            &stored.manifest,
+            &stored.veri_hash,
+            read,
+            |_| {},
+        )
+    }
+
+    fn is_hash_mismatch(result: &Result<(), SpriteShrinkError>) -> bool {
+        matches!(
+            result,
+            Err(SpriteShrinkError::Processing(
+                ProcessingError::HashMismatchError(title)
+            )) if title == "rom.bin"
+        )
+    }
+
+    #[test]
+    fn verify_accepts_the_original_chunks_and_reports_progress() {
+        let stored = stored_file(64 * 1024);
+        // More than two of the callback's 64-chunk batches.
+        assert!(stored.manifest.chunk_count > 128, "too few chunks");
+
+        let (requested_tx, requested_rx) = mpsc::channel();
+        let read = read_from(stored.chunks.clone());
+        let read = move |hashes: &[u64]| {
+            requested_tx.send(hashes.to_vec()).unwrap();
+            read(hashes)
+        };
+        let (progress_tx, progress_rx) = mpsc::channel();
+        verify_single_file(
+            "rom.bin".to_string(),
+            &stored.manifest,
+            &stored.veri_hash,
+            read,
+            move |bytes| progress_tx.send(bytes).unwrap(),
+        )
+        .unwrap();
+
+        // Every chunk is read once, in file order, and reported as it's
+        // hashed.
+        let requested: Vec<u64> = requested_rx.into_iter().flatten().collect();
+        let progress: Vec<u64> = progress_rx.into_iter().collect();
+        let metadata = &stored.manifest.chunk_metadata;
+        assert_eq!(
+            requested,
+            metadata.iter().map(|meta| meta.hash).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            progress,
+            metadata
+                .iter()
+                .map(|meta| u64::from(meta.length))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(progress.iter().sum::<u64>(), 64 * 1024);
+    }
+
+    #[test]
+    fn verify_reports_a_changed_byte_with_the_file_title() {
+        let stored = stored_file(16 * 1024);
+        let mut chunks = stored.chunks.clone();
+        let middle = stored.manifest.chunk_metadata
+            [stored.manifest.chunk_metadata.len() / 2]
+            .hash;
+        chunks.get_mut(&middle).unwrap()[0] ^= 1;
+
+        let result = verify_with(&stored, read_from(chunks));
+        assert!(is_hash_mismatch(&result), "{result:?}");
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Verification failed for file: rom.bin"
+        );
+    }
+
+    // The callback returning the wrong number of chunks changes the bytes
+    // hashed, so it fails verification instead of hanging or panicking.
+    #[test]
+    fn verify_reports_missing_or_extra_chunk_data_as_a_mismatch() {
+        let stored = stored_file(16 * 1024);
+
+        let read = read_from(stored.chunks.clone());
+        let missing = move |hashes: &[u64]| {
+            read(hashes).map(|mut chunks| {
+                chunks.pop();
+                chunks
+            })
+        };
+        let result = verify_with(&stored, missing);
+        assert!(is_hash_mismatch(&result), "{result:?}");
+
+        let read = read_from(stored.chunks.clone());
+        let extra = move |hashes: &[u64]| {
+            read(hashes).map(|mut chunks| {
+                chunks.push(b"extra".to_vec());
+                chunks
+            })
+        };
+        let result = verify_with(&stored, extra);
+        assert!(is_hash_mismatch(&result), "{result:?}");
+    }
+
+    #[test]
+    fn verify_reports_cancellation_from_the_callback() {
+        let stored = stored_file(16 * 1024);
+
+        let result = verify_with(&stored, |_: &[u64]| -> ChunkResult {
+            Err(SpriteShrinkError::Cancelled)
+        });
+        assert!(
+            matches!(result, Err(SpriteShrinkError::Cancelled)),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_wraps_other_callback_errors() {
+        let stored = stored_file(16 * 1024);
+
+        let result = verify_with(&stored, |_: &[u64]| -> ChunkResult {
+            Err(io::Error::other("disk read failed").into())
+        });
+        assert!(
+            matches!(result, Err(SpriteShrinkError::External(_))),
+            "{result:?}"
+        );
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "An external error occurred: disk read failed"
+        );
+    }
+
+    #[test]
+    fn verify_reports_a_panicking_callback() {
+        let stored = stored_file(16 * 1024);
+
+        let result = verify_with(&stored, |_: &[u64]| -> ChunkResult {
+            panic!("callback panicked on purpose")
+        });
+        assert!(
+            matches!(
+                result,
+                Err(SpriteShrinkError::Processing(
+                    ProcessingError::ThreadPanic(_)
+                ))
+            ),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_compares_an_empty_manifest_with_the_hash_of_no_data() {
+        let empty = StoredFile {
+            manifest: manifest_of(&[]),
+            veri_hash: generate_sha_512(b""),
+            chunks: HashMap::new(),
+        };
+        let no_reads = |_: &[u64]| -> ChunkResult {
+            panic!("an empty manifest has no chunks to read")
+        };
+
+        verify_with(&empty, no_reads).unwrap();
+
+        let abc = StoredFile { veri_hash: generate_sha_512(b"abc"), ..empty };
+        let result = verify_with(&abc, no_reads);
+        assert!(is_hash_mismatch(&result), "{result:?}");
+    }
+
+    /// A manifest of contiguous chunks with the given lengths, each hashed
+    /// as its index.
+    fn manifest_of(lengths: &[u32]) -> FileManifestParent<u64> {
+        let mut offset = 0;
+        let chunk_metadata: Vec<SSAChunkMeta<u64>> = lengths
+            .iter()
+            .zip(0..)
+            .map(|(&length, hash)| {
+                let meta = SSAChunkMeta { hash, offset, length };
+                offset += u64::from(length);
+                meta
+            })
+            .collect();
+
+        FileManifestParent {
+            chunk_count: chunk_metadata.len() as u64,
+            chunk_metadata,
+        }
+    }
+
+    fn is_out_of_bounds<T>(result: &Result<T, SpriteShrinkError>) -> bool {
+        matches!(
+            result,
+            Err(SpriteShrinkError::Processing(
+                ProcessingError::SeekOutOfBounds(_)
+            ))
+        )
+    }
+
+    #[test]
+    fn seek_may_end_at_the_end_of_the_file_but_not_past_it() {
+        let manifest = manifest_of(&[10, 20, 30]);
+
+        assert_eq!(get_seek_chunks(&manifest, 0, 60).unwrap().len(), 3);
+        assert_eq!(
+            get_seek_chunks(&manifest, 50, 10).unwrap(),
+            [SeekMetadata::new(2, 20, 30)]
+        );
+        assert!(is_out_of_bounds(&get_seek_chunks(&manifest, 0, 61)));
+        assert!(is_out_of_bounds(&get_seek_chunks(&manifest, 60, 1)));
+        assert!(is_out_of_bounds(&get_seek_chunks(&manifest, 61, 0)));
+    }
+
+    #[test]
+    fn seek_whose_end_overflows_is_out_of_bounds() {
+        let manifest = manifest_of(&[10, 20, 30]);
+
+        let overflowing = [(u64::MAX, 1), (1, u64::MAX), (5, u64::MAX - 2)];
+        for (offset, length) in overflowing {
+            assert!(
+                is_out_of_bounds(&get_seek_chunks(&manifest, offset, length)),
+                "{length} bytes at {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn zero_length_seek_needs_no_chunks() {
+        let manifest = manifest_of(&[10, 20, 30]);
+
+        // Inside a chunk, on a boundary, and at the end of the file.
+        for offset in [0, 5, 10, 59, 60] {
+            assert_eq!(
+                get_seek_chunks(&manifest, offset, 0).unwrap(),
+                [],
+                "offset {offset}"
+            );
+        }
+        assert_eq!(get_seek_chunks(&manifest_of(&[]), 0, 0).unwrap(), []);
+    }
+
+    proptest! {
+        #[test]
+        fn chunks_tile_the_file_and_hash_their_bytes(
+            seed in 1..=u64::MAX,
+            len in 1..=64 * 1024_usize,
+            window_size in MIN_WINDOW_SIZE..=8 * 1024,
+        ) {
+            let processed = process_file_in_memory(
+                file(tiled_bytes(seed, len)),
+                window_size,
+            )
+            .unwrap()
+            .unwrap();
+
+            assert_chunks_tile_the_file::<u64>(&processed, window_size)?;
+            assert_chunks_tile_the_file::<u128>(&processed, window_size)?;
+        }
+
+        /// Joining the ranges `get_seek_chunks` returns reads exactly the
+        /// requested bytes, and every range it returns is needed.
+        #[test]
+        fn seek_chunks_cover_exactly_the_requested_range(
+            lengths in proptest::collection::vec(1..=64_u32, 0..16),
+            start in any::<Index>(),
+            len in any::<Index>(),
+        ) {
+            let manifest = manifest_of(&lengths);
+            let data = test_bytes(lengths.iter().map(|&l| l as usize).sum());
+            let offset = start.index(data.len() + 1);
+            let length = len.index(data.len() - offset + 1);
+
+            let seeks = get_seek_chunks(
+                &manifest,
+                offset as u64,
+                length as u64,
+            )
+            .unwrap();
+
+            let at = |n: u64| usize::try_from(n).unwrap();
+            let mut read = Vec::new();
+            for seek in &seeks {
+                prop_assert!(seek.start_offset < seek.end_offset, "{seek:?}");
+                let chunk_start =
+                    at(manifest.chunk_metadata[at(seek.hash)].offset);
+                read.extend_from_slice(
+                    &data[chunk_start + at(seek.start_offset)
+                        ..chunk_start + at(seek.end_offset)],
+                );
+            }
+            prop_assert_eq!(read, &data[offset..offset + length]);
+        }
+    }
+
+    /// Ten chunks of distinct sizes, keyed by hash 0 to 9. Chunk `i` is
+    /// `100 + i` bytes of the value `i`.
+    fn numbered_chunks() -> HashMap<u64, Vec<u8>> {
+        (0_u8..10)
+            .map(|i| (u64::from(i), vec![i; 100 + usize::from(i)]))
+            .collect()
+    }
+
+    /// Samples `chunks` in hash order with `sample_chunks`.
+    fn samples_of(
+        chunks: HashMap<u64, Vec<u8>>,
+        max_samples_size: u64,
+    ) -> (Vec<u8>, Vec<usize>) {
+        let mut hashes: Vec<u64> = chunks.keys().copied().collect();
+        hashes.sort_unstable();
+        let total = chunks.values().map(|c| c.len() as u64).sum();
+        sample_chunks(&hashes, total, 0, max_samples_size, &read_from(chunks))
+            .unwrap()
+    }
+
+    /// The chunks `numbered_chunks` stores under `hashes`, joined.
+    fn joined_chunks(hashes: &[u8]) -> Vec<u8> {
+        hashes
+            .iter()
+            .flat_map(|&i| vec![i; 100 + usize::from(i)])
+            .collect()
+    }
+
+    #[test]
+    fn samples_are_every_chunk_in_order_when_they_fit() {
+        let chunks = numbered_chunks();
+        let mut hashes: Vec<u64> = chunks.keys().copied().collect();
+        hashes.sort_unstable();
+        let total = chunks.values().map(|c| c.len() as u64).sum();
+
+        let (buffer, sizes) =
+            build_train_samples(&hashes, total, 4096, &read_from(chunks))
+                .unwrap();
+
+        let all: Vec<u8> = (0..10).collect();
+        assert_eq!(sizes, (100..110).collect::<Vec<usize>>());
+        assert_eq!(buffer, joined_chunks(&all));
+    }
+
+    #[test]
+    fn samples_step_through_the_hashes_when_over_the_limit() {
+        // 1045 bytes against a 400-byte limit gives a step of 3. Hashes 0,
+        // 3 and 6 add up to 309 bytes; 9 would take them to 418.
+        let (buffer, sizes) = samples_of(numbered_chunks(), 400);
+
+        assert_eq!(sizes, [100, 103, 106]);
+        assert_eq!(buffer, joined_chunks(&[0, 3, 6]));
+    }
+
+    #[test]
+    fn samples_end_exactly_at_the_limit() {
+        // A step of 3 again: 0, 3, 6 and 9 add up to exactly 418 bytes.
+        let (_, sizes) = samples_of(numbered_chunks(), 418);
+        assert_eq!(sizes, [100, 103, 106, 109]);
+    }
+
+    #[test]
+    fn samples_of_no_chunks_are_empty() {
+        let (buffer, sizes) = samples_of(HashMap::new(), 400);
+        assert!(buffer.is_empty() && sizes.is_empty());
+    }
+
+    #[test]
+    fn samples_need_exactly_one_chunk_per_hash() {
+        // Returning no chunks used to panic on `remove(0)`. A hash names one
+        // chunk, so a second chunk means the callback broke its contract;
+        // it used to be ignored.
+        for count in [0, 2] {
+            let result = build_train_samples(
+                &[1_u64, 2],
+                200,
+                4096,
+                &|_: &[u64]| -> ChunkResult { Ok(vec![vec![7; 100]; count]) },
+            );
+            let Err(ProcessingError::SampleGeneration(message)) = result
+            else {
+                panic!("{count} chunks per hash: {result:?}");
+            };
+            assert_eq!(
+                message,
+                format!(
+                    "the chunk callback returned {count} chunks for one hash"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn samples_report_cancellation_and_other_callback_errors() {
+        let cancelled = build_train_samples(
+            &[1_u64],
+            100,
+            4096,
+            &|_: &[u64]| -> ChunkResult { Err(SpriteShrinkError::Cancelled) },
+        );
+        assert!(
+            matches!(cancelled, Err(ProcessingError::Cancelled)),
+            "{cancelled:?}"
+        );
+
+        let failed = build_train_samples(
+            &[1_u64],
+            100,
+            4096,
+            &|_: &[u64]| -> ChunkResult {
+                Err(io::Error::other("disk read failed").into())
+            },
+        );
+        let Err(ProcessingError::External(message)) = failed else {
+            panic!("{failed:?}");
+        };
+        assert!(message.contains("disk read failed"), "{message}");
+    }
+
+    /// The unique chunks of a 256 KiB ROM-like file cut with a 1 KiB window:
+    /// enough distinct data to train a dictionary on.
+    fn rom_chunks() -> HashMap<u64, Vec<u8>> {
+        let processed = process_file_in_memory(
+            file(tiled_bytes(0x5EED_0007, 256 * 1024)),
+            1024,
+        )
+        .unwrap()
+        .unwrap();
+        create_file_manifest_and_chunks::<u64>(
+            &processed.file_data,
+            &processed.chunks,
+        )
+        .1
+        .into_iter()
+        .collect()
+    }
+
+    /// `rom_chunks` as `(sorted hashes, total size, chunks)`.
+    fn rom_store() -> (Vec<u64>, u64, HashMap<u64, Vec<u8>>) {
+        let chunks = rom_chunks();
+        let mut hashes: Vec<u64> = chunks.keys().copied().collect();
+        hashes.sort_unstable();
+        let total = chunks.values().map(|c| c.len() as u64).sum();
+        (hashes, total, chunks)
+    }
+
+    #[test]
+    fn opt_dictionary_trains_on_enough_samples() {
+        let (hashes, total, chunks) = rom_store();
+        let (buffer, sizes) =
+            build_train_samples(&hashes, total, 4096, &read_from(chunks))
+                .unwrap();
+
+        let dictionary =
+            gen_zstd_opt_dict(&buffer, &sizes, 4096, 1, 19).unwrap();
+        assert!(
+            !dictionary.is_empty() && dictionary.len() <= 4096,
+            "{} bytes",
+            dictionary.len()
+        );
+    }
+
+    #[test]
+    fn opt_dictionary_reports_too_little_sample_data() {
+        // zstd's trainers reject fewer than 5 training samples.
+        let buffer = tiled_bytes(1, 400);
+        for sizes in [vec![], vec![100; 4]] {
+            let used: usize = sizes.iter().sum();
+            let result =
+                gen_zstd_opt_dict(&buffer[..used], &sizes, 4096, 1, 19);
+            assert!(
+                matches!(result, Err(ProcessingError::DictionaryError(_))),
+                "{} samples: {result:?}",
+                sizes.len()
+            );
+        }
+    }
+
+    #[test]
+    fn opt_dictionary_rejects_sizes_that_do_not_match_the_buffer() {
+        // Sizes adding up to more than the buffer would have zstd read past
+        // its end. Fewer bytes than the buffer holds is rejected the same
+        // way, as `zstd::dict::from_continuous` does.
+        let buffer = tiled_bytes(1, 1000);
+        for sizes in [vec![100; 11], vec![100; 9], vec![usize::MAX, 2]] {
+            let result = gen_zstd_opt_dict(&buffer, &sizes, 4096, 1, 19);
+            let Err(ProcessingError::DictionaryError(message)) = result else {
+                panic!("sizes {sizes:?}: {result:?}");
+            };
+            assert_eq!(
+                message,
+                "the sample sizes don't add up to the 1000-byte sample buffer"
+            );
+        }
+    }
+
+    /// `test_compression` on `rom_store` with a 4 KiB dictionary.
+    fn estimate_rom_store(compression_level: i32) -> (usize, u64) {
+        let (hashes, total, chunks) = rom_store();
+        let estimate = test_compression(
+            &hashes,
+            total,
+            2,
+            4096,
+            compression_level,
+            read_from(chunks),
+        )
+        .unwrap();
+        (estimate, total)
+    }
+
+    #[test]
+    fn test_compression_estimates_less_than_repetitive_input() {
+        let (estimate, total) = estimate_rom_store(7);
+        assert!(estimate > 0, "estimate is 0");
+        assert!(
+            (estimate as u64) < total,
+            "estimate {estimate} for {total} bytes of input"
+        );
+    }
+
+    #[test]
+    fn test_compression_estimates_too_little_data_without_a_dictionary() {
+        // Two unique chunks are too few for zstd to train a dictionary on.
+        let chunks: HashMap<u64, Vec<u8>> = [
+            (1, tiled_bytes(0x5EED_3501, 1000)),
+            (2, tiled_bytes(0x5EED_3502, 1000)),
+        ]
+        .into();
+        let hashes = [1, 2];
+
+        let estimate =
+            test_compression(&hashes, 2000, 1, 4096, 7, read_from(chunks.clone()))
+                .unwrap();
+
+        // What `build` writes for the same input: each chunk compressed on
+        // its own, without a dictionary or the content size.
+        let mut compressor = zstd::bulk::Compressor::new(7).unwrap();
+        compressor.include_contentsize(false).unwrap();
+        let expected: usize = hashes
+            .iter()
+            .map(|hash| compressor.compress(&chunks[hash]).unwrap().len())
+            .sum();
+        assert_eq!(estimate, expected);
+    }
+
+    #[test]
+    fn test_compression_caps_the_level_at_7() {
+        let (at_7, _) = estimate_rom_store(7);
+        for level in [8, 19, 22] {
+            assert_eq!(estimate_rom_store(level).0, at_7, "level {level}");
+        }
+        assert_ne!(estimate_rom_store(1).0, at_7);
+    }
 }

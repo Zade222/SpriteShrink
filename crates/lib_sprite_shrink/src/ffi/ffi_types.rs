@@ -21,7 +21,7 @@ use std::{
 use libc::c_char;
 
 use crate::ffi::ffi_error_handling::{
-    FFICallbackStatus
+    FFICallbackStatus, FFIResult
 };
 
 use crate::lib_error_handling::{
@@ -29,7 +29,8 @@ use crate::lib_error_handling::{
 };
 
 use crate::lib_structs::{
-    ChunkLocation, FileManifestParent, SeekMetadata, SSAChunkMeta
+    ChunkLocation, FileHeader, FileManifestParent, SeekMetadata, SSAChunkMeta,
+    SSMCFormatData
 };
 
 use crate::processing::Hashable;
@@ -107,7 +108,8 @@ pub struct ArchiveBuilderU128 { _private: [u8; 0] }
 ///   struct entries.
 /// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
 /// * `sorted_hashes_array_ptr`: Pointer to a sorted array of all unique `u64`
-///   chunk hashes.
+///   chunk hashes. The library keeps its own copy, so the array can be freed
+///   once `archive_builder_new_u64` returns.
 /// * `sorted_hashes_len`: The number of elements in the
 ///   `sorted_hashes_array_ptr` array.
 /// * `file_count`: The total number of files being added to the archive.
@@ -116,11 +118,16 @@ pub struct ArchiveBuilderU128 { _private: [u8; 0] }
 /// * `user_data`: An opaque `void` pointer passed back to the C callbacks,
 ///   allowing the C side to maintain state.
 /// * `get_chunks_cb`: A C function pointer that the builder calls to request
-///   raw data for a set of hashes.
+///   raw data for a set of hashes. The array it fills and its buffers must
+///   stay valid until `free_chunks_cb` is called with them.
 /// * `free_chunks_cb`: A C function pointer to free the data array returned by
-///   `get_chunks_cb`.
+///   `get_chunks_cb`. Called once with each array `get_chunks_cb` filled
+///   successfully, after the library has copied it, on the same thread. It
+///   isn't called when `get_chunks_cb` fails or leaves the array null.
 /// * `write_comp_data_cb`: A C function pointer that the builder calls to
-///   write out the compressed archive data.
+///   write out the compressed archive data, once per chunk in order. Every
+///   chunk has been written when the build function returns, so a host
+///   that buffers its writes should flush them then.
 ///
 /// # Safety
 ///
@@ -152,7 +159,6 @@ pub struct ArchiveBuilderArgsU64 {
         user_data: *mut c_void,
         data: *const u8,
         data_len: usize,
-        is_flush: bool
     ) -> FFICallbackStatus,
 }
 
@@ -169,7 +175,9 @@ pub struct ArchiveBuilderArgsU64 {
 ///   [`FFIFileManifestParentU128`]  structs.
 /// * `manifest_len`: The number of elements in the `manifest_array_ptr` array.
 /// * `sorted_hashes_array_ptr`: Pointer to a sorted array of all unique `u128`
-///   chunk hashes. Each element is a [u8; 16] in little-endian order.
+///   chunk hashes. Each element is a [u8; 16] in little-endian order. The
+///   library keeps its own copy, so the array can be freed once
+///   `archive_builder_new_u128` returns.
 /// * `sorted_hashes_len`: The number of hashes in the
 ///   `sorted_hashes_array_ptr` array.
 /// * `file_count`: The total number of files being added to the archive.
@@ -178,11 +186,16 @@ pub struct ArchiveBuilderArgsU64 {
 /// * `user_data`: An opaque `void` pointer passed back to the C callbacks,
 ///   allowing the C side to maintain state.
 /// * `get_chunks_cb`: A C function pointer that the builder calls to request
-///   raw data for a set of hashes.
+///   raw data for a set of hashes. The array it fills and its buffers must
+///   stay valid until `free_chunks_cb` is called with them.
 /// * `free_chunks_cb`: A C function pointer to free the data array returned by
-///   `get_chunks_cb`.
+///   `get_chunks_cb`. Called once with each array `get_chunks_cb` filled
+///   successfully, after the library has copied it, on the same thread. It
+///   isn't called when `get_chunks_cb` fails or leaves the array null.
 /// * `write_comp_data_cb`: A C function pointer that the builder calls to
-///   write out the compressed archive data.
+///   write out the compressed archive data, once per chunk in order. Every
+///   chunk has been written when the build function returns, so a host
+///   that buffers its writes should flush them then.
 ///
 /// # Safety
 ///
@@ -214,7 +227,6 @@ pub struct ArchiveBuilderArgsU128 {
         user_data: *mut c_void,
         data: *const u8,
         data_len: usize,
-        is_flush: bool
     ) -> FFICallbackStatus,
 }
 
@@ -245,9 +257,8 @@ pub struct ArchiveBuilderArgsU128 {
 ///   `SpriteShrinkError` if something goes wrong.
 ///
 /// * `write_data` – A boxed closure of type `CallbackWriteData`.
-///   It receives a byte slice to write and a `bool` indicating whether the
-///   caller is requesting a flush. It returns `Result<(), SpriteShrinkError>`
-///   propagating any I/O‑related error.
+///   It receives a byte slice to write and returns
+///   `Result<(), SpriteShrinkError>`, propagating any I/O‑related error.
 pub struct BuilderCallbacks<H> {
     pub get_chunks: CallbackGetChunks<H>,
     pub write_data: CallbackWriteData,
@@ -266,10 +277,9 @@ pub type CallbackGetChunks<H> = Box<dyn Fn(&[H]) -> Result<Vec<Vec<u8>>,
 ///
 /// This boxed `dyn FnMut` trait object hides the concrete closure type,
 /// allowing the callback to be stored in a struct that is safe to pass across
-/// the FFI boundary. It takes a slice of bytes to write and a `bool`
-/// indicating whether this is a flush operation, and returns a
+/// the FFI boundary. It takes a slice of bytes to write and returns a
 /// `Result<(), SpriteShrinkError>`.
-pub type CallbackWriteData = Box<dyn FnMut(&[u8], bool) -> Result<(),
+pub type CallbackWriteData = Box<dyn FnMut(&[u8]) -> Result<(),
     SpriteShrinkError> + Send + Sync + 'static>;
 
 
@@ -368,59 +378,6 @@ pub struct FFIChunk{
     pub length: usize,
 }
 
-/// Represents a single entry in the archive's chunk index.
-///
-/// This struct maps a unique chunk hash to its physical location within the
-/// compressed data section of the archive. An array of these entries makes up
-/// the complete chunk index, which is essential for locating and decompressing
-/// chunk data during file extraction.
-///
-/// This is the FFI-safe equivalent of a `(H, ChunkLocation)` tuple.
-///
-/// # Type Parameters
-///
-/// * `H`: The generic hash type (e.g., `u64`, `u128`) used to identify the
-///   chunk.
-///
-/// # Fields
-///
-/// * `hash`: The unique deduplication hash of the data chunk.
-/// * `data`: An `FFIChunkLocation` struct specifying the offset and length of
-///   the compressed chunk data in the archive.
-#[repr(C)]
-pub struct FFIChunkIndexEntry<H> {
-    pub hash: H,
-    pub data: FFIChunkLocation,
-}
-
-/// An `FFIChunkIndexEntry` specialized for `u64` hashes.
-///
-/// This type is used in FFI functions that deal with chunk indices where the
-/// hash algorithm produces a 64-bit integer.
-pub type FFIChunkIndexEntryU64 = FFIChunkIndexEntry<u64>;
-
-
-/// An `FFIChunkIndexEntry` specialized for `u128` hashes.
-///
-/// This type is used in FFI functions that deal with chunk indices where the
-/// hash algorithm produces a 128-bit integer, represented on the FFI boundary
-/// as a [u8; 16] byte array in a U128Bytes struct.
-pub type FFIChunkIndexEntryU128 = FFIChunkIndexEntry<U128Bytes>;
-
-/// Converts a Rust-native tuple of a hash and its `ChunkLocation` into the
-/// FFI-safe `FFIChunkIndexEntry` struct.
-impl<H> From<(H, ChunkLocation)> for FFIChunkIndexEntry<H> {
-    fn from((hash, location): (H, ChunkLocation)) -> Self {
-        Self {
-            hash,
-            data: FFIChunkLocation {
-                offset: location.offset,
-                length: location.compressed_length,
-            },
-        }
-    }
-}
-
 /// Represents an array of byte vectors, used to pass multiple chunks of data
 /// across the FFI boundary.
 ///
@@ -439,21 +396,9 @@ impl<H> From<(H, ChunkLocation)> for FFIChunkIndexEntry<H> {
 ///
 /// # Memory Management
 ///
-/// The memory management contract for this struct is context-dependent,
-/// as it is used in different patterns across the FFI layer.
-///
-/// 1.  Rust Takes Ownership: In some functions (e.g., serialization),
-///     the C caller allocates memory for this struct and its contents, and
-///     Rust takes ownership, freeing the memory when it's done.
-/// 2.  Caller Retains Ownership: In other functions (e.g., archive
-///     building), the C caller allocates the memory and also remains
-///     responsible for freeing it, usually via a dedicated `free_...`
-///     callback provided to Rust.
-///
-/// **Warning:** Always refer to the documentation of the specific FFI
-/// function you are calling to understand the correct memory management
-/// policy. Assuming the wrong model will lead to memory leaks or
-/// double-free errors.
+/// The host allocates the array and its buffers with any allocator and
+/// keeps ownership. The library only reads and copies them, then hands the
+/// array back through the export's `free_chunks_cb`.
 #[repr(C)]
 pub struct FFIChunkDataArray {
     pub ptr: *mut FFIVecBytes,
@@ -665,21 +610,20 @@ impl<H> From<(
 ///
 /// # Fields
 ///
-/// * `filename`: A pointer to a null-terminated C string representing the
-///   original name of the file.
 /// * `chunk_metadata`: A pointer to a contiguous array of [`FFISSAChunkMeta`]
 ///   structs. This array is sorted by the chunk's original offset, ensuring
-///   correct file reconstruction.
+///   correct file reconstruction. It must not be null, even when
+///   `chunk_metadata_len` is 0.
 /// * `chunk_metadata_len`: The total number of `FFISSAChunkMeta` structs in
 ///   the `chunk_metadata` array.
 ///
 /// # Safety
 ///
 /// When this struct is created by Rust and passed to C, the C caller takes
-/// ownership of the memory pointed to by `filename` and `chunk_metadata`.
-/// This memory must be deallocated by calling the appropriate free function
-/// (e.g., `free_parsed_manifest_*` or
-/// `free_file_manifest_and_chunks_*`) to prevent memory leaks.
+/// ownership of the memory pointed to by `chunk_metadata`. This memory must
+/// be deallocated by calling the appropriate free function (e.g.,
+/// `free_serialized_output_*` or `free_file_manifest_and_chunks_*`) to
+/// prevent memory leaks.
 #[repr(C)]
 pub struct FFIFileManifestParent<H> {
     pub chunk_metadata: *const FFISSAChunkMeta<H>,
@@ -699,49 +643,6 @@ pub type FFIFileManifestParentU64 = FFIFileManifestParent<u64>;
 /// chunk hash algorithm produces a 128-bit integer, represented on the FFI
 /// boundary as a [u8; 16] byte array in a U128Bytes struct.
 pub type FFIFileManifestParentU128 = FFIFileManifestParent<U128Bytes>;
-
-/// FFI-safe struct for passing an array of keys from C to Rust.
-///
-/// * `ptr`: A pointer to the first element of a contiguous array of keys.
-/// * `len`: Number of elements in the array.
-/// * `cap`: Capacity of the allocated array.
-///
-/// # Memory Management
-///
-/// The C caller allocates the array and the key values.  When this struct is
-/// passed to Rust, Rust takes ownership of the buffer and will deallocate
-/// it when the `FFIKeyArray` is dropped.  The caller must **not** free the
-/// memory after the FFI call returns.
-///
-/// # Type Parameters
-///
-/// * `H` – hash type (`u64`, `u128`, …).  The key type is generic so the
-///   struct can be specialized for any hash size.
-///
-/// # Usage
-///
-/// In the serialization FFI, `get_keys_cb` fills a `FFIKeyArray` and the
-/// Rust side consumes it with `Vec::from_raw_parts`, yielding a `Vec<H>`
-/// that is automatically dropped.  If `len` is zero, `ptr` may be null.
-#[repr(C)]
-pub struct FFIKeyArray<H> {
-    pub ptr: *mut H,
-    pub len: usize,
-    pub cap: usize,
-}
-
-/// An `FFIKeyArray` specialized for `u64` hashes.
-///
-/// This type is used in FFI functions that deal with hash keys where the
-/// chunk hash algorithm produces a 64-bit integer.
-pub type FFIKeyArrayU64 = FFIKeyArray<u64>;
-
-/// An `FFIKeyArray` specialized for `u128` hashes.
-///
-/// This type is used in FFI functions that deal with hash keys where the
-/// chunk hash algorithm produces a 128-bit integer, represented on the FFI
-/// boundary as a [u8; 16] byte array in a U128Bytes struct.
-pub type FFIKeyArrayU128 = FFIKeyArray<U128Bytes>;
 
 // Converts a tuple containing a Rust-native `FileManifestParent` and raw
 // pointers for its heap-allocated fields into the FFI-safe
@@ -769,81 +670,66 @@ impl<H> From<(
     }
 }
 
-/// Converts a reference to an FFI-safe `FFIFileManifestParent` into the
-/// Rust-native `FileManifestParent` struct.
+/// Borrows the chunk metadata of a manifest received from a C caller.
 ///
-/// This is a crucial conversion for functions that receive manifest data from a
-/// C caller. It safely handles the reconstruction of Rust-native types, such
-/// as `String` and `Vec`, from the raw pointers provided in the FFI struct.
+/// # Errors
 ///
-/// # Safety
+/// Returns `FFIResult::NullArgument` if `chunk_metadata` is null, whatever
+/// the length, because a slice can't be built from a null pointer.
+fn chunk_metadata_slice<H>(
+    fmp: &FFIFileManifestParent<H>
+) -> Result<&[FFISSAChunkMeta<H>], FFIResult> {
+    if fmp.chunk_metadata.is_null() {
+        return Err(FFIResult::NullArgument);
+    }
+
+    // SAFETY: the pointer isn't null, and every export that takes a manifest
+    // requires its `chunk_metadata` to hold `chunk_metadata_len` readable
+    // elements for the duration of the call.
+    Ok(unsafe {
+        slice::from_raw_parts(fmp.chunk_metadata, fmp.chunk_metadata_len)
+    })
+}
+
+/// Copies an `FFIFileManifestParent` received from a C caller into the
+/// Rust-native `FileManifestParent`.
 ///
-/// This implementation contains an `unsafe` block because it dereferences raw
-/// pointers (`fmp.filename` and `fmp.chunk_metadata`). The caller must ensure
-/// that the `FFIFileManifestParent` instance contains valid, non-null pointers
-/// that are readable for their specified lengths for the duration of this
-/// conversion.
-impl<H> From<&FFIFileManifestParent<H>> for FileManifestParent<H>
+/// # Errors
+///
+/// Returns `FFIResult::NullArgument` if `chunk_metadata` is null.
+impl<H> TryFrom<&FFIFileManifestParent<H>> for FileManifestParent<H>
 where
     H: Copy,
 {
-    fn from(fmp: &FFIFileManifestParent<H>) -> Self {
-        unsafe{
-            /*Reconstruct the slice of chunk metadata from the raw pointer
-            and length.*/
-            let chunk_metadata_slice = slice::from_raw_parts(
-                fmp.chunk_metadata,
-                fmp.chunk_metadata_len
-            );
+    type Error = FFIResult;
 
-            /*Convert each FFI-safe `FFISSAChunkMeta` in the slice to its
-            Rust-native `SSAChunkMeta` equivalent and collect them into a Vec.*/
-            let chunk_metadata = chunk_metadata_slice
-                .iter()
-                .map(SSAChunkMeta::from)
-                .collect();
+    fn try_from(fmp: &FFIFileManifestParent<H>) -> Result<Self, FFIResult> {
+        let chunk_metadata = chunk_metadata_slice(fmp)?
+            .iter()
+            .map(SSAChunkMeta::from)
+            .collect();
 
-            //Construct the final Rust-native `FileManifestParent` struct.
-            FileManifestParent {
-                chunk_metadata,
-                chunk_count: fmp.chunk_metadata_len as u64
-            }
-        }
+        Ok(FileManifestParent {
+            chunk_metadata,
+            chunk_count: fmp.chunk_metadata_len as u64
+        })
     }
 }
 
-/// Converts an FFI-safe file manifest with a `[u8; 16]` hash into the internal
-/// Rust-native `FileManifestParent<u128>`.
+/// Copies an `FFIFileManifestParent` with `U128Bytes` hashes received from a
+/// C caller into the Rust-native `FileManifestParent<u128>`, reading each
+/// hash as little-endian.
 ///
-/// This implementation is a key part of the FFI boundary, allowing the core
-/// library to work with `u128` hash types while the C-compatible layer uses
-/// fixed-size byte arrays. It reconstructs the fully-owned Rust struct from
-/// the raw pointers and byte-array-based hashes provided by the FFI struct.
+/// # Errors
 ///
-/// The conversion process involves:
-/// 1.  Safely creating a Rust `String` from the raw C-string pointer for the
-///     filename.
-/// 2.  Reconstructing a slice of the FFI-safe chunk metadata.
-/// 3.  Iterating through the metadata slice and converting each `U128Bytes`
-///     struct [u8; 16] array hash into a `u128` value using
-///     `u128::from_le_bytes`, creating a `Vec` of internal
-///     `SSAChunkMeta<u128>` structs.
-///
-/// # Safety
-///
-/// This implementation is `unsafe` because it dereferences raw pointers
-/// received from C. The caller must ensure that the
-/// `FFIFileManifestParent` reference and all the pointers it contains
-/// (`filename` and `chunk_metadata`) are valid, non-null, and point to memory
-/// that is readable for their specified lengths for the duration of this call.
-impl From<&FFIFileManifestParent<U128Bytes>> for FileManifestParent<u128> {
-    fn from(fmp: &FFIFileManifestParent<U128Bytes>) -> Self {
-        let chunk_metadata_slice = unsafe {
-            slice::from_raw_parts(
-                fmp.chunk_metadata,
-                fmp.chunk_metadata_len)
-        };
-        let chunk_metadata = chunk_metadata_slice
+/// Returns `FFIResult::NullArgument` if `chunk_metadata` is null.
+impl TryFrom<&FFIFileManifestParent<U128Bytes>> for FileManifestParent<u128> {
+    type Error = FFIResult;
+
+    fn try_from(
+        fmp: &FFIFileManifestParent<U128Bytes>
+    ) -> Result<Self, FFIResult> {
+        let chunk_metadata = chunk_metadata_slice(fmp)?
             .iter()
             .map(|meta| crate::lib_structs::SSAChunkMeta {
                 hash: u128::from_le_bytes(meta.hash.bytes),
@@ -852,10 +738,10 @@ impl From<&FFIFileManifestParent<U128Bytes>> for FileManifestParent<u128> {
             })
             .collect();
 
-        FileManifestParent {
+        Ok(FileManifestParent {
             chunk_metadata,
             chunk_count: fmp.chunk_metadata_len as u64,
-        }
+        })
     }
 }
 
@@ -920,127 +806,6 @@ impl<H> From<(H, *mut u8, usize, usize)> for FFIHashedChunkData<H> {
             chunk_data,
             chunk_data_len,
             chunk_data_cap
-        }
-    }
-}
-
-/// Holds the result of parsing a serialized chunk index from an archive.
-///
-/// This struct is returned by the `parse_file_chunk_index_*` functions.
-/// It provides a C-compatible representation of the entire chunk index, which
-/// maps every unique chunk hash to its location within the archive's data
-/// section.
-///
-/// # Type Parameters
-///
-/// * `H`: The generic hash type (e.g., `u64`, `u128`) used in the chunk
-///   index.
-///
-/// # Fields
-///
-/// * `entries`: A pointer to the beginning of a contiguous array of
-///   [`FFIChunkIndexEntry`] structs.
-/// * `entries_len`: The total number of entries in the `entries` array.
-///
-/// # Safety
-///
-/// The C caller takes full ownership of the memory for this struct and the
-/// `entries` array it points to. To prevent a memory leak, the top-level
-/// pointer to this struct **must** be passed to the corresponding
-/// `free_parsed_chunk_index_*` function once it is no longer needed.
-#[repr(C)]
-pub struct FFIParsedChunkIndexArray<H> {
-    pub entries: *mut FFIChunkIndexEntry<H>,
-    pub entries_len: usize,
-    pub entries_cap: usize,
-}
-
-/// An `FFIParsedChunkIndexArray` specialized for `u64` hashes.
-///
-/// This type is returned by [`parse_file_chunk_index_u64`] and is the
-/// expected input for [`free_parsed_chunk_index_u64`]. It represents a
-/// complete chunk index where each chunk is identified by a 64-bit hash.
-pub type FFIParsedChunkIndexArrayU64 = FFIParsedChunkIndexArray<u64>;
-
-/// An `FFIParsedChunkIndexArray` specialized for `u128` hashes.
-///
-/// This type is returned by [`parse_file_chunk_index_u128`] and is the
-/// expected input for [`free_parsed_chunk_index_u128`]. It represents a
-/// complete chunk index where each chunk is identified by a 128-bit hash,
-/// represented on the FFI boundary as a [u8; 16] byte array in a U128Bytes
-/// struct.
-pub type FFIParsedChunkIndexArrayU128 = FFIParsedChunkIndexArray<U128Bytes>;
-
-// Converts a tuple containing a raw pointer to the entries and their length
-// into the FFI-safe `FFIParsedChunkIndexArray` struct.
-impl<H> From<(*mut FFIChunkIndexEntry<H>, usize, usize)> for
-FFIParsedChunkIndexArray<H> {
-    fn from(parts: (*mut FFIChunkIndexEntry<H>, usize, usize)) -> Self {
-        Self {
-            entries: parts.0,
-            entries_len: parts.1,
-            entries_cap: parts.2,
-        }
-    }
-}
-
-/// Holds the result of parsing a serialized file manifest from an archive.
-///
-/// This struct is returned by the `parse_file_metadata_*` functions and
-/// provides a C-compatible representation of the entire file manifest. It
-/// contains an array of [`FFIFileManifestParent`] structs, each describing a
-/// single file within the archive.
-///
-/// # Type Parameters
-///
-/// * `H`: The generic hash type (e.g., `u64`, `u128`) used in the chunk
-///   metadata within each manifest.
-///
-/// # Fields
-///
-/// * `manifests`: A pointer to the beginning of a contiguous array of
-///   [`FFIFileManifestParent`] structs.
-/// * `manifests_len`: The total number of manifest entries in the `manifests`
-///   array.
-///
-/// # Safety
-///
-/// The C caller takes full ownership of the memory for this struct and all the
-/// nested data it points to (the `manifests` array, and the internal pointers
-/// for filenames and chunk metadata within each manifest). To prevent
-/// significant memory leaks, the top-level pointer to this struct **must** be
-/// passed to the corresponding `free_parsed_manifest_*` function once it
-/// is no longer needed.
-#[repr(C)]
-pub struct FFIParsedManifestArray<H> {
-    pub manifests: *mut FFIFileManifestParent<H>,
-    pub manifests_len: usize,
-    pub manifests_cap: usize,
-}
-
-/// An `FFIParsedManifestArray` specialized for `u64` hashes.
-///
-/// This type is returned by [`parse_file_metadata_u64`] and is the
-/// expected input for [`free_parsed_manifest_u64`]. It represents a
-/// complete file manifest where each chunk is identified by a 64-bit hash.
-pub type FFIParsedManifestArrayU64 = FFIParsedManifestArray<u64>;
-
-/// An `FFIParsedManifestArray` specialized for `u128` hashes.
-///
-/// This type is returned by [`parse_file_metadata_u128`] and is the
-/// expected input for [`free_parsed_manifest_u128`]. It represents a
-/// complete file manifest where each chunk is identified by a 128-bit hash.
-pub type FFIParsedManifestArrayU128 = FFIParsedManifestArray<U128Bytes>;
-
-// Converts a tuple containing a raw pointer to the manifests and their
-// length into the FFI-safe `FFIParsedManifestArray` struct.
-impl<H> From<(*mut FFIFileManifestParent<H>, usize, usize)> for
-FFIParsedManifestArray<H> {
-    fn from(parts: (*mut FFIFileManifestParent<H>, usize, usize)) -> Self {
-        Self {
-            manifests: parts.0,
-            manifests_len: parts.1,
-            manifests_cap: parts.2,
         }
     }
 }
@@ -1266,11 +1031,12 @@ impl From<(*mut FFISeekChunkInfo<U128Bytes>, usize, usize)> for
 
 /// Holds all the serialized data prepared for the archive-building process.
 ///
-/// This struct is the output of the `serialize_uncompressed_data_ffi_*`
-/// functions. It bundles together all the necessary components—the file
-/// manifest, the chunk index, and the sorted list of unique hashes—into a
-/// single, C-compatible structure. This data is then passed to the
-/// `archive_builder_new_*` functions to begin the final archive construction.
+/// This struct is the output of the `serialize_uncompressed_data_*`
+/// functions. It bundles together all the necessary components—the table
+/// of contents, the file manifest, the chunk index, and the sorted list of
+/// unique hashes—into a single, C-compatible structure. This data is then
+/// passed to the `archive_builder_new_*` functions to begin the final
+/// archive construction.
 ///
 /// # Type Parameters
 ///
@@ -1279,14 +1045,14 @@ impl From<(*mut FFISeekChunkInfo<U128Bytes>, usize, usize)> for
 ///
 /// # Fields
 ///
+/// * `toc_ptr`: A pointer to an array of [`FFITocEntry`] structs, one per
+///   file, sorted by filename. This is the order the files are numbered in
+///   the archive.
+/// * `toc_len`: The number of entries in the `toc_ptr` array.
 /// * `ser_manifest_ptr`: A pointer to an array of [`FFIFileManifestParent`]
-///   structs, representing the complete, sorted file manifest.
+///   structs, one per file, in the same order as `toc_ptr`.
 /// * `ser_manifest_len`: The number of entries in the `ser_manifest_ptr`
 ///   array.
-/// * `ser_chunk_index_ptr`: A pointer to an array of [`FFIChunkIndexEntry`]
-///   structs, representing the complete, sorted chunk index.
-/// * `ser_chunk_index_len`: The number of entries in the
-///   `ser_chunk_index_ptr` array.
 /// * `sorted_hashes_ptr`: A pointer to a contiguous array of all unique chunk
 ///   hashes, sorted in a deterministic order.
 /// * `sorted_hashes_len`: The number of hashes in the `sorted_hashes_ptr`
@@ -1300,12 +1066,12 @@ impl From<(*mut FFISeekChunkInfo<U128Bytes>, usize, usize)> for
 /// `free_serialized_output_*` function once it is no longer needed.
 #[repr(C)]
 pub struct FFISerializedOutput<H> {
+    pub toc_ptr: *mut FFITocEntry,
+    pub toc_len: usize,
+    pub toc_cap: usize,
     pub ser_manifest_ptr: *mut FFIFileManifestParent<H>,
     pub ser_manifest_len: usize,
     pub ser_manifest_cap: usize,
-    pub ser_chunk_index_ptr: *mut FFIChunkIndexEntry<H>,
-    pub ser_chunk_index_len: usize,
-    pub ser_chunk_index_cap: usize,
     pub sorted_hashes_ptr: *const H,
     pub sorted_hashes_len: usize,
     pub sorted_hashes_cap: usize,
@@ -1313,177 +1079,88 @@ pub struct FFISerializedOutput<H> {
 
 /// An `FFISerializedOutput` struct specialized for `u64` hashes.
 ///
-/// This type is returned by [`serialize_uncompressed_data_ffi_u64`] and is
+/// This type is returned by [`serialize_uncompressed_data_u64`] and is
 /// the expected input for [`free_serialized_output_u64`]. It bundles all the
-/// necessary serialized data (manifest, chunk index, sorted hashes) for
-/// building an archive where chunks are identified by 64-bit hashes.
+/// necessary serialized data (table of contents, manifest, sorted hashes)
+/// for building an archive where chunks are identified by 64-bit hashes.
 pub type FFISerializedOutputU64 = FFISerializedOutput<u64>;
 
 /// An `FFISerializedOutput` struct specialized for `u128` hashes.
 ///
-/// This type is returned by [`serialize_uncompressed_data_ffi_u128`] and is
+/// This type is returned by [`serialize_uncompressed_data_u128`] and is
 /// the expected input for [`free_serialized_output_u128`]. It bundles all the
-/// necessary serialized data (manifest, chunk index, sorted hashes) for
-/// building an archive where chunks are identified by 128-bit hashes,
-/// represented on the FFI boundary as a [u8; 16] byte array in a U128Bytes
-/// struct.
+/// necessary serialized data (table of contents, manifest, sorted hashes)
+/// for building an archive where chunks are identified by 128-bit hashes,
+/// represented on the FFI boundary as a [u8; 16] byte array
+/// in a `U128Bytes` struct.
 pub type FFISerializedOutputU128 = FFISerializedOutput<U128Bytes>;
-
-/// Converts a tuple containing all the constituent raw pointers and lengths
-/// into the FFI-safe `FFISerializedOutput` struct.
-impl<H> From<(
-    *mut FFIFileManifestParent<H>,
-    usize,
-    usize,
-    *mut FFIChunkIndexEntry<H>,
-    usize,
-    usize,
-    *const H,
-    usize,
-    usize
-)> for FFISerializedOutput<H>{
-    fn from((
-        ser_manifest_ptr,
-        ser_manifest_len,
-        ser_manifest_cap,
-        ser_chunk_index_ptr,
-        ser_chunk_index_len,
-        ser_chunk_index_cap,
-        sorted_hashes_ptr,
-        sorted_hashes_len,
-        sorted_hashes_cap,
-    ): (
-        *mut FFIFileManifestParent<H>,
-        usize,
-        usize,
-        *mut FFIChunkIndexEntry<H>,
-        usize,
-        usize,
-        *const H,
-        usize,
-        usize)) -> Self {
-        Self {
-            ser_manifest_ptr,
-            ser_manifest_len,
-            ser_manifest_cap,
-            ser_chunk_index_ptr,
-            ser_chunk_index_len,
-            ser_chunk_index_cap,
-            sorted_hashes_ptr,
-            sorted_hashes_len,
-            sorted_hashes_cap,
-        }
-    }
-}
 
 /// Arguments passed to the FFI entry point that serialises uncompressed sprite
 /// data using 64bit hash keys.
 ///
 /// This struct is a thin, `#[repr(C)]`‑compatible container that carries
-/// pointers and callbacks required by the native (C) side of the library.
+/// the manifests and filenames from the native (C) side of the library.
 /// The public function `serialize_uncompressed_data_u64` validates the
-/// pointers, then forwards the data to the generic implementation
-/// `serialize_uncompressed_data_internal::<u64>`.
+/// pointers, then forwards the data to `serialize_uncompressed_data`.
 ///
 /// # Fields
 ///
 /// * `manifest_array_ptr` – Pointer to the first element of an array of
-///   `FFIFileManifestParentU64`. Each entry describes a file (its name and the
-///   list of chunk hashes that make up the file). The caller must guarantee
-///   that the array lives for the duration of the call and that the pointer is
-///   non‑null and properly aligned.
-/// * `manifest_len` – Number of elements in the `manifest_array_ptr` array.
-/// * `user_data` – Opaque pointer that is forwarded unchanged to the callbacks
-///   (`get_keys_cb` and `get_chunks_cb`). It can be used by the caller to
-///   store context such as a handle to a Rust object, a boxed closure, or any
-///   other state required by the callbacks. The pointer must be valid for the
-///   duration of the call and properly aligned.
-/// * `get_keys_cb` – Callback that the serializer invokes to obtain the list
-///   of hash keys (i.e., the set of unique 64bit hashes that will be
-///   looked up). The callback must fill `out_keys` with a `FFIKeyArrayU64`
-///   describing the keys and return `FFICallbackStatus::Ok` on success.
-/// * `get_chunks_cb` – Callback used to retrieve the actual chunk data for a
-///   batch of hashes supplied by the serializer.
-///   The caller should read `hashes_len` hashes from the `hashes` pointer,
-///   locate the corresponding chunk data, populate `out_chunks`, and return a
-///   status code.
+///   `FFIFileManifestParentU64`. Each entry lists the chunks that make up one
+///   file. The caller must guarantee that the array lives for the duration
+///   of the call and that the pointer is non‑null and properly aligned.
+/// * `filenames` – Pointer to an array of null-terminated UTF-8 strings, one
+///   per manifest: `filenames[i]` names the file `manifest_array_ptr[i]`
+///   describes. Names must be unique. Rust copies the strings and doesn't
+///   take ownership of them.
+/// * `manifest_len` – Number of elements in the `manifest_array_ptr` and
+///   `filenames` arrays.
 ///
 /// # Safety
 ///
-///   The fields contain raw pointers and unsafe callbacks. The caller must
+///   The fields contain raw pointers. The caller must
 ///   ensure that all pointers are non‑null, correctly aligned, and point to
 ///   memory that remains valid for the entire duration of the FFI call.
 ///   Violating these requirements may lead to undefined behavior.
 #[repr(C)]
 pub struct SerializeUncompressedDataArgsU64{
     pub manifest_array_ptr: *const FFIFileManifestParentU64,
+    pub filenames: *const *const c_char,
     pub manifest_len: usize,
-    pub user_data: *mut c_void,
-    pub get_keys_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        out_keys: *mut FFIKeyArrayU64,
-    ) -> FFICallbackStatus,
-    pub get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        hashes: *const u64,
-        hashes_len: usize,
-        out_chunks: *mut FFIChunkDataArray,
-    ) -> FFICallbackStatus,
 }
 
 /// Arguments passed to the FFI entry point that serialises uncompressed sprite
 /// data using 128bit hash keys.
 ///
 /// This struct is a thin, `#[repr(C)]`‑compatible container that carries
-/// pointers and callbacks required by the native (C) side of the library.
+/// the manifests and filenames from the native (C) side of the library.
 /// The public function `serialize_uncompressed_data_u128` validates the
-/// pointers, then forwards the data to the generic implementation
-/// `serialize_uncompressed_data_internal::<u128>`.
+/// pointers, then forwards the data to `serialize_uncompressed_data`.
 ///
 /// # Fields
 ///
 /// * `manifest_array_ptr` – Pointer to the first element of an array of
-///   `FFIFileManifestParentU128`. Each entry describes a file (its name and
-///   the list of chunk hashes that make up the file). The caller must
-///   guarantee that the array lives for the duration of the call and that the
-///   pointer is non‑null and properly aligned.
-/// * `manifest_len` – Number of elements in the `manifest_array_ptr` array.
-/// * `user_data` – Opaque pointer that is forwarded unchanged to the callbacks
-///   (`get_keys_cb` and `get_chunks_cb`). It can be used by the caller to
-///   store context such as a handle to a Rust object, a boxed closure, or any
-///   other state required by the callbacks. The pointer must be valid for the
-///   duration of the call and properly aligned.
-/// * `get_keys_cb` – Callback that the serializer invokes to obtain the list
-///   of hash keys (i.e., the set of unique 128bit hashes that will be
-///   looked up). The callback must fill `out_keys` with a `FFIKeyArrayU128`
-///   describing the keys and return `FFICallbackStatus::Ok` on success.
-/// * `get_chunks_cb` – Callback used to retrieve the actual chunk data for a
-///   batch of hashes supplied by the serializer.
-///   The caller should read `hashes_len` hashes from the `hashes` pointer,
-///   locate the corresponding chunk data, populate `out_chunks`, and return a
-///   status code.
+///   `FFIFileManifestParentU128`. Each entry lists the chunks that make up one
+///   file. The caller must guarantee that the array lives for the duration
+///   of the call and that the pointer is non‑null and properly aligned.
+/// * `filenames` – Pointer to an array of null-terminated UTF-8 strings, one
+///   per manifest: `filenames[i]` names the file `manifest_array_ptr[i]`
+///   describes. Names must be unique. Rust copies the strings and doesn't
+///   take ownership of them.
+/// * `manifest_len` – Number of elements in the `manifest_array_ptr` and
+///   `filenames` arrays.
 ///
 /// # Safety
 ///
-///   The fields contain raw pointers and unsafe callbacks. The caller must
+///   The fields contain raw pointers. The caller must
 ///   ensure that all pointers are non‑null, correctly aligned, and point to
 ///   memory that remains valid for the entire duration of the FFI call.
 ///   Violating these requirements may lead to undefined behavior.
 #[repr(C)]
 pub struct SerializeUncompressedDataArgsU128{
     pub manifest_array_ptr: *const FFIFileManifestParentU128,
+    pub filenames: *const *const c_char,
     pub manifest_len: usize,
-    pub user_data: *mut c_void,
-    pub get_keys_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        out_keys: *mut FFIKeyArrayU128,
-    ) -> FFICallbackStatus,
-    pub get_chunks_cb: unsafe extern "C" fn(
-        user_data: *mut c_void,
-        hashes: *const u8,
-        hashes_len: usize,
-        out_chunks: *mut FFIChunkDataArray,
-    ) -> FFICallbackStatus,
 }
 
 
@@ -1565,6 +1242,77 @@ impl<H: Copy> From<SSAChunkMeta<H>> for FFISSAChunkMeta<H> {
     }
 }
 
+/// FFI-safe equivalent of `SSMCTocEntry`: one file's entry in the archive's
+/// table of contents.
+///
+/// # Fields
+///
+/// * `filename`: A null-terminated C string holding the file's name.
+/// * `uncompressed_size`: The file's size in bytes before compression.
+///
+/// # Safety
+///
+/// When Rust returns these to C, Rust owns `filename`. It's freed by the
+/// free function for the struct that holds the entries, such as
+/// `free_serialized_output_*`, and must not be freed by the caller.
+///
+/// When C passes these to Rust, as with `build_ssmc_prefix_*`, Rust only
+/// reads `filename` and the caller keeps ownership.
+#[repr(C)]
+#[derive(Debug)]
+pub struct FFITocEntry {
+    pub filename: *mut c_char,
+    pub uncompressed_size: u64,
+}
+
+/// An SSMC archive's metadata, returned by `parse_ssmc_prefix_u64` and
+/// `parse_ssmc_prefix_u128`.
+///
+/// # Fields
+///
+/// * `header`, `format_data`: As stored in the archive, in the host's byte
+///   order.
+/// * `toc_ptr`, `toc_len`, `toc_cap`: The table of contents, one entry per
+///   file in the order the files are numbered.
+/// * `manifests_ptr`, `manifests_len`, `manifests_cap`: One manifest per
+///   file, in the same order as the table of contents.
+/// * `dictionary_ptr`, `dictionary_len`, `dictionary_cap`: The zstd
+///   dictionary the chunks were compressed with.
+/// * `chunk_index`: A handle for `lookup_chunk_location_u64` or
+///   `lookup_chunk_location_u128`, matching the parse function's suffix.
+///   The offsets it gives are positions in the archive file, so a host can
+///   seek straight to a chunk.
+///
+/// # Safety
+///
+/// Rust owns everything this struct points to, including `chunk_index`.
+/// Pass the struct to the matching `free_parsed_ssmc_*` function to free
+/// it, and don't use `chunk_index` after that.
+#[repr(C)]
+#[derive(Debug)]
+pub struct FFIParsedSSMC<H> {
+    pub header: FileHeader,
+    pub format_data: SSMCFormatData,
+    pub toc_ptr: *mut FFITocEntry,
+    pub toc_len: usize,
+    pub toc_cap: usize,
+    pub manifests_ptr: *mut FFIFileManifestParent<H>,
+    pub manifests_len: usize,
+    pub manifests_cap: usize,
+    pub dictionary_ptr: *mut u8,
+    pub dictionary_len: usize,
+    pub dictionary_cap: usize,
+    pub chunk_index: *mut c_void,
+}
+
+/// An `FFIParsedSSMC` for archives with `u64` chunk hashes, returned by
+/// `parse_ssmc_prefix_u64`.
+pub type FFIParsedSSMCU64 = FFIParsedSSMC<u64>;
+
+/// An `FFIParsedSSMC` for archives with `u128` chunk hashes, returned by
+/// `parse_ssmc_prefix_u128`. Each hash is a little-endian `U128Bytes`.
+pub type FFIParsedSSMCU128 = FFIParsedSSMC<U128Bytes>;
+
 
 /// A wrapper for a mutable C `void` pointer, used to pass user-defined
 /// context data across the FFI boundary.
@@ -1583,33 +1331,25 @@ pub struct FFIUserData(pub *mut c_void);
 
 /// Represents a C-compatible, heap-allocated byte vector.
 ///
-/// This struct is used to pass ownership of a dynamically sized byte array
-/// from C to Rust. It is a fundamental building block for more complex data
-/// structures, such as `FFIChunkDataArray`, which represents an array of these
-/// byte vectors.
+/// It is a building block for more complex data structures, such as
+/// `FFIChunkDataArray`, which represents an array of these byte vectors.
 ///
 /// # Fields
 ///
 /// * `ptr`: A raw pointer to the beginning of the heap-allocated byte array.
 /// * `len`: The number of bytes in the array pointed to by `ptr`.
+/// * `cap`: The allocated capacity, in bytes.
 ///
 /// # Memory Management
 ///
-/// The memory management contract for this struct is context-dependent,
-/// as it is used in different patterns across the FFI layer.
+/// Whoever allocated the bytes frees them:
 ///
-/// 1.  **Rust Takes Ownership**: In some functions (e.g., serialization),
-///     the C caller allocates memory for this struct and its contents, and
-///     Rust takes ownership, freeing the memory when it's done.
-/// 2.  Caller Retains Ownership: In other functions (e.g.,
-///     archive building), the C caller allocates the memory and also remains
-///     responsible for freeing it, usually via a dedicated `free_...`
-///     callback provided to Rust.
-///
-/// **Warning:** Always refer to the documentation of the specific FFI
-/// function you are calling to understand the correct memory management
-/// policy. Assuming the wrong model will lead to memory leaks or
-   /// double-free errors.
+/// 1.  Library-allocated, such as the prefix from `build_ssmc_prefix_u64`:
+///     the host frees it with the matching export, such as
+///     `free_ssmc_prefix`.
+/// 2.  Host-allocated, in an `FFIChunkDataArray` from a chunk callback: the
+///     library only reads and copies the bytes, and the host frees them in
+///     its `free_chunks_cb`.
 #[repr(C)]
 pub struct FFIVecBytes {
     pub ptr: *mut u8,
@@ -1637,17 +1377,19 @@ pub struct FFIVecBytes {
 ///   It can be used by the caller to store context (e.g., a Rust
 ///   `Arc<Mutex<…>>` or a raw pointer to a C struct). The parent application
 ///   never dereferences this pointer; it is only handed back to the callbacks.
-/// * `get_chunks_cb` – Callback invoked by the verifier when it needs to
-///   retrieve the raw chunk data for a set of hash values.
-///   It must return an `FFIChunkDataArray` describing a contiguous buffer that
-///   contains the requested chunk data. The returned buffer is owned by the
-///   caller and must remain valid until the next callback invocation.
-///   The callback receives:
-///   - `user_data`: the same pointer passed in this struct,
-///   - `hashes`: pointer to an array of `u128` hash identifiers,
-///   - `hashes_len`: length of the `hashes` array.
-/// * `progress_cb` – Optional progress callback. It is called periodically
-///   with the number of bytes processed so far.
+/// * `get_chunks_cb` – Called to fetch the raw data for a batch of hashes.
+///   It receives `user_data`, a pointer to `hashes_len` `u64` hashes, and
+///   `out_chunks`. On success it fills `out_chunks` with one `FFIVecBytes`
+///   per hash, in the order asked, and returns `CallbackOk`. The library
+///   only reads the buffers and copies them, so they can come from any
+///   allocator. The array and its buffers must stay valid until
+///   `free_chunks_cb` is called with them. Return `Error` or `Cancelled` to stop the verification.
+/// * `free_chunks_cb` – Called once with each array `get_chunks_cb` filled
+///   successfully, after the library has copied it, on the same thread.
+///   It frees the array and its buffers however the host allocated them.
+///   It isn't called when `get_chunks_cb` fails or leaves the array null.
+/// * `progress_cb` – Progress callback, which must not be null. It is called
+///   periodically with the number of bytes processed so far.
 ///
 /// # Safety
 ///
@@ -1657,6 +1399,7 @@ pub struct FFIVecBytes {
 /// callbacks themselves must also obey the FFI safety contract: they may not
 /// unwind across the FFI boundary and must not dereference any pointers other
 /// than those provided to them.
+#[repr(C)]
 pub struct VerifySingleFileArgsU64{
     pub filename: *const c_char,
     pub file_manifest_parent: *const FFIFileManifestParentU64,
@@ -1665,8 +1408,13 @@ pub struct VerifySingleFileArgsU64{
     pub get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
         hashes: *const u64,
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+    pub free_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        chunks: FFIChunkDataArray,
+    ),
     pub progress_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
         bytes_processed: u64
@@ -1693,18 +1441,20 @@ pub struct VerifySingleFileArgsU64{
 ///   It can be used by the caller to store context (e.g., a Rust
 ///   `Arc<Mutex<…>>` or a raw pointer to a C struct). The parent application
 ///   never dereferences this pointer; it is only handed back to the callbacks.
-/// * `get_chunks_cb`: Callback invoked by the verifier when it needs to
-///   retrieve the raw chunk data for a set of hash values.
-///   It must return an `FFIChunkDataArray` describing a contiguous buffer that
-///   contains the requested chunk data. The returned buffer is owned by the
-///   caller and must remain valid until the next callback invocation.
-///   The callback receives:
-///   - `user_data`: the same pointer passed in this struct,
-///   - `hashes`: pointer to an array of `u128` hash identifiers,
-///   - `hashes_len`: length of the `hashes` array.
-///
-/// * `progress_cb`: Optional progress callback. It is called periodically with
-///   the number of bytes processed so far.
+/// * `get_chunks_cb`: Called to fetch the raw data for a batch of hashes.
+///   It receives `user_data`, a pointer to `hashes_len` hashes, each 16
+///   little-endian bytes, and
+///   `out_chunks`. On success it fills `out_chunks` with one `FFIVecBytes`
+///   per hash, in the order asked, and returns `CallbackOk`. The library
+///   only reads the buffers and copies them, so they can come from any
+///   allocator. The array and its buffers must stay valid until
+///   `free_chunks_cb` is called with them. Return `Error` or `Cancelled` to stop the verification.
+/// * `free_chunks_cb`: Called once with each array `get_chunks_cb` filled
+///   successfully, after the library has copied it, on the same thread.
+///   It frees the array and its buffers however the host allocated them.
+///   It isn't called when `get_chunks_cb` fails or leaves the array null.
+/// * `progress_cb`: Progress callback, which must not be null. It is called
+///   periodically with the number of bytes processed so far.
 ///
 /// # Safety
 ///
@@ -1723,8 +1473,13 @@ pub struct VerifySingleFileArgsU128{
     pub get_chunks_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
         hashes: *const u8,
-        hashes_len: usize
-    ) -> FFIChunkDataArray,
+        hashes_len: usize,
+        out_chunks: *mut FFIChunkDataArray,
+    ) -> FFICallbackStatus,
+    pub free_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        chunks: FFIChunkDataArray,
+    ),
     pub progress_cb: unsafe extern "C" fn(
         user_data: *mut c_void,
         bytes_processed: u64
@@ -1830,14 +1585,17 @@ unsafe impl Sync for ThreadSafeUserData {}
 ///   worker threads. When testing a maximum value of 7 is used.
 /// * `user_data`: Opaque user‑supplied context that will be passed back to
 ///   the `get_chunks_cb` callback.
-/// * `get_chunks_cb`: A C-style callback function pointer to retrieve raw
-///   chunk data.
-///   The callback receives:
-///   - `user_data`: the opaque pointer supplied above,
-///   - `hashes`: pointer to the requested hash slice,
-///   - `hashes_len`: length of that slice,
-///   - `out_chunks`: pointer to an `FFIChunkDataArray` that the callback must
-///     fill
+/// * `get_chunks_cb`: Called to fetch the raw data for a batch of hashes.
+///   It receives `user_data`, a pointer to `hashes_len` hashes, and
+///   `out_chunks`. On success it fills `out_chunks` with one `FFIVecBytes`
+///   per hash, in the order asked, and returns `CallbackOk`. The library
+///   only reads the buffers and copies them, so they can come from any
+///   allocator. The array and its buffers must stay valid until
+///   `free_chunks_cb` is called with them. Return `Error` or `Cancelled` to stop the estimate.
+/// * `free_chunks_cb`: Called once with each array `get_chunks_cb` filled
+///   successfully, after the library has copied it, on the same thread.
+///   It frees the array and its buffers however the host allocated them.
+///   It isn't called when `get_chunks_cb` fails or leaves the array null.
 #[repr(C)]
 pub struct TestCompressionArgs<H> {
     pub total_data_size: u64,
@@ -1853,6 +1611,10 @@ pub struct TestCompressionArgs<H> {
         hashes_len: usize,
         out_chunks: *mut FFIChunkDataArray,
     ) -> FFICallbackStatus,
+    pub free_chunks_cb: unsafe extern "C" fn(
+        user_data: *mut c_void,
+        chunks: FFIChunkDataArray,
+    ),
 }
 
 /// Bundles all parameters for calling the `test_compression_u64` function.
@@ -1876,6 +1638,8 @@ pub struct TestCompressionArgs<H> {
 ///   `get_chunks_cb` callback, allowing the C side to maintain state.
 /// * `get_chunks_cb`: A C function pointer that the test runner calls to
 ///   request the raw data for a set of hashes.
+/// * `free_chunks_cb`: A C function pointer that frees each array
+///   `get_chunks_cb` filled, once the library has copied it.
 ///
 /// # Safety
 ///
@@ -1906,6 +1670,8 @@ pub type TestCompressionArgsU64 = TestCompressionArgs<u64>;
 ///   `get_chunks_cb` callback, allowing the C side to maintain state.
 /// * `get_chunks_cb`: A C function pointer that the test runner calls to
 ///   request the raw data for a set of hashes.
+/// * `free_chunks_cb`: A C function pointer that frees each array
+///   `get_chunks_cb` filled, once the library has copied it.
 ///
 /// # Safety
 ///

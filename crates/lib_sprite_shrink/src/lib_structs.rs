@@ -19,11 +19,79 @@ use serde::{Deserialize, Serialize};
 use zerocopy::{Immutable, IntoBytes, FromBytes};
 
 use crate::{
-    MAGIC_NUMBER, SUPPORTED_VERSION
+    MAGIC_NUMBER, SUPPORTED_VERSION,
+    lib_error_handling::SpriteShrinkError,
+    parsing::ParsingError,
+    serialization::SerializationError,
 };
 
 
 pub const SSMC_UID: u16 = 0x0000;
+
+/// The `algorithm` value in [`FileHeader`] for archives whose data is
+/// compressed with zstd.
+pub const ALGORITHM_ZSTD: u16 = 98;
+
+/// The `hash_type` value in [`FileHeader`] for archives whose chunks are
+/// identified by 64-bit xxHash3 hashes (`u64`).
+pub const HASH_TYPE_XXH3_64: u8 = 1;
+
+/// The `hash_type` value in [`FileHeader`] for archives whose chunks are
+/// identified by 128-bit xxHash3 hashes (`u128`).
+pub const HASH_TYPE_XXH3_128: u8 = 2;
+
+/// A hash type this version can read and write, as recorded in the
+/// [`FileHeader`] `hash_type` byte.
+///
+/// The header keeps the raw `u8`: a corrupt archive or a C host can put any
+/// value there, which an enum field can't hold. Use `HashType::try_from` to
+/// check it. A new variant must also be added to [`HashType::ALL`], which
+/// the checks and error messages are built from.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HashType {
+    /// 64-bit xxHash3, for `u64` chunk hashes.
+    Xxh3_64 = HASH_TYPE_XXH3_64,
+    /// 128-bit xxHash3, for `u128` chunk hashes.
+    Xxh3_128 = HASH_TYPE_XXH3_128,
+}
+
+impl HashType {
+    /// Every supported hash type, in ID order.
+    pub const ALL: [Self; 2] = [Self::Xxh3_64, Self::Xxh3_128];
+
+    /// The value stored in the header's `hash_type` byte.
+    #[must_use]
+    pub const fn id(self) -> u8 {
+        self as u8
+    }
+
+    /// The hash's name, for messages.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Xxh3_64 => "xxh3_64",
+            Self::Xxh3_128 => "xxh3_128",
+        }
+    }
+}
+
+/// Checks a header `hash_type` byte.
+///
+/// # Errors
+///
+/// Returns `ParsingError::UnsupportedHashType` if `id` isn't the ID of any
+/// [`HashType`].
+impl TryFrom<u8> for HashType {
+    type Error = SpriteShrinkError;
+
+    fn try_from(id: u8) -> Result<Self, Self::Error> {
+        Self::ALL
+            .into_iter()
+            .find(|hash_type| hash_type.id() == id)
+            .ok_or_else(|| ParsingError::UnsupportedHashType(id).into())
+    }
+}
 
 /// Represents the location of a data chunk within the archive.
 ///
@@ -43,7 +111,23 @@ pub struct ChunkLocation {
     pub compressed_length: u32,
 }
 
-
+/// The compressed sections that [`ArchiveBuilder::build`] produces, ready to
+/// be placed in an archive's metadata prefix.
+///
+/// The compressed chunk data isn't included: `build` hands it to the
+/// caller's write callback as it's produced.
+///
+/// # Fields
+///
+/// * `dictionary`: The zstd dictionary the chunks were compressed with.
+///   Empty when no dictionary could be trained from the input.
+/// * `dictionary_size`: The length of `dictionary` in bytes.
+/// * `enc_chunk_index`: The bitcode-encoded chunk index, mapping each chunk
+///   hash to its location in the compressed data.
+/// * `enc_chunk_index_size`: The length of `enc_chunk_index` in bytes.
+///
+/// [`ArchiveBuilder::build`]: crate::ArchiveBuilder::build
+#[derive(Clone, Debug)]
 pub struct CompressionResult {
     pub dictionary: Vec<u8>,
     pub dictionary_size: u64,
@@ -67,7 +151,7 @@ pub struct CompressionResult {
 /// * `algorithm`: Numerical value representing the compression used on the
 ///   compressed data.
 /// * `hash_type`: Numerical value representing the hash type used when
-///   the data was hashed. 1 = xxhash3_64, 2 = xxhash3_128
+///   the data was hashed: [`HASH_TYPE_XXH3_64`] or [`HASH_TYPE_XXH3_128`].
 /// * `_pad1`: Empty data padding to keep data aligned. Must be zero.
 /// * `pub format_id`: Field for specifying the ID of the format specific
 ///   comrpession that was used for making the archive.
@@ -80,7 +164,10 @@ pub struct CompressionResult {
 /// * `chunk_index_length`: The total length of the chunk index.
 /// * `data_offset`: The starting offset of the compressed file data.
 #[repr(C)]
-#[derive(FromBytes, IntoBytes, Immutable, Debug, Copy, Clone, Pod, Zeroable)]
+#[derive(
+    Clone, Copy, Debug, Eq, FromBytes, Immutable, IntoBytes, PartialEq, Pod,
+    Zeroable
+)]
 pub struct FileHeader {
     pub magic_num:          [u8; 8],
     pub file_version:       u32,
@@ -98,14 +185,45 @@ pub struct FileHeader {
 impl FileHeader {
     pub const HEADER_SIZE: u32 = mem::size_of::<FileHeader>() as u32;
 
+    /// Builds the header for an archive of `file_count` files whose encoded
+    /// table of contents is `enc_toc_length` bytes. The TOC directly follows
+    /// the header, and the format data directly follows the TOC.
+    ///
+    /// The counts are taken as `usize`, the lengths of the caller's buffers,
+    /// so the checks against the header's 32-bit fields happen here.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ParsingError::UnsupportedHashType` if `hash_type` isn't a
+    /// [`HashType`] ID, since no reader would accept the archive.
+    ///
+    /// Returns `SerializationError::ArchiveTooLarge` if `file_count` doesn't
+    /// fit in a `u32`, or the format data offset,
+    /// `HEADER_SIZE + enc_toc_length`, doesn't.
     pub fn build_file_header(
-        file_count: u32,
+        file_count: usize,
         algorithm_code: u16,
         hash_type: u8,
         format_id: u16,
-        enc_toc_length: u32,
-    ) -> FileHeader {
-        FileHeader {
+        enc_toc_length: usize,
+    ) -> Result<FileHeader, SpriteShrinkError> {
+        HashType::try_from(hash_type)?;
+
+        let file_count = u32::try_from(file_count).ok().ok_or_else(|| {
+            SerializationError::ArchiveTooLarge(format!("{file_count} files"))
+        })?;
+
+        let toc_too_large = || SerializationError::ArchiveTooLarge(format!(
+            "the table of contents is {enc_toc_length} bytes"
+        ));
+        let enc_toc_length = u32::try_from(enc_toc_length)
+            .ok()
+            .ok_or_else(toc_too_large)?;
+        let format_data_offset = Self::HEADER_SIZE
+            .checked_add(enc_toc_length)
+            .ok_or_else(toc_too_large)?;
+
+        Ok(FileHeader {
             magic_num:      MAGIC_NUMBER,
             file_version:   SUPPORTED_VERSION,
             file_count,
@@ -116,7 +234,53 @@ impl FileHeader {
             _pad2:          [0, 0],
             enc_toc_offset:     Self::HEADER_SIZE,
             enc_toc_length,
-            format_data_offset: Self::HEADER_SIZE + enc_toc_length
+            format_data_offset,
+        })
+    }
+
+    /// Returns the header as it's stored in an archive: the fields in
+    /// declaration order, with every multi-byte integer little-endian
+    /// whatever the host's byte order. The padding bytes are always written
+    /// as zero.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; size_of::<Self>()] {
+        bytemuck::cast(FileHeader {
+            magic_num:          self.magic_num,
+            file_version:       self.file_version.to_le(),
+            file_count:         self.file_count.to_le(),
+            algorithm:          self.algorithm.to_le(),
+            hash_type:          self.hash_type,
+            _pad1:              0,
+            format_id:          self.format_id.to_le(),
+            _pad2:              [0; 2],
+            enc_toc_offset:     self.enc_toc_offset.to_le(),
+            enc_toc_length:     self.enc_toc_length.to_le(),
+            format_data_offset: self.format_data_offset.to_le(),
+        })
+    }
+
+    /// Reads a header written by [`FileHeader::to_le_bytes`]. The bytes are
+    /// copied, so `bytes` needs no particular alignment.
+    ///
+    /// This only converts the bytes, and ignores the padding.
+    /// [`parse_file_header`] also checks the magic number and version.
+    ///
+    /// [`parse_file_header`]: crate::parse_file_header
+    #[must_use]
+    pub fn from_le_bytes(bytes: &[u8; size_of::<Self>()]) -> Self {
+        let raw: FileHeader = bytemuck::cast(*bytes);
+        FileHeader {
+            magic_num:          raw.magic_num,
+            file_version:       u32::from_le(raw.file_version),
+            file_count:         u32::from_le(raw.file_count),
+            algorithm:          u16::from_le(raw.algorithm),
+            hash_type:          raw.hash_type,
+            _pad1:              0,
+            format_id:          u16::from_le(raw.format_id),
+            _pad2:              [0; 2],
+            enc_toc_offset:     u32::from_le(raw.enc_toc_offset),
+            enc_toc_length:     u32::from_le(raw.enc_toc_length),
+            format_data_offset: u32::from_le(raw.format_data_offset),
         }
     }
 }
@@ -167,6 +331,73 @@ pub struct FileManifestParent<H> {
 pub struct FileRegion {
     pub offset: u64,
     pub length: u64,
+}
+
+impl FileRegion {
+    /// Converts both fields from native to little-endian byte order, like
+    /// `u64::to_le`. Used by the format data structs' `to_le_bytes`.
+    #[must_use]
+    pub fn to_le(region: Self) -> Self {
+        FileRegion {
+            offset: region.offset.to_le(),
+            length: region.length.to_le(),
+        }
+    }
+
+    /// Converts both fields from little-endian to native byte order, like
+    /// `u64::from_le`. Used by the format data structs' `from_le_bytes`.
+    #[must_use]
+    pub fn from_le(region: Self) -> Self {
+        FileRegion {
+            offset: u64::from_le(region.offset),
+            length: u64::from_le(region.length),
+        }
+    }
+
+    /// Returns the bytes this region covers in `bytes`, which must start at
+    /// the beginning of the archive. `section` names the region in the
+    /// error message.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ParsingError::SectionOutOfBounds` if the region ends past
+    /// the end of `bytes`, or its end doesn't fit in a `u64`.
+    pub fn bytes_in<'a>(
+        &self,
+        bytes: &'a [u8],
+        section: &str,
+    ) -> Result<&'a [u8], SpriteShrinkError> {
+        let range = self.offset.checked_add(self.length).and_then(|end| {
+            Some(usize::try_from(self.offset).ok()?..usize::try_from(end).ok()?)
+        });
+
+        range.and_then(|range| bytes.get(range)).ok_or_else(|| {
+            ParsingError::SectionOutOfBounds(format!(
+                "The {section} at offset {} with length {} doesn't fit in \
+                {} bytes.",
+                self.offset,
+                self.length,
+                bytes.len()
+            )).into()
+        })
+    }
+}
+
+/// The metadata of an SSMC archive, read from its prefix by
+/// [`parse_ssmc_prefix`].
+///
+/// [`parse_ssmc_prefix`]: crate::parse_ssmc_prefix
+#[derive(Clone, Debug)]
+pub struct ParsedSSMC<H> {
+    pub header:      FileHeader,
+    pub format_data: SSMCFormatData,
+    pub toc:         Vec<SSMCTocEntry>,
+    pub manifests:   Vec<FileManifestParent<H>>,
+    pub dictionary:  Vec<u8>,
+    /// Where each chunk is stored. Unlike the encoded index, each `offset`
+    /// is a position in the archive file, so a host can seek straight to
+    /// it.
+    pub chunk_index: HashMap<H, ChunkLocation>,
 }
 
 /// Holds the results of the initial file processing stage.
@@ -285,18 +516,13 @@ impl<H> SeekMetadata<H> {
 ///   per file in the archive. The vector is sorted by filename and each
 ///   file’s `chunk_metadata` slice is sorted by the original byte offset,
 ///   making it easy to rebuild files during extraction.
-/// * `chunk_index` – A map from each chunk hash (`H`) to its location
-///   (`ChunkLocation`) within the final data blob. This index is produced by
-///   `serialize_store` and is required for locating chunks when reading an
-///   archive.
 /// * `sorted_hashes` – The list of all unique chunk hashes, sorted in a
-///   deterministic order. The order is used both for generating `chunk_index`
-///   and for the later compression step that writes the actual chunk bytes.
+///   deterministic order. The compression step writes the chunks in this
+///   order.
 #[derive(Debug)]
 pub struct SerializedData<H>{
     pub ser_file_manifest: Vec<FileManifestParent<H>>,
     pub archive_toc: Vec<SSMCTocEntry>,
-    pub chunk_index: HashMap<H, ChunkLocation>,
     pub sorted_hashes: Vec<H>,
 }
 
@@ -306,24 +532,20 @@ pub struct SerializedData<H>{
 /// instance without having to manually initialise each field. The generic type
 /// `H` represents the hash type used throughout the archive and does not need
 /// to implement `Default` because the default instance only contains empty
-/// collections (`Vec` and `HashMap`).
+/// collections.
 ///
 /// # Fields
 /// * `ser_file_manifest`: an empty `Vec<FileManifestParent<H>>`.
 ///   This will later hold a sorted list of file manifests needed to
 ///   reconstruct a file.
-/// * `chunk_index`: an empty `HashMap<H, ChunkLocation>`.
-///   The index maps each chunk hash to its location in the final data blob; it
-///   is filled by `serialize_store` once the chunk data is known.
 /// * `sorted_hashes`: an empty `Vec<H>`.
 ///   This vector will be populated with all unique chunk hashes in a
-///   deterministic order before the chunk index is built.
+///   deterministic order.
 impl<H> Default for SerializedData<H> {
     fn default() -> Self {
         SerializedData {
             ser_file_manifest: Vec::new(),
             archive_toc: Vec::new(),
-            chunk_index: HashMap::new(),
             sorted_hashes: Vec::new(),
         }
     }
@@ -350,7 +572,10 @@ pub struct SSAChunkMeta<H>{
 }
 
 #[repr(C)]
-#[derive(Copy, Clone, FromBytes, Immutable, IntoBytes, Pod, Zeroable)]
+#[derive(
+    Clone, Copy, Debug, Eq, FromBytes, Immutable, IntoBytes, PartialEq, Pod,
+    Zeroable
+)]
 pub struct SSMCFormatData {
     pub enc_manifest:       FileRegion,
     pub data_dictionary:    FileRegion,
@@ -388,6 +613,42 @@ impl SSMCFormatData {
                 length: enc_chunk_idx_length
             },
             data_offset,
+        }
+    }
+
+    /// Where the archive's metadata ends and the compressed data begins.
+    /// Every byte before this offset is part of the prefix that
+    /// [`build_ssmc_prefix`] returns, so a host that reads this far has
+    /// everything it needs to locate any chunk.
+    ///
+    /// [`build_ssmc_prefix`]: crate::build_ssmc_prefix
+    #[must_use]
+    pub fn metadata_prefix_end(&self) -> u64 {
+        self.data_offset
+    }
+
+    /// Returns the format data as it's stored in an archive, with every
+    /// integer little-endian whatever the host's byte order.
+    #[must_use]
+    pub fn to_le_bytes(&self) -> [u8; size_of::<Self>()] {
+        bytemuck::cast(SSMCFormatData {
+            enc_manifest:    FileRegion::to_le(self.enc_manifest),
+            data_dictionary: FileRegion::to_le(self.data_dictionary),
+            enc_chunk_index: FileRegion::to_le(self.enc_chunk_index),
+            data_offset:     self.data_offset.to_le(),
+        })
+    }
+
+    /// Reads format data written by [`SSMCFormatData::to_le_bytes`]. The
+    /// bytes are copied, so `bytes` needs no particular alignment.
+    #[must_use]
+    pub fn from_le_bytes(bytes: &[u8; size_of::<Self>()]) -> Self {
+        let raw: SSMCFormatData = bytemuck::cast(*bytes);
+        SSMCFormatData {
+            enc_manifest:    FileRegion::from_le(raw.enc_manifest),
+            data_dictionary: FileRegion::from_le(raw.data_dictionary),
+            enc_chunk_index: FileRegion::from_le(raw.enc_chunk_index),
+            data_offset:     u64::from_le(raw.data_offset),
         }
     }
 }

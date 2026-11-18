@@ -25,6 +25,8 @@ Both formats use a common **Header** and **Table of Contents (TOC)** structure, 
 
 ## 2. Common Structures
 
+All multi-byte integers in the fixed-size structures (the File Header, File Region and Format Data blocks) are stored little-endian, and padding bytes are written as zero. The variable-length sections in §4 (TOC, manifests and indexes) are encoded with bitcode 0.6, which also stores integers little-endian. A change of bitcode version therefore counts as a change to the archive format. The dictionary, subheader table, exception data and data blobs are raw bytes.
+
 ### 2.1. File Header (Fixed Size: 36 Bytes)
 
 The header appears at offset 0. It identifies the file type, version, and the format used (SSMC vs. SSMD). It points to the Table of Contents and the Format Data block.
@@ -32,9 +34,9 @@ The header appears at offset 0. It identifies the file type, version, and the fo
 | Offset | Type | Field | Description |
 | :--- | :--- | :--- | :--- |
 | 0 | `[u8; 8]` | `magic_num` | Magic bytes. Default: `b"SSARCHV1"` |
-| 8 | `u32` | `file_version` | Archive format version (e.g., `0x00020000`). |
+| 8 | `u32` | `file_version` | Archive format version: major in the high 16 bits, minor in the low 16 (e.g., `0x00020001` = 2.1). Readers accept the versions from their major version's x.0 up to their own, and reject a newer version or a different major version. |
 | 12 | `u32` | `file_count` | Total number of files/discs in the archive. |
-| 16 | `u16` | `algorithm` | Compresson algorithm ID (e.g., 98 = Zstd). |
+| 16 | `u16` | `algorithm` | Compression algorithm ID (e.g., 98 = Zstd). |
 | 18 | `u8` | `hash_type` | Hash type ID (e.g., 1 = xxhash3_64, 2 = xxhash3_128). |
 | 19 | `u8` | `_pad1` | Padding (Zero). |
 | 20 | `u16` | `format_id` | **Format Identifier**: <br>`0x0000` = SSMC (Multi-Cart) <br>`0xd541` = SSMD (Multi-Disc) |
@@ -67,7 +69,7 @@ Used for standard file archives.
 | `FileRegion` | `enc_manifest` | Location of the compressed File Manifest. |
 | `FileRegion` | `data_dictionary` | Location of the compression dictionary. |
 | `FileRegion` | `enc_chunk_index` | Location of the compressed Chunk Index. |
-| `u64` | `data_offset` | Absolute offst where the Chunk Data Blob begins. |
+| `u64` | `data_offset` | Absolute offset where the Chunk Data Blob begins. |
 
 ### 3.2. SSMD Format Data (`format_id = 0xd541`)
 
@@ -101,9 +103,16 @@ A serialized vector containing basic metadata for listing archive contents witho
 *   **SSMD:** `Vec<SSMDTocEntry>`
   struct SSMDTocEntry {
       filename: String,
-      collection_id: u8, // Group ID for multi-disc sets
+      collection_id: u8, // Group ID for multi-disc sets, 0-254; 255 = none
       uncompressed_size: u64,
   }
+
+Each `filename` is the name extraction gives the file, so it must be a single file name that every supported platform accepts. Writers must not store, and readers reject, a name that:
+
+*   is empty, `.` or `..`
+*   contains `/`, `\`, `:` or a control character (Unicode category Cc)
+*   ends with `.` or a space
+*   is a Windows device name (`CON`, `PRN`, `AUX`, `NUL`, `COM0`-`COM9`, `LPT0`-`LPT9`, or `COM`/`LPT` followed by `¹`, `²` or `³`), in any case and with or without an extension or trailing spaces before it
 
 
 ### 4.2. SSMC Manifests & Indexes
@@ -119,7 +128,7 @@ A serialized vector containing basic metadata for listing archive contents witho
       offset: u64,
       length: u32,
   }
-*   **Chunk Index:** Serialized `HashMap<H, ChunkLocation>`.
+*   **Chunk Index:** Serialized `Vec<(H, ChunkLocation)>`, one entry per unique chunk.
   struct ChunkLocation {
       offset: u64,           // Relative to data_offset
       compressed_length: u32,
@@ -131,6 +140,7 @@ SSMD uses a complex manifest to reconstruct CD sectors.
 
 *   **Disc Manifest:** Serialized `Vec<DiscManifest<H>>`.
   struct DiscManifest<H> {
+      files: Vec<DiscFile>,               // CUE sheet layout (2.1 and later)
       lba_map: Vec<(u32, u32)>,           // Logical Block Address mapping
       rle_sector_map: RleSectorMap,       // Run-Length Encoded Sector Types
       audio_block_map: Vec<ContentBlock<H>>, // CD-DA Audio tracks
@@ -140,13 +150,50 @@ SSMD uses a complex manifest to reconstruct CD sectors.
       integrity_hash: u64,
   }
 
+  struct DiscFile {
+      name: String,          // File name from the CUE sheet's FILE line
+      sector_count: u32,     // Length in 2352-byte sectors
+      tracks: Vec<DiscTrack>,
+  }
+
+  struct DiscTrack {
+      number: u8,
+      track_type: TrackType, // Audio, Mode1_2352 or Mode2_2352
+      indices: Vec<DiscIndex>,
+      pregap: u32,           // PREGAP sectors not in the file; 0 = none
+      postgap: u32,          // POSTGAP sectors not in the file; 0 = none
+      area: DiscArea,        // SingleDensity or HighDensity (GD-ROM)
+  }
+
+  struct DiscIndex {
+      number: u8,
+      sector: u32,           // Sectors from the start of its file
+  }
+
+*   **Gaps and areas:** `pregap` and `postgap` come from the CUE sheet's
+    PREGAP and POSTGAP commands. Their sectors aren't in any file, so they
+    add nothing to the sector map; the sector headers after them jump, and
+    `lba_map` records the jump. `area` is `HighDensity` for the tracks of a
+    GD-ROM's high-density area (the sheet's `REM HIGH-DENSITY AREA`, which
+    starts at sector 45000) and `SingleDensity` otherwise, including every
+    track of a CD. Other CUE commands (FLAGS, CATALOG, ISRC, CD-Text, other
+    REM lines) aren't stored.
+
+*   **Manifest layout by version:** `files` was added in format 2.1.
+    bitcode stores no field names, so a reader picks the layout from the
+    header's `file_version`: from `0x00020001` the manifest starts with
+    `files`, and before it the manifest has every other field in the same
+    order. A reader rebuilds the CUE sheet from `files`, joining the files
+    into one image and moving each file's indices to where it starts. For
+    archives before 2.1, which have no layout, it infers the sheet from
+    the sector map.
 
 *   **Sector Types:**
     Common types include `Audio` (2352 bytes), `Mode1` (2048 bytes data), `Mode2Form1`, `Mode2Form2`.
 
 *   **Streams vs Blocks:**
     *   **Data (Mode1/Mode2):** Stored as a deduplicated stream of chunks (`data_stream_layout`), reconstructed using the `chunk_index`.
-    *   **Audio:** Stored as "blocks" (typically full tracks or large segments) compressed with FLAC, referenced by `audio_block_map` and `enc_audio_index`.
+    *   **Audio:** Stored as deduplicated blocks, each compressed with FLAC, referenced by `audio_block_map` and `enc_audio_index`. Each `ContentBlock` records its own sector count. The reference writer uses 16 sectors per block, with a shorter last block where a run of audio sectors ends.
 
 ## 5. Read Logic Summary
 
@@ -167,3 +214,18 @@ SSMD uses a complex manifest to reconstruct CD sectors.
     *   If Sector is Data: Fetch chunks from `data_offset`.
     *   If Sector is Audio: Fetch block from `audio_data`, decode FLAC.
     *   Apply Exceptions (ECC/EDC) from `exception_data` if needed.
+
+## 6. Reference Implementation
+
+The functions below write and read the layout in this document. They are the reference implementation: a host that writes or reads archives another way must produce and accept the same bytes.
+
+| Format | Writes the prefix | Reads the prefix |
+| :--- | :--- | :--- |
+| SSMC | `sprite_shrink::build_ssmc_prefix` | `sprite_shrink::parse_ssmc_prefix` |
+| SSMD | `sprite_shrink_cd::build_ssmd_prefix` | `sprite_shrink_cd::parse_ssmd_prefix` |
+
+The **prefix** is every byte from offset 0 up to the Format Data's `metadata_prefix_end()`: the header, TOC, Format Data and every section in §4. The writers return it, and the host appends the compressed data after it. For SSMC that is the chunk data blob. For SSMD it is the audio blob, then the data chunk blob. The readers take at least the prefix and check every section's offset and length against its end.
+
+A host that reads the header and Format Data first, to learn how many bytes the prefix needs, can use `sprite_shrink::parse_file_header`, then `sprite_shrink::parse_format_data` (SSMC) or `sprite_shrink_cd::decode_ssmd_format_data` (SSMD). The fixed-size structures convert to and from their on-disk bytes with `to_le_bytes` and `from_le_bytes` on `FileHeader`, `SSMCFormatData` and `SSMDFormatData`.
+
+C hosts use the exports declared in the generated `sprite_shrink.h`: `build_ssmc_prefix_u64`/`_u128`, `parse_file_header_ffi`, `parse_format_data_ffi` and `parse_ssmc_prefix_u64`/`_u128`. The `_u64` and `_u128` suffixes match `hash_type` 1 and 2. SSMD has no C exports yet.

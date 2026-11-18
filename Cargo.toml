@@ -4,6 +4,7 @@ members = [
     "crates/cli_application",
     "crates/lib_sprite_shrink",
     "crates/lib_ss_cd",
+    "crates/test_support",
 ]
 
 [profile.release]
@@ -23,6 +24,8 @@ redundant_lifetimes             = "warn"
 unused_lifetimes                = "warn"
 trivial_numeric_casts           = "warn"
 ambiguous_negative_literals     = "warn"
+# `cargo fuzz` builds with `--cfg fuzzing`; see fuzz/.
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [workspace.lints.clippy]
 cargo       = { level = "warn", priority = -1 }

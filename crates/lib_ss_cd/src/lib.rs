@@ -2,6 +2,9 @@ mod analyze;
 pub use analyze::{
     FileSizeProvider, analyze_cue_sheets, resolve_file_sector_counts
 };
+/// Only for fuzz targets, which `cargo fuzz` builds with `--cfg fuzzing`.
+#[cfg(fuzzing)]
+pub use analyze::analyze_data_sector;
 
 mod cue_gen;
 pub use cue_gen::{
@@ -12,10 +15,13 @@ mod cue_parser;
 
 mod decode;
 pub use decode::{
-    decode_ssmd_format_data, decode_ssmd_meta_data
+    decode_ssmd_format_data, parse_ssmd_prefix, parse_ssmd_toc
 };
 
 mod ecc;
+
+mod encode;
+pub use encode::{SSMDPrefix, build_ssmd_prefix};
 
 mod flac;
 pub use flac::{
@@ -27,16 +33,17 @@ pub use lib_error_handling::SpriteShrinkCDError;
 
 mod lib_structs;
 pub use lib_structs::{
-    SSMD_UID,
-    CueSheet, ContentBlock, DataChunkLayout, DiscManifest,
+    MAX_DISC_SECTORS, NO_COLLECTION, SSMD_UID,
+    CueSheet, ContentBlock, DataChunkLayout, DiscArea, DiscFile, DiscIndex,
+    DiscManifest, DiscTrack, TrackType,
     ExceptionInfo, ExceptionRegistry, ExceptionType, DiscReconstructor,
-    RleSectorMap, SectorMap, SectorType, SSMDFormatData, SSMDIndices,
-    SSMDTocEntry, SubHeaderEntry, SubheaderRegistry
+    ParsedSSMD, RleSectorMap, SectorMap, SectorType, SSMDFormatData,
+    SSMDIndices, SSMDTocEntry, SubHeaderEntry, SubheaderRegistry
 };
 
 mod mapper;
 pub use mapper::{
-    SectorDataProvider, analyze_and_map_disc, rle_encode_map
+    SectorDataProvider, analyze_and_map_disc, disc_files, rle_encode_map
 };
 
 mod reconstruction;

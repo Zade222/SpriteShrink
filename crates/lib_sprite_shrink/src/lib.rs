@@ -1,6 +1,7 @@
 mod archive;
 pub use archive::{
-    ArchiveBuilder, decompress_chunk
+    ArchiveBuilder, compress_chunks_with, decompress_chunk,
+    decompress_chunk_checked
 };
 
 pub mod ffi;
@@ -12,24 +13,28 @@ pub use lib_error_handling::{
 
 mod lib_structs;
 pub use lib_structs::{
-    SSMC_UID,
-    ChunkLocation, FileData, FileHeader, FileManifestParent, FileRegion,
-    ProcessedFileData, Progress, SerializedData, SSAChunkMeta, SSMCFormatData,
-    SSMCTocEntry
+    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID,
+    ChunkLocation, CompressionResult, FileData, FileHeader, FileManifestParent,
+    FileRegion, HashType,
+    ParsedSSMC, ProcessedFileData, Progress, SeekMetadata, SerializedData,
+    SSAChunkMeta, SSMCFormatData, SSMCTocEntry
 };
 
 mod parsing;
 pub use parsing::{
-    SUPPORTED_VERSION, MAGIC_NUMBER, SS_SEED,
+    SUPPORTED_VERSION, MAGIC_NUMBER, SS_SEED, check_entry_name,
     parse_file_chunk_index, parse_file_header, parse_file_metadata,
-    parse_file_toc, parse_format_data
+    parse_file_toc, parse_format_data, parse_ssmc_prefix
 };
 
 mod processing;
 pub use processing::{
+    MAX_WINDOW_SIZE, MIN_WINDOW_SIZE,
     Hashable,
     create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory,
     verify_single_file, test_compression};
 
 mod serialization;
-pub use serialization::{dashmap_values_to_vec, serialize_uncompressed_data};
+pub use serialization::{
+    build_ssmc_prefix, dashmap_values_to_vec, serialize_uncompressed_data
+};

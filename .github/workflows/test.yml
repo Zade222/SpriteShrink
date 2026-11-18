@@ -1,0 +1,140 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Same platforms as release.yml.
+        os: [ubuntu-latest, windows-latest]
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Reports warnings without failing the job. The existing code has a
+      # backlog of warnings to clear before this can use `-- -D warnings`.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Test (debug)
+        run: cargo test --workspace
+
+      # Integer overflow panics in debug builds but wraps in release builds,
+      # so some bugs only show up here.
+      #
+      # The release profile sets panic = "abort", but test binaries need
+      # unwinding. Cargo then builds the libraries twice, once for the CLI
+      # binary and once for the tests, and the two builds overwrite each
+      # other's unhashed .rlib/.so/.a files. Building everything with unwind
+      # gives one build. Optimization and overflow behavior stay the same.
+      - name: Test (release)
+        run: cargo test --workspace --release
+        env:
+          CARGO_PROFILE_RELEASE_PANIC: unwind
+
+  c-header:
+    name: C header compiles
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build library and generate header
+        run: cargo build -p sprite_shrink
+
+      - name: Check header syntax
+        run: >
+          cc -fsyntax-only -Wall -Wextra -Werror -std=c11 -x c
+          target/x86_64-unknown-linux-gnu/debug/sprite_shrink.h
+
+  no-avx2:
+    name: CD tests without AVX2
+    # Ubuntu 26.04 runners install x86-64-v3 builds of system packages, which
+    # need AVX2. The test binary links the runner's glibc, so under the
+    # Westmere model it died with SIGILL before running any test. 24.04 uses
+    # baseline x86-64 builds.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install QEMU user-mode emulation
+        run: sudo apt-get update && sudo apt-get install -y qemu-user
+
+      # GitHub runners have AVX2, so the SIMD dispatch normally never takes
+      # the non-AVX2 path. QEMU's Westmere model has SSE4.2 but no AVX2.
+      - name: Test sprite_shrink_cd under QEMU (Westmere)
+        run: cargo test -p sprite_shrink_cd --release
+        env:
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER: qemu-x86_64 -cpu Westmere
+          # See "Test (release)" above.
+          CARGO_PROFILE_RELEASE_PANIC: unwind
+
+  miri:
+    name: Unsafe code under Miri
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # Miri can't call zstd's C code, so the tests that compress are
+      # ignored under it (`cfg_attr(miri, ignore)`).
+      - name: FFI tests under Miri
+        run: >
+          cargo miri test -p sprite_shrink --test integration ffi_smoke::
+
+      # The ECC kernel writes and reads SIMD vectors through raw pointers.
+      # The ECC proptests check safe code, so they aren't run here.
+      - name: ECC kernel under Miri
+        run: >
+          cargo miri test -p sprite_shrink_cd --lib --
+          ecc::tests::ecc_kernel ecc::tests::calc_ecc_simd_inplace
+
+    env:
+      # Fails accesses that are only aligned because of where the allocator
+      # happened to put the data. -Zmiri-strict-provenance isn't used: the
+      # FFI code passes the host's user_data pointer through a usize.
+      MIRIFLAGS: -Zmiri-symbolic-alignment-check

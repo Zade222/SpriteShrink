@@ -9,6 +9,7 @@
 use std::{
     fmt::{Debug, Display},
     fs::{File, create_dir_all},
+    io::{BufWriter, IntoInnerError, Write},
     path::PathBuf,
     sync::{Arc, Mutex, atomic::{
         AtomicBool, Ordering
@@ -16,38 +17,38 @@ use std::{
     thread, time::{Duration}
 };
 
-use bitcode::{Encode, encode};
+use bitcode::Encode;
 use dashmap::DashMap;
 use directories::ProjectDirs;
 use indicatif::{ProgressBar, ProgressStyle};
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::{bounded};
 use sprite_shrink::{
-    SS_SEED, SSMC_UID,
-    ArchiveBuilder, FileHeader, FileManifestParent, Hashable, Progress,
-    SSAChunkMeta, SSMCFormatData,
-    serialize_uncompressed_data, verify_single_file
+    SS_SEED,
+    ArchiveBuilder, FileManifestParent, HashType, Hashable, Progress,
+    SSAChunkMeta,
+    build_ssmc_prefix, serialize_uncompressed_data, verify_single_file
 };
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest,Sha512};
+use tempfile::tempfile_in;
 use tracing::{
     debug,
     info,
 };
-use zerocopy::IntoBytes;
 
 use crate::{
     arg_handling::Args,
     auto_tune::{auto_tune_dict, auto_tune_win},
     cli_types::{
+        APPIDENTIFIER,
         ChunkMessage, FileData, FileCompleteData,
-        TempFileGuard, APPIDENTIFIER
     },
     error_handling::CliError,
     storage_io::{
-        append_data_to_file, calc_tot_input_size, get_cache_paths,
-        write_final_archive, TempCache
+        calc_tot_input_size, get_cache_paths, parent_dir, write_archive,
+        TempCache
     },
     utils::{process_in_memory_check, set_priority},
 };
@@ -73,8 +74,7 @@ use crate::{
 ///   archive.
 /// * `args`: A reference to the `Args` struct, containing all user-provided
 ///   settings. The `--auto-tune` flag enables parameter optimization.
-/// * `hash_type_id`: A `u8` identifier for the hash type being used
-///   (e.g., 1 for 64-bit, 2 for 128-bit).
+/// * `hash_type`: The hash type `H` is, recorded in the archive header.
 /// * `running`: An `Arc<AtomicBool>` used for graceful cancellation of the
 ///   operation.
 ///
@@ -101,7 +101,7 @@ use crate::{
 pub fn default_compression<H>(
     file_paths: Vec<PathBuf>,
     args: &Args,
-    hash_type_id: &u8,
+    hash_type: HashType,
     running: Arc<AtomicBool>
 ) -> Result<(), CliError>
 where
@@ -136,8 +136,6 @@ where
 
     let cache_info = get_cache_paths();
 
-    let pid = cache_info.id;
-
     let temp_cache = Arc::new(
         TempCache::<H>::new(cache_info.cache_path, process_in_memory)?
     );
@@ -163,19 +161,6 @@ where
     /*Stores the amount of threads used by the parallel task of running
     process_file_in_memory function.*/
     let process_threads = args.threads.map_or(0, |count| count);
-
-    //Callback for getting all keys (hashes) in cache
-    let key_ret_cb = {
-        let cache_clone = Arc::clone(&temp_cache);
-        let running_clone = Arc::clone(&running);
-        move || -> Result<Vec<H>, CliError> {
-            if !running_clone.load(Ordering::SeqCst) {
-                return Err(CliError::Cancelled);
-            }
-
-            cache_clone.get_keys()
-        }
-    };
 
     //Callback for getting a list of chunks from the provided list of hashes
     let chunk_ret_cb = Arc::new({
@@ -285,11 +270,7 @@ where
         veri_hashes = _temp_data.veri_hashes;
 
         /*Serialize the data for later using it for verifying the files. */
-        let temp_serialized_data = serialize_uncompressed_data(
-                &file_manifest,
-                &key_ret_cb,
-                chunk_ret_cb.as_ref()
-            )?;
+        let temp_serialized_data = serialize_uncompressed_data(&file_manifest);
 
         //Calc the sum of all chunks in cache
         chunk_sum = temp_cache.get_tot_data_size();
@@ -336,18 +317,11 @@ where
         How many chunks the file requires.
         A sorted vector contain chunk location data. Sorted offset*/
 
-    /*chunk_index: Stores the index of the chunk data associated with a hash.
-    Key is the hash, value is the index location.*/
-
     /*sorted_hashes: Sorted vector that stores all chunk hashes.*/
 
     /*Prepares and serializes all data for the final archive. See above for
     each variable in the output tuple.*/
-    let serialized_data = serialize_uncompressed_data(
-            &file_manifest,
-            &key_ret_cb,
-            chunk_ret_cb.as_ref()
-        )?;
+    let serialized_data = serialize_uncompressed_data(&file_manifest);
 
     /*Drop file_manifest since it is no longer needed and was only used for
     verifying files.*/
@@ -438,10 +412,6 @@ where
 
     debug!("File verification passed!");
 
-    /*chunk index was storing non compressed data_store locations and is no
-    longer needed.*/
-    drop(serialized_data.chunk_index);
-
     //Define progress bar to be used by callback
     let progress_bar = Arc::new(Mutex::new(None));
 
@@ -516,29 +486,13 @@ where
         }
     };
 
-    //Const for the max amount of chunks to cache before writing to disk.
-    const BUFFER_SIZE: usize = 1000;
-
-    /*Write buffer holds chunk byte data prior to being written.
-    Vector made with capacity to hold 1000 chunks * the maximum window size
-    fastcdc has used. (avg x 4)*/
-    let mut write_buffer: Vec<u8> = Vec::with_capacity(
-        BUFFER_SIZE * (best_window_size as usize * 4)
-    );
-
-    //Holds the amount of chunks that have been stored in the buffer.
-    let mut chunk_count = 0usize;
-
-    //Set the temproary file path that will hold the compressed data.
-    let tmp_file_path = Arc::new(
-        args.output
+    /*Takes the specified output file destination and adds the ssmc file
+    extension if it's not present or replaces the specified extension with
+    ssmc.*/
+    let final_output_path = args.output
         .as_ref()
         .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("{pid}"))
-        .with_extension("tmp")
-    );
+        .with_extension("ssmc");
 
     let get_chunk_data_for_lib = {
         let cb = Arc::clone(&chunk_ret_cb);
@@ -554,26 +508,18 @@ where
         }
     };
 
-    /*Set file guard to clean up tmp files on error. */
-    let _tmp_guard = TempFileGuard::new(&tmp_file_path);
+    /*Holds the compressed data until the prefix can be built. The file has
+    no name, so the system deletes it however the run ends.*/
+    let tmp_file = tempfile_in(parent_dir(&final_output_path))?;
 
-    /*Callback for storing and writing chunk data.
-    Flush flag can be used to force the data to be written if the buffer has
-    not reached the BUFFER_SIZE.*/
-    let tmp_chunk_write_cb = {
-        let tfp_clone = Arc::clone(&tmp_file_path);
-        move |chunk: &[u8], flush_flag: bool| -> Result<(), CliError>{
-            write_buffer.extend_from_slice(chunk);
-            chunk_count += 1;
+    //Batches the compressed chunks into larger writes to the temporary file.
+    let mut writer = BufWriter::with_capacity(64 * 1024, tmp_file);
 
-            if (chunk_count >= BUFFER_SIZE) || flush_flag {
-                append_data_to_file(&tfp_clone, &write_buffer)?;
-                write_buffer.clear();
-                chunk_count = 0;
-            };
-
-            Ok(())
-        }
+    /*Writes each compressed chunk, in order. The builder only borrows the
+    writer, so it can be flushed once the build is done.*/
+    let tmp_chunk_write_cb = |chunk: &[u8]| -> Result<(), CliError> {
+        writer.write_all(chunk)?;
+        Ok(())
     };
 
     /*Assembles the final archive header from its constituent parts, structures
@@ -595,6 +541,12 @@ where
     //Start the build process using the progress callback.
     let comp_data = builder.with_progress(progress_callback)
         .build()?;
+    super::note_if_no_dictionary(&comp_data);
+
+    /*Every chunk is written once build returns. into_inner flushes and
+    returns any error, which a drop would discard.*/
+    let mut tmp_file = writer.into_inner()
+        .map_err(IntoInnerError::into_error)?;
 
     if let Some(bar) = progress_bar.lock().unwrap().take()
         && !args.quiet
@@ -602,52 +554,17 @@ where
         bar.finish_with_message("Compression complete.");
     }
 
-    /*Takes the specified output file destination and adds the ssmc file
-    extension if it's not present or replaces the specified extension with
-    ssmc.*/
-    let final_output_path = args.output
-        .as_ref()
-        .unwrap()
-        .with_extension("ssmc");
-
-    let enc_toc = encode(&archive_toc);
-
-    let enc_file_manifest = encode(&serialized_data.ser_file_manifest);
-
-    let file_header = FileHeader::build_file_header(
-        file_paths.len() as u32,
-        98, //zstd
-        *hash_type_id,
-        SSMC_UID,
-        enc_toc.len() as u32,
-    );
-
-    let format_data = SSMCFormatData::build_format_data(
-        enc_toc.len() + FileHeader::HEADER_SIZE as usize,
-        enc_file_manifest.len(),
-        comp_data.dictionary_size,
-        comp_data.enc_chunk_index_size
-    );
-
-    let mut final_data = Vec::with_capacity(
-        FileHeader::HEADER_SIZE as usize + enc_toc.len() +
-            SSMCFormatData::SIZE as usize + enc_file_manifest.len() +
-            comp_data.dictionary.len() + comp_data.enc_chunk_index.len()
-    );
-
-    final_data.extend_from_slice(file_header.as_bytes());
-    final_data.extend_from_slice(&enc_toc);
-    final_data.extend_from_slice(format_data.as_bytes());
-    final_data.extend_from_slice(&enc_file_manifest);
-    final_data.extend_from_slice(&comp_data.dictionary);
-    final_data.extend_from_slice(&comp_data.enc_chunk_index);
-
-    //Write ssmc header to disk and append it with compressed data.
-    write_final_archive(
-        &final_output_path,
-        &tmp_file_path,
-        &final_data
+    /*Builds every byte of the archive that comes before the compressed
+    data: header, TOC, format data, manifest, dictionary and chunk index.*/
+    let final_data = build_ssmc_prefix(
+        &archive_toc,
+        &serialized_data.ser_file_manifest,
+        &comp_data,
+        hash_type.id(),
     )?;
+
+    //Write the prefix, then the compressed data, to the archive.
+    write_archive(&final_output_path, &final_data, &mut tmp_file)?;
 
     info!(
         "Successfully created sprite-shrink multicart archive at: \

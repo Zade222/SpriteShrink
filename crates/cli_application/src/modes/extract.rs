@@ -8,16 +8,15 @@
 
 use std::{
     fmt::Display,
-    fs::{File, create_dir_all, rename},
+    fs::{File, create_dir_all},
     hash::Hash,
-    io::{BufWriter, Write},
+    io::Write,
     path::Path,
     sync::{
         Arc, atomic::{AtomicBool, Ordering},
     },
 };
 use bitcode::Decode;
-use rayon::join;
 use serde::{Deserialize, Serialize};
 use tracing::{
     debug
@@ -25,25 +24,31 @@ use tracing::{
 
 use sprite_shrink::{
     SSMC_UID,
-    Hashable, FileHeader, SSMCFormatData, SSMCTocEntry,
-    decompress_chunk, parse_file_metadata, parse_file_chunk_index,
-    parse_format_data
+    HashType,
+    Hashable, FileHeader, ParsedSSMC, SpriteShrinkError,
+    check_entry_name, decompress_chunk_checked
 };
 
 use sprite_shrink_cd::{
     SSMD_UID,
-    SSMDFormatData, SSMDTocEntry, SSMDIndices,
-    decode_ssmd_format_data, decode_ssmd_meta_data, generate_cue_string,
-    write_disc
+    ParsedSSMD,
+    generate_cue_string, write_disc
 };
 
 use crate::{
-    archive_parser::{get_file_header, get_toc},
+    archive_parser::{get_file_header, get_ssmc_prefix, get_ssmd_prefix},
     arg_handling::Args,
-    cli_types::TempFileGuard,
     error_handling::CliError,
-    storage_io::{read_file_data, read_metadata_block},
+    storage_io::{read_file_data, write_via_temp},
 };
+
+/// Write buffer for a file from an SSMC archive: 8 KiB, the size
+/// `BufWriter::new` uses.
+const FILE_WRITE_BUFFER_SIZE: usize = 8 * 1024;
+
+/// Write buffer for a disc image: 2048 raw sectors of 2352 bytes (about
+/// 4.6 MiB), so a disc is written in a few large writes.
+const DISC_WRITE_BUFFER_SIZE: usize = 2048 * 2352;
 
 /// Executes the file extraction process from an archive.
 ///
@@ -59,8 +64,8 @@ use crate::{
 /// * `file_path`: A `Path` pointing to the source archive file.
 /// * `out_dir`: A `Path` for the directory where extracted files will
 ///   be written.
-/// * `rom_indices`: A vector of `u8` indices specifying which files to
-///   extract from the archive.
+/// * `rom_indices`: Zero-based positions in the archive's table of contents
+///   of the files to extract, as `parse_rom_indices` returns them.
 /// * `args`: A reference to the main `Args` struct, used here to configure
 ///   the number of worker threads for parallel processing.
 ///
@@ -83,15 +88,18 @@ use crate::{
 pub fn run_extraction(
     file_path: &Path,
     out_dir: &Path,
-    rom_indices: &Vec<u8>,
+    rom_indices: &[usize],
     args: &Args,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError> {
     /*Get and store the parsed header from the target archive file.*/
     let header = get_file_header(file_path)?;
 
-    match header.hash_type {
-        1 => dispatch_extraction::<u64>(
+    /*The header was already checked when it was parsed, so this only turns
+    the byte into a `HashType`. The match has no catch-all arm, so a new
+    hash type doesn't compile until it's handled here.*/
+    match HashType::try_from(header.hash_type)? {
+        HashType::Xxh3_64 => dispatch_extraction::<u64>(
             file_path,
             out_dir,
             &header,
@@ -99,7 +107,7 @@ pub fn run_extraction(
             args,
             running
         ),
-        2 =>dispatch_extraction::<u128>(
+        HashType::Xxh3_128 => dispatch_extraction::<u128>(
             file_path,
             out_dir,
             &header,
@@ -107,9 +115,6 @@ pub fn run_extraction(
             args,
             running
         ),
-        _ => Err(CliError::InternalError(
-            "Unsupported hash type in archive header.".to_string()
-        )),
     }
 }
 
@@ -117,7 +122,7 @@ fn dispatch_extraction<H>(
     file_path: &Path,
     out_dir: &Path,
     header: &FileHeader,
-    rom_indices: &Vec<u8>,
+    rom_indices: &[usize],
     args: &Args,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
@@ -133,62 +138,34 @@ where
 {
     match header.format_id {
         SSMC_UID => {
-            let toc: Vec<SSMCTocEntry> = get_toc(
-                file_path,
-                header.enc_toc_offset,
-                header.enc_toc_length as usize
-            )?;
-
-            let bin_format_data = read_file_data(
-                file_path,
-                header.format_data_offset as u64,
-                SSMCFormatData::SIZE as usize
-            )?;
-
-            let format_data = parse_format_data(&bin_format_data)?;
-
-            //Read all required metadata.
-            let metadata_block = read_metadata_block(file_path, &format_data)?;
+            //Read and parse all metadata before the compressed data.
+            let prefix = get_ssmc_prefix::<H>(file_path, header)?;
 
             extract_ssmc_data::<H>(
                 file_path,
                 out_dir,
                 rom_indices,
-                &format_data,
-                &toc,
-                &metadata_block,
+                &prefix,
                 args,
                 running
             )?
         },
         SSMD_UID => {
-            let toc: Vec<SSMDTocEntry> = get_toc(
-                file_path,
-                header.enc_toc_offset,
-                header.enc_toc_length as usize
-            )?;
-
-            let bin_format_data = read_file_data(
-                file_path,
-                header.format_data_offset as u64,
-                SSMDFormatData::SIZE as usize
-            )?;
-
-            let format_data = decode_ssmd_format_data(&bin_format_data)?;
+            //Read and parse all metadata before the audio and data blobs.
+            let prefix = get_ssmd_prefix::<H>(file_path, header)?;
 
             extract_ssmd_data::<H>(
                 file_path,
                 out_dir,
                 rom_indices,
-                &format_data,
-                &toc,
+                prefix,
                 args,
                 running
             )?;
 
         }
         _ => {
-            return Err(CliError::InvalidFormatID(header.hash_type as u16))
+            return Err(CliError::InvalidFormatID(header.format_id))
         }
     }
 
@@ -202,9 +179,9 @@ where
 /// and writing the final files to disk. It handles the creation of the
 /// output directory, validates ROM indices against the manifest, and ensures
 /// data integrity through hash verification. Each file is first written to
-/// a temporary file (`.tmp` extension) and then renamed to its final name
-/// upon successful completion to ensure atomicity and prevent corrupted files
-/// in case of an error or cancellation.
+/// a temporary file in `out_dir` and renamed to its final name once
+/// complete and flushed, so an error or cancellation leaves no partial file
+/// (see [`write_via_temp`]).
 ///
 /// # Type Parameters
 ///
@@ -220,12 +197,10 @@ where
 ///   written. If the directory does not exist, it will be created, unless
 ///   `args.force` is false and the directory does not exist, in which case
 ///   an `InvalidOutputPath` error is returned.
-/// * `rom_indices`: A vector of `u8` indices specifying which files to
-///   extract from the archive. These indices are 1-based.
-/// * `header`: A reference to the `sprite_shrink::FileHeader` containing
-///   metadata about the archive.
-/// * `metadata_block`: A slice of `u8` containing the raw metadata block
-///   (manifest, dictionary, and chunk index) read from the archive.
+/// * `rom_indices`: Zero-based positions in the table of contents of the
+///   files to extract.
+/// * `prefix`: The archive's parsed metadata: TOC, manifest, dictionary,
+///   and a chunk index holding absolute file offsets.
 /// * `args`: A reference to the main `Args` struct, used to check
 ///   configuration options like `force`.
 /// * `running`: An `Arc<AtomicBool>` used to signal and check for
@@ -240,8 +215,6 @@ where
 /// # Errors
 ///
 /// This function can return an error in several cases, including:
-/// - `CliError::from` for errors originating from parsing the file manifest
-///   or chunk index.
 /// - `CliError::InvalidOutputPath` if `out_dir` does not exist and `args.force`
 ///   is false.
 /// - `CliError::InvalidRomIndex` if a requested ROM index is out of bounds
@@ -249,8 +222,8 @@ where
 /// - `CliError::InternalError` if a chunk hash is found in the manifest but
 ///   is missing from the chunk index, or if an unsupported hash type is
 ///   encountered.
-/// - `CliError::DataIntegrity` if a decompressed chunk's hash does not match
-///   the expected hash from the manifest.
+/// - `CliError::SpriteShrinkError` if a chunk doesn't decompress, or doesn't
+///   decompress to the bytes its hash says.
 /// - `CliError::Cancelled` if the `running` flag is set to `false` during
 ///   the extraction process.
 /// - Any `std::io::Error` that occurs during file creation, writing, or
@@ -258,10 +231,8 @@ where
 fn extract_ssmc_data<H>(
     file_path: &Path,
     out_dir: &Path,
-    rom_indices: &Vec<u8>,
-    format_data: &SSMCFormatData,
-    toc: &[SSMCTocEntry],
-    metadata_block: &[u8],
+    rom_indices: &[usize],
+    prefix: &ParsedSSMC<H>,
     args: &Args,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
@@ -275,22 +246,13 @@ where
         for<'de> Deserialize<'de> +
         for<'de> Decode<'de>,
 {
-    /*Stores the length of each piece of the metadata from the archive as
-     provided by the header.*/
-    let man_length = format_data.enc_manifest.length as usize;
-    let dict_length = format_data.data_dictionary.length as usize;
-
-    let manifest_slice = &metadata_block[0..man_length];
-    let dict_slice = &metadata_block[man_length..man_length + dict_length];
-    let index_slice = &metadata_block[man_length + dict_length..];
-
-    let (manifest_result, index_result) = join(
-        || parse_file_metadata::<H>(manifest_slice).map_err(CliError::from),
-        || parse_file_chunk_index::<H>(index_slice).map_err(CliError::from),
-    );
-
-    let file_manifest = manifest_result?;
-    let chunk_index = index_result?;
+    let ParsedSSMC {
+        toc,
+        manifests: file_manifest,
+        dictionary,
+        chunk_index,
+        ..
+    } = prefix;
 
     if !out_dir.exists() && !args.force{
         return Err(CliError::InvalidOutputPath())
@@ -298,78 +260,61 @@ where
         create_dir_all(out_dir)?;
     }
 
-    for rom in rom_indices {
-        let fmp = file_manifest
-        .get((*rom - 1)  as usize)
+    for &index in rom_indices {
+        let (fmp, entry) = file_manifest
+        .get(index)
+        .zip(toc.get(index))
         .ok_or_else(|| CliError::InvalidRomIndex(
-            format!("ROM index {rom} is out of bounds.")
+            format!("ROM index {} is out of bounds.", index + 1)
         ))?;
 
-        let final_output_path = out_dir.join(
-            toc[(*rom as usize) - 1].filename.clone());
+        /*The prefix parser has checked every name already. Check again
+        here, where a bad name would write outside out_dir.*/
+        check_entry_name(&entry.filename).map_err(SpriteShrinkError::from)?;
+        let final_output_path = out_dir.join(&entry.filename);
 
-        let tmp_output_path = final_output_path.with_extension("tmp");
+        /*Each file is written to a temp file and renamed once every chunk
+        has passed its hash check, so a failed or cancelled run leaves no
+        partial file.*/
+        write_via_temp(&final_output_path, FILE_WRITE_BUFFER_SIZE, |writer| {
+            fmp.chunk_metadata
+                .iter()
+                .try_for_each(|scm| -> Result<(), CliError> {
+                /*Get the chunk location from the chunk index.*/
+                let chunk_location = chunk_index.get(&scm.hash)
+                    .ok_or_else(|| {
+                    CliError::InternalError(format!(
+                        "Decompression failed: Missing chunk with hash\
+                        {}",
+                        scm.hash
+                    ))
+                })?;
 
-        let _guard = TempFileGuard::new(&tmp_output_path);
+                //The chunk index already holds absolute file offsets.
+                let comp_chunk_data = read_file_data(
+                    file_path,
+                    chunk_location.offset,
+                    chunk_location.compressed_length as usize
+                )?;
 
-        let file = File::create(&tmp_output_path)?;
-        let mut writer = BufWriter::new(file);
-
-        fmp.chunk_metadata
-            .iter()
-            .try_for_each(|scm| -> Result<(), CliError> {
-            /*Get the chunk location from the chunk index.*/
-            let chunk_location = chunk_index.get(&scm.hash)
-                .ok_or_else(|| {
-                CliError::InternalError(format!(
-                    "Decompression failed: Missing chunk with hash\
-                    {}",
-                    scm.hash
-                ))
-            })?;
-
-            /*Store the chunk data offset within the compressed
-            store, from the ChunkLocation struct.*/
-            let absolute_offset =
-                chunk_location.offset +
-                format_data.data_offset;
-
-            let comp_chunk_data = read_file_data(
-                file_path,
-                absolute_offset,
-                chunk_location.compressed_length as usize
-            )?;
-
-            let decomp_chunk_data = decompress_chunk(
+                let decomp_chunk_data = decompress_chunk_checked(
                     &comp_chunk_data,
-                    dict_slice
-            )?;
+                    dictionary,
+                    scm.hash
+                )?;
 
-            let decomp_chunk_hash = H::from_bytes_with_seed(
-                &decomp_chunk_data
-            );
+                //Check if the user has cancelled the operation
+                if !running.load(Ordering::SeqCst) {
+                    return Err(CliError::Cancelled);
+                }
 
-            if scm.hash != decomp_chunk_hash {
-                return Err(CliError::DataIntegrity(format!(
-                    "chunk hash mismatch (expected: {}, calculated: {})",
-                    scm.hash, decomp_chunk_hash
-                )));
-            };
+                writer.write_all(&decomp_chunk_data)?;
 
-            //Check if the user has cancelled the operation
-            if !running.load(Ordering::SeqCst) {
-                return Err(CliError::Cancelled);
-            }
-
-            writer.write_all(&decomp_chunk_data)?;
-
-            Ok(())
+                Ok(())
+            })
         })?;
 
-        //The file is fully written, rename it to final name.
-        rename(&tmp_output_path, final_output_path)?;
-
-        debug!("{} extracted successfully", toc[(*rom as usize) - 1].filename);
+        debug!("{} extracted successfully", entry.filename);
     }
 
     Ok(())
@@ -379,9 +324,8 @@ where
 fn extract_ssmd_data<H> (
     file_path: &Path,
     out_dir: &Path,
-    disc_indices: &[u8],
-    format_data: &SSMDFormatData,
-    toc: &[SSMDTocEntry],
+    disc_indices: &[usize],
+    prefix: ParsedSSMD<H>,
     args: &Args,
     running: Arc<AtomicBool>,
 ) -> Result<(), CliError>
@@ -395,33 +339,15 @@ where
         for<'de> Deserialize<'de> +
         for<'de> Decode<'de>,
 {
-    let metadata_len = (
-        format_data.exception_data.offset - format_data.enc_disc_manifest.offset
-    ) as usize;
-
-    let encoded_metadata = read_file_data(
-        file_path,
-        format_data.enc_disc_manifest.offset,
-        metadata_len
-    )?;
-
-    let exception_blob: Vec<u8> = read_file_data(
-        file_path,
-        format_data.exception_data.offset,
-        format_data.exception_data.length as usize
-    )?;
-
-    let result = decode_ssmd_meta_data::<H>(format_data, &encoded_metadata)?;
-
-    let disc_manifests = result.disc_manifests;
-    let dictionary = result.data_dictionary;
-    let subheader_table = result.subheader_table;
-
-    let indices = SSMDIndices {
-        chunk_index: result.chunk_index,
-        audio_block_index: result.audio_block_index.unwrap_or_default(),
-        exception_index: result.exception_index.unwrap_or_default()
-    };
+    let ParsedSSMD {
+        toc,
+        disc_manifests,
+        data_dictionary: dictionary,
+        indices,
+        subheader_table,
+        exception_blob,
+        ..
+    } = prefix;
 
     if !out_dir.exists() && !args.force{
         return Err(CliError::InvalidOutputPath())
@@ -433,51 +359,47 @@ where
     let archive_file = File::open(file_path)?;
 
     println!("Beginning extraction loop...");
-    for disc in disc_indices {
-        let dm = disc_manifests
-            .get((*disc - 1) as usize)
+    for &index in disc_indices {
+        let (dm, entry) = disc_manifests
+            .get(index)
+            .zip(toc.get(index))
             .ok_or_else(|| CliError::InvalidRomIndex(
-                format!("Disc index {disc} is out of bounds.")
+                format!("Disc index {} is out of bounds.", index + 1)
             ))?;
 
-        let final_output_path = out_dir.join(
-            toc[(*disc as usize) - 1].filename.clone()
-        );
+        /*The prefix parser has checked every name already. Check again
+        here, where a bad name would write outside out_dir.*/
+        check_entry_name(&entry.filename).map_err(SpriteShrinkError::from)?;
+        let final_output_path = out_dir.join(&entry.filename);
 
-        let tmp_output_path = final_output_path.with_extension("tmp");
-
-        let _guard = TempFileGuard::new(&tmp_output_path);
-
-        let file = File::create(&tmp_output_path)?;
-
-        const WRITE_BUFFER_SIZE: usize = 2048 * 2352;
-        let mut writer = BufWriter::with_capacity(WRITE_BUFFER_SIZE, file);
-
-        write_disc(
-            dm,
-            &indices,
-            &dictionary,
-            &archive_file,
-            &exception_blob,
-            &subheader_table,
-            &mut writer
-        )?;
-
-        let bin_filename = toc[(*disc as usize) - 1].filename.clone();
-
-        let cue_content = generate_cue_string(dm, &bin_filename)
+        let cue_content = generate_cue_string(dm, &entry.filename)
             .map_err(|e| CliError::InternalError(
                 format!("Failed to generate CUE sheet: {}", e)
             ))?;
 
+        /*The BIN and then the CUE sheet are each written to a temp file
+        and renamed when complete, so a failed or cancelled run leaves no
+        partial file.*/
+        write_via_temp(&final_output_path, DISC_WRITE_BUFFER_SIZE, |writer| {
+            write_disc(
+                dm,
+                &indices,
+                &dictionary,
+                &archive_file,
+                &exception_blob,
+                &subheader_table,
+                writer,
+                || !running.load(Ordering::SeqCst)
+            )
+            .map_err(CliError::from)
+        })?;
+
         let cue_path = final_output_path.with_extension("cue");
+        write_via_temp(&cue_path, cue_content.len(), |writer| {
+            writer.write_all(cue_content.as_bytes()).map_err(CliError::from)
+        })?;
 
-        rename(&tmp_output_path, final_output_path)?;
-
-        let mut cue_file = File::create(&cue_path)?;
-        cue_file.write_all(cue_content.as_bytes())?;
-
-        debug!("{} extracted successfully", toc[(*disc as usize) - 1].filename);
+        debug!("{} extracted successfully", entry.filename);
     }
 
     Ok(())

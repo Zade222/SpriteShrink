@@ -12,9 +12,10 @@ use std::{
 };
 
 use sprite_shrink::{
+    MAX_WINDOW_SIZE, MIN_WINDOW_SIZE,
     IsCancelled, SpriteShrinkError
 };
-use sprite_shrink_cd::SpriteShrinkCDError;
+use sprite_shrink_cd::{NO_COLLECTION, SpriteShrinkCDError};
 use directories::ProjectDirs;
 use range_parser::RangeError;
 use thiserror::Error;
@@ -67,6 +68,32 @@ pub enum CliError {
 
     #[error("The provided input paths contain no files.")]
     NoFilesFound(),
+
+    #[error("Optical mode needs a .cue file for each disc; none were found \
+        in the input paths.")]
+    NoCueFiles,
+
+    #[error(
+        "{} would be playlist {max_plus_one}, but an archive holds at most \
+         {max} playlists.",
+        .0.display(),
+        max = NO_COLLECTION,
+        max_plus_one = u16::from(NO_COLLECTION) + 1
+    )]
+    TooManyPlaylists(PathBuf),
+
+    #[error(
+        "Can't read the CUE sheet {path}: {err}",
+        path = .0.display(),
+        err = .1
+    )]
+    CueRead(PathBuf, #[source] io::Error),
+
+    #[error("Files with duplicate file names aren't allowed.\n{0}")]
+    DuplicateNames(String),
+
+    #[error("{0} can't be archived. {1}")]
+    UnusableName(String, String),
 
     #[error("This operation requires at least two input files.")]
     NotEnoughFiles,
@@ -135,8 +162,16 @@ pub enum CliError {
     #[error("Invalid mode specified. {0}")]
     InvalidMode(String),
 
-    #[error("Invalid or unsupported format id in archive. {0}")]
+    #[error("Unsupported format ID {0} in the archive header")]
     InvalidFormatID(u16),
+
+    #[error(
+        "Window size {0} is outside the supported range of {min} to {max} \
+         bytes",
+        min = MIN_WINDOW_SIZE,
+        max = MAX_WINDOW_SIZE
+    )]
+    InvalidWindowSize(u64),
 }
 
 /// Converts a library-level `SpriteShrinkError` into a `CliError`.
@@ -168,11 +203,18 @@ impl From<SpriteShrinkError> for CliError {
 ///
 /// # Returns
 ///
-/// * `true` if the error is `CliError::Cancelled`.
-/// * `false` for all other `CliError` variants.
+/// * `true` for `CliError::Cancelled`, and for a library error that is
+///   itself a cancellation. Optical compression returns a cancelled FLAC
+///   step as `SpriteShrinkCDError::SpriteShrink(Cancelled)`.
+/// * `false` for all other errors.
 impl IsCancelled for CliError {
     fn is_cancelled(&self) -> bool {
-        matches!(self, CliError::Cancelled)
+        match self {
+            CliError::Cancelled => true,
+            CliError::SpriteShrinkError(err) => err.is_cancelled(),
+            CliError::SpriteShrinkCDError(err) => err.is_cancelled(),
+            _ => false,
+        }
     }
 }
 
@@ -333,4 +375,50 @@ pub fn offset_to_line_col(
         }
     }
     (line, col)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_start_of_the_input_is_line_1_column_1() {
+        assert_eq!(offset_to_line_col("abc", 0), (1, 1));
+        assert_eq!(offset_to_line_col("", 0), (1, 1));
+    }
+
+    #[test]
+    fn columns_count_within_a_line() {
+        assert_eq!(offset_to_line_col("abc", 2), (1, 3));
+    }
+
+    #[test]
+    fn a_newline_starts_the_next_line() {
+        let text = "ab\ncd";
+        assert_eq!(offset_to_line_col(text, 2), (1, 3));
+        assert_eq!(offset_to_line_col(text, 3), (2, 1));
+        assert_eq!(offset_to_line_col(text, 4), (2, 2));
+    }
+
+    #[test]
+    fn a_crlf_ending_starts_the_next_line() {
+        // The `\r` is the last column of its line.
+        let text = "ab\r\ncd";
+        assert_eq!(offset_to_line_col(text, 2), (1, 3));
+        assert_eq!(offset_to_line_col(text, 4), (2, 1));
+    }
+
+    #[test]
+    fn the_end_of_the_input_is_just_past_its_last_character() {
+        assert_eq!(offset_to_line_col("ab\ncd", 5), (2, 3));
+        assert_eq!(offset_to_line_col("ab\n", 3), (2, 1));
+        // An offset past the end stops there too.
+        assert_eq!(offset_to_line_col("ab", 99), (1, 3));
+    }
+
+    #[test]
+    fn a_multibyte_character_is_one_column() {
+        // `é` is 2 bytes, so `x` starts at byte 2.
+        assert_eq!(offset_to_line_col("éx", 2), (1, 2));
+    }
 }
