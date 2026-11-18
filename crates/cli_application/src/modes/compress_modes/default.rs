@@ -9,7 +9,7 @@
 use std::{
     fmt::{Debug, Display},
     fs::{File, create_dir_all},
-    io::{BufWriter, Write},
+    io::{BufWriter, IntoInnerError, Write},
     path::PathBuf,
     sync::{Arc, Mutex, atomic::{
         AtomicBool, Ordering
@@ -32,6 +32,7 @@ use sprite_shrink::{
 use rayon::prelude::*;
 use serde::Serialize;
 use sha2::{Digest,Sha512};
+use tempfile::tempfile_in;
 use tracing::{
     debug,
     info,
@@ -42,11 +43,11 @@ use crate::{
     auto_tune::{auto_tune_dict, auto_tune_win},
     cli_types::{
         APPIDENTIFIER,
-        ChunkMessage, FileData, FileCompleteData, TempFileGuard,
+        ChunkMessage, FileData, FileCompleteData,
     },
     error_handling::CliError,
     storage_io::{
-        calc_tot_input_size, get_cache_paths, write_final_archive,
+        calc_tot_input_size, get_cache_paths, parent_dir, write_archive,
         TempCache
     },
     utils::{process_in_memory_check, set_priority},
@@ -134,8 +135,6 @@ where
     create_dir_all(cache_dir)?;
 
     let cache_info = get_cache_paths();
-
-    let pid = cache_info.id;
 
     let temp_cache = Arc::new(
         TempCache::<H>::new(cache_info.cache_path, process_in_memory)?
@@ -487,14 +486,13 @@ where
         }
     };
 
-    //Set the temporary file path that will hold the compressed data.
-    let tmp_file_path = args.output
+    /*Takes the specified output file destination and adds the ssmc file
+    extension if it's not present or replaces the specified extension with
+    ssmc.*/
+    let final_output_path = args.output
         .as_ref()
         .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("{pid}"))
-        .with_extension("tmp");
+        .with_extension("ssmc");
 
     let get_chunk_data_for_lib = {
         let cb = Arc::clone(&chunk_ret_cb);
@@ -510,10 +508,9 @@ where
         }
     };
 
-    let tmp_file = File::create(&tmp_file_path)?;
-
-    /*Set file guard to clean up tmp files on error. */
-    let _tmp_guard = TempFileGuard::new(&tmp_file_path);
+    /*Holds the compressed data until the prefix can be built. The file has
+    no name, so the system deletes it however the run ends.*/
+    let tmp_file = tempfile_in(parent_dir(&final_output_path))?;
 
     //Batches the compressed chunks into larger writes to the temporary file.
     let mut writer = BufWriter::with_capacity(64 * 1024, tmp_file);
@@ -546,23 +543,16 @@ where
         .build()?;
     super::note_if_no_dictionary(&comp_data);
 
-    /*Every chunk is written once build returns. Flush explicitly: a
-    BufWriter that flushes when dropped ignores any error.*/
-    writer.flush()?;
+    /*Every chunk is written once build returns. into_inner flushes and
+    returns any error, which a drop would discard.*/
+    let mut tmp_file = writer.into_inner()
+        .map_err(IntoInnerError::into_error)?;
 
     if let Some(bar) = progress_bar.lock().unwrap().take()
         && !args.quiet
     {
         bar.finish_with_message("Compression complete.");
     }
-
-    /*Takes the specified output file destination and adds the ssmc file
-    extension if it's not present or replaces the specified extension with
-    ssmc.*/
-    let final_output_path = args.output
-        .as_ref()
-        .unwrap()
-        .with_extension("ssmc");
 
     /*Builds every byte of the archive that comes before the compressed
     data: header, TOC, format data, manifest, dictionary and chunk index.*/
@@ -573,12 +563,8 @@ where
         hash_type.id(),
     )?;
 
-    //Write ssmc header to disk and append it with compressed data.
-    write_final_archive(
-        &final_output_path,
-        &tmp_file_path,
-        &final_data
-    )?;
+    //Write the prefix, then the compressed data, to the archive.
+    write_archive(&final_output_path, &final_data, &mut tmp_file)?;
 
     info!(
         "Successfully created sprite-shrink multicart archive at: \

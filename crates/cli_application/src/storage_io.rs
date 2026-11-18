@@ -11,7 +11,7 @@ use std::{
     fmt::Display,
     fs::{self, File, OpenOptions, metadata, read_dir, remove_file},
     hash::Hash,
-    io::{self, BufWriter, Read, Seek, SeekFrom, Write, copy},
+    io::{self, BufWriter, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::id,
     sync::{Arc, Mutex},
@@ -240,10 +240,7 @@ where
 {
     /*The temp file has to be on the same file system as final_path for the
     rename to replace it in one step.*/
-    let dir = match final_path.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => dir,
-        _ => Path::new("."),
-    };
+    let dir = parent_dir(final_path);
 
     let prefix = temp_prefix(final_path);
     let mut builder = Builder::new();
@@ -337,68 +334,42 @@ pub fn read_file_data(
     Ok(file_buffer)
 }
 
-/// Assembles the final archive file by combining metadata and compressed data.
-///
-/// This function completes the archive creation process by writing all
-/// necessary components to the final output file. It operates in two stages to
-/// ensure data integrity and efficient handling of large files:
-///
-/// 1. It first writes the initial data block, which contains the archive
-///    header and all serialized metadata (file manifest, chunk index, etc.),
-///    to the final destination file.
-/// 2. It then appends the compressed data, which is streamed from a temporary
-///    file where it was stored during the compression phase.
-///
-/// After the contents of the temporary file have been successfully appended,
-/// the temporary file is deleted, leaving a complete and valid `.ssmc`
-/// archive.
-///
-/// # Arguments
-///
-/// * `output_path`: A `Path` reference to the final destination file for the
-///   archive.
-/// * `tmp_file_path`: A `Path` reference to the temporary file containing the
-///   compressed data blob.
-/// * `data`: A byte slice (`&[u8]`) containing the archive's header and all
-///   other serialized metadata.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(())` if the final archive is successfully written and the temporary
-///   file is cleaned up.
-/// - `Err(CliError::Io)` if any file system operation fails, such as creating
-///   the output directory, writing the header, reading the temporary file, or
-///   deleting it.
-pub fn write_final_archive(
-    output_path: &Path,
-    tmp_file_path: &Path,
-    data: &[u8]
-) -> Result<(), CliError> {
-    /*Check if the parent directory of the target output exists,
-    if not create it.*/
-    if let Some(dir) = output_path.parent() {
-        fs::create_dir_all(dir)?;
+/// Returns the folder `path` is in, or `.` when `path` is a bare file name
+/// (or has no parent at all, as `/` and the empty path don't).
+pub fn parent_dir(path: &Path) -> &Path {
+    match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
     }
+}
 
-    //Write header data to disk
-    fs::write(output_path, data).map_err(CliError::IoError)?;
-
-    //Open the tmp file
-    let mut tmp_file = File::open(tmp_file_path)?;
-
-    //Set the file open options to append data to the written header
-    let mut final_file = OpenOptions::new()
-        .append(true)
-        .open(output_path)?;
-
-    //Copy the tmp file data to the end of the .ssmc file.
-    copy(&mut tmp_file, &mut final_file)?;
-
-    //Remove the tmp file as it is no longer needed.
-    remove_file(tmp_file_path)?;
-
-    Ok(())
+/// Writes an archive to `final_path`: `prefix` (the header and all
+/// metadata), then the whole of `data`, the compressed data the compress
+/// modes collected in a temp file.
+///
+/// The archive is written through [`write_via_temp`], so an existing
+/// archive at `final_path` is replaced only once the new one is complete.
+/// A failure leaves it as it was.
+///
+/// # Errors
+///
+/// Returns the I/O error if `data` can't be read or the archive can't be
+/// written.
+pub fn write_archive(
+    final_path: &Path,
+    prefix: &[u8],
+    data: &mut File,
+) -> Result<(), CliError> {
+    data.rewind()?;
+    write_via_temp(final_path, 64 * 1024, |writer| {
+        writer.write_all(prefix)?;
+        /*Copy file to file, past the buffer, so std can use the system's
+        file copy (copy_file_range on Linux). The buffer has to be empty
+        first, or the prefix would land after the data.*/
+        writer.flush()?;
+        io::copy(data, writer.get_mut().as_file_mut())?;
+        Ok(())
+    })
 }
 
 /// Loads the application configuration from a file, creating a default one if
@@ -591,11 +562,10 @@ fn remove_old_logs(
 ///
 /// # Returns
 ///
-/// A tuple `(PathBuf, PathBuf, u32)` containing:
+/// A `CacheInfo` holding:
 /// - The path for the main temporary database (e.g., `.../cache/12345.tmp`).
 /// - The path for the auto-tuning temporary database (e.g.,
 ///   `.../cache/auto_tune_12345.tmp`).
-/// - The process ID (PID) used to generate the unique filenames.
 pub fn get_cache_paths() -> CacheInfo {
     let pid = id();
 
@@ -618,7 +588,6 @@ pub fn get_cache_paths() -> CacheInfo {
     CacheInfo {
         cache_path,
         at_cache_path,
-        id: pid
     }
 }
 
@@ -1084,6 +1053,23 @@ mod tests {
         assert_eq!(result.unwrap_err().to_string(), "hash mismatch");
         assert_eq!(fs::read(&path).unwrap(), b"old");
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    /*The data file is opened write-only, so reading it fails after the
+    prefix is written. The archive already there must survive.*/
+    #[test]
+    fn a_failed_archive_write_leaves_the_old_archive() {
+        let tmp = TempDir::new().unwrap();
+        let out_dir = tmp.path().join("out");
+        fs::create_dir(&out_dir).unwrap();
+        let archive = out_dir.join("roms.ssmc");
+        fs::write(&archive, b"old archive").unwrap();
+        let mut data = File::create(tmp.path().join("data")).unwrap();
+
+        assert!(write_archive(&archive, b"prefix", &mut data).is_err());
+
+        assert_eq!(fs::read(&archive).unwrap(), b"old archive");
+        assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 1);
     }
 
     /*An entry name can use all 255 bytes a file system allows, so the temp

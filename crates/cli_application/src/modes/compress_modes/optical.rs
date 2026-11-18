@@ -24,6 +24,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use serde::{Serialize};
 use sha2::{Digest};
 use sprite_shrink::Hashable;
+use tempfile::tempfile_in;
 use tracing::{
     debug,
 };
@@ -46,8 +47,8 @@ use xxhash_rust::xxh3::Xxh3;
 
 use crate::{
     arg_handling::Args,
-    cli_types::{DiscCompleteData, TempFileGuard},
-    storage_io::write_final_archive,
+    cli_types::DiscCompleteData,
+    storage_io::{parent_dir, write_archive},
 };
 use crate::cli_types::{
     CacheTarget, OpticalChunkMessage
@@ -189,8 +190,6 @@ where
     };
 
     let cache_info = get_cache_paths();
-
-    let pid = cache_info.id;
 
     let base_path = cache_info.cache_path.with_extension("");
     let stem = base_path.file_name().unwrap().to_str().unwrap();
@@ -376,24 +375,19 @@ where
     //Compress audio
     let mut audio_block_index: Vec<(H, ChunkLocation)> = Vec::new();
 
-    let tmp_file_path = Arc::new(
-        args.output
+    let final_output_path = args.output
         .as_ref()
         .unwrap()
-        .parent()
-        .unwrap()
-        .join(format!("{pid}"))
-        .with_extension("tmp")
-    );
+        .with_extension("ssmd");
 
-    let tmp_file = File::create(tmp_file_path.as_path())?;
+    /*Holds the compressed audio and data until the prefix can be built.
+    The file has no name, so the system deletes it however the run ends.*/
+    let tmp_file = tempfile_in(parent_dir(&final_output_path))?;
 
     let writer = Arc::new(
         Mutex::new(BufWriter::with_capacity(64 * 1024, tmp_file))
     );
 
-    /*Set file guard to clean up tmp files on error. */
-    let _tmp_guard = TempFileGuard::new(&tmp_file_path);
     let audio_blob_size = Arc::new(AtomicU64::new(0));
 
     if audio_data_size > 0 {
@@ -473,8 +467,14 @@ where
     let comp_data = comp_data_builder.build()?;
     super::note_if_no_dictionary(&comp_data);
 
-    writer.lock().unwrap().flush()?;
-    let blob_size = _tmp_guard.size();
+    /*Flush, then take a second handle to the file. It shares the first
+    one's position, so write_archive's rewind applies to both.*/
+    let mut tmp_file = {
+        let mut writer = writer.lock().unwrap();
+        writer.flush()?;
+        writer.get_ref().try_clone()?
+    };
+    let blob_size = tmp_file.metadata()?.len();
 
     archive_toc.iter_mut().for_each(|toc|{
         toc.filename.push_str(".bin");
@@ -497,16 +497,7 @@ where
 
     println!("Estimated final data size with blob: {}", final_data.len() + blob_size as usize);
 
-    let final_output_path = args.output
-        .as_ref()
-        .unwrap()
-        .with_extension("ssmd");
-
-    write_final_archive(
-        &final_output_path,
-        &tmp_file_path,
-        &final_data
-    )?;
+    write_archive(&final_output_path, &final_data, &mut tmp_file)?;
 
     Ok(())
 }
