@@ -206,7 +206,7 @@ The guide and the scripts can be found [here](./helper_scripts/):
 
 ## Error Handling & Reliability
 
-SpriteShrink is designed to be robust. It gracefully handles malformed inputs, ensures data integrity (byte-for-byte identical extraction), and provides clear, actionable error messages. Operations are atomic, meaning partially written output files are automatically cleaned up in case of cancellation or failure.
+SpriteShrink is designed to be robust. It gracefully handles malformed inputs, ensures data integrity (byte-for-byte identical extraction), and provides clear, actionable error messages. Archives and extracted files are written to a temporary file in the destination folder and renamed into place only once complete, so a cancelled or failed run leaves no partial file and an existing file keeps its old contents. A process that is killed outright, rather than cancelled, can leave a hidden `.<name>.<random>.tmp` file behind, which is safe to delete.
 
 ---
 

@@ -140,6 +140,8 @@ Let's say you have your game variants in a folder named `MyGameCollection`.
 
 Each file is stored under its file name, so every input must have a different name. If you give several folders with `-i` and two of them hold a file with the same name, such as `USA/game.rom` and `Europe/game.rom`, SpriteShrink lists the clashing names and stops before writing anything. Rename one of the files and run it again.
 
+A name must also work as a file name on Windows, macOS and Linux, because the archive can be extracted on any of them. A name containing `:`, `\` or a control character, ending in a dot or space, or using a Windows device name such as `CON` or `LPT1` (with or without an extension, so `nul.bin` too), is refused before anything is compressed.
+
 ### 2. Compressing Optical Disc Images (Optical Mode)
 
    SpriteShrink features a specialized "Optical Mode" designed specifically for CD-based disc images (like PlayStation 1, Sega Saturn, or Sega CD games). Unlike standard file compression, this mode understands the structure of the disc (sectors, audio tracks, error correction), allowing for safe, bit-perfect restoration and superior compression of game data and CD audio.
@@ -147,6 +149,8 @@ Each file is stored under its file name, so every input must have a different na
    **Supported Formats:**
    *   **.cue/.bin**: The standard for raw disc images.
    *   **.m3u/.m3u8**: Playlists used to group multi-disc games into a single "collection" within the archive.
+
+   Extensions are matched in any letter case, so `GAME.CUE` and `SET.M3U` are found too.
 
    **Command Structure:**
    `./sprite_shrink --mode optical -i <path_to_images> -o <output_filename>`
@@ -162,10 +166,11 @@ Each file is stored under its file name, so every input must have a different na
 
    **Key Features of Optical Mode:**
    *   **Audio Compression**: Redundant CD-DA (audio) tracks are analyzed and compressed/deduplicated separately from data tracks.
-   *   **Multi-Disc Collections**: If you include an `.m3u` file containing filenames of `.cue` sheets (e.g., "Final Fantasy VII (Disc 1).cue", etc.), SpriteShrink will link them together into a group. Lines starting with `#` are comments. When you list the archive, discs in a group share a number in the `Grp` column (`group` with `-m`); discs in no group show `-` (`null`).
+   *   **Multi-Disc Collections**: If you include an `.m3u` file containing filenames of `.cue` sheets (e.g., "Final Fantasy VII (Disc 1).cue", etc.), SpriteShrink will link them together into a group. Lines starting with `#` are comments. When you list the archive, discs in a group share a number in the `Grp` column (`group` with `-m`); discs in no group show `-` (`null`). Each line is matched to a disc by its `.cue` file name, letter case included. An archive holds at most 255 groups; a 256th playlist that lists discs stops the run with an error naming that playlist.
    *   **Unique Disc Names**: Each disc is stored under its `.cue` file's name, so every `.cue` sheet must have a different name, even when they are in different folders. Each disc's `.bin` files are read from the folder its `.cue` file is in.
    *   **Integrity Verification**: Optical mode calculates specialized hashes (SHA-512 and XXH3) to ensure the reconstructed disc is bit-perfect to the original.
    *   **CUE Sheet Contents**: The archive keeps each track's type, its `INDEX` positions and any `PREGAP` or `POSTGAP`, which together set where every track sits on the disc. Other commands, such as `FLAGS`, `CATALOG`, `ISRC`, CD-Text and most `REM` lines, don't change the disc's layout and aren't stored; SpriteShrink prints a warning naming the ones it drops.
+   *   **Text Encoding**: Sheets saved in an encoding other than UTF-8, such as Shift-JIS, are read. Text in lines that aren't stored, like `TITLE`, doesn't matter. A `FILE` name with non-ASCII characters has to be UTF-8, or its `.bin` isn't found and SpriteShrink reports the path it looked for.
    *   **Dreamcast (GD-ROM) Discs**: Sheets in Redump's Dreamcast format, with `REM SINGLE-DENSITY AREA` and `REM HIGH-DENSITY AREA` lines, are supported. The extracted CUE sheet keeps both lines. Like every disc, it is extracted as a single `.bin` file.
    *   **Not Yet Supported**: Multi-session discs (a sheet with `REM SESSION 02` or later) are refused with an error, so nothing is archived that couldn't be restored correctly.
 
@@ -388,6 +393,8 @@ These scripts are located in the [`helper_scripts`](../helper_scripts/) director
 *   **"File not found" or "The system cannot find the path specified"**: Double-check your `-i` and `-o` paths. Make sure there are no typos. Remember to use `./` for files in the current directory.
 
 *   **"Permission Denied"**: Ensure you have the rights to read the input directory and write to the output directory. On Linux/macOS, you may need to use `chmod` to adjust permissions.
+
+*   **"Archive format 1.0 is not supported"**: The archive was made by a SpriteShrink release that wrote format 1.x, which this version can't read. The message lists the formats it does read. Extract the archive with the release that made it, then compress the files again.
 
 *   **Hash Verification Fails**: During compression, SpriteShrink verifies that its internal representation of the data is correct. If this fails, it may be due to a rare hash collision. You can try the compression again with `--hash-bit-length 128` to use a more robust (but slightly slower) hashing algorithm.
 
