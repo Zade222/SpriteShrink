@@ -11,6 +11,7 @@ use std::{
 use crate::{
     analyze::SYNC_PATTERN,
     ecc::{calc_ecc_simd_inplace, calc_ecc_bitwise, calculate_edc},
+    flac::audio_block_len,
     lib_error_handling::SpriteShrinkCDError,
     lib_structs::{
         DecodedSectorInfo, DiscManifest, MsfTime, RleSectorMap,
@@ -859,9 +860,9 @@ where
         .map(|data| (data.hash, data.uncomp_len as usize))
         .collect();
 
-    let audio_hashes: Vec<H> = manifest.audio_block_map.iter().map(|block| {
-        block.content_hash
-    }).collect();
+    let audio_blocks: Vec<(H, usize)> = manifest.audio_block_map.iter()
+        .map(|block| (block.content_hash, audio_block_len(block.sector_count)))
+        .collect();
 
     let expanded_sector_types = expand_sector_map(&manifest.rle_sector_map);
     let total_sectors = expanded_sector_types.len();
@@ -912,7 +913,7 @@ where
 
         let audio_fetch_handle = spawn_audio_decomp_worker(
             scope,
-            audio_hashes,
+            audio_blocks,
             &indices.audio_block_index,
             archive_file,
             cloned_audio_buffer,

@@ -12,7 +12,7 @@ use std::os::unix::fs::FileExt;
 use std::os::windows::fs::FileExt;
 
 use crate::{
-    flac::decompress_flac_block,
+    flac::{audio_block_len, decompress_flac_block},
     lib_error_handling::SpriteShrinkCDError,
     reconstruction::{
         MsfOffsets, ReconstructionError,
@@ -39,6 +39,11 @@ pub const SSMD_UID: u16 = 0xd541;
 /// a 99-minute CD's 450,000. Archiving rejects a larger disc, and reading
 /// rejects a manifest that claims more, before anything is sized from it.
 pub const MAX_DISC_SECTORS: u64 = 549_150;
+
+/// The most sectors one audio block may hold. The compressor writes 16; the
+/// rest is room to change that without a format change. Decoding an audio
+/// block never produces more than this many sectors of audio.
+pub const MAX_AUDIO_BLOCK_SECTORS: u32 = 1024;
 
 
 #[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
@@ -368,12 +373,14 @@ where
         Ok(buf)
     }
 
-    /// Reads and decodes the audio block stored under `content_hash`, and
-    /// checks that it decodes to the PCM that hash was taken from. FLAC can
-    /// decode some damage without an error.
+    /// Reads and decodes the audio block stored under `content_hash`, which
+    /// holds `sector_count` sectors, and checks that it decodes to the PCM
+    /// that hash was taken from. FLAC can decode some damage without an
+    /// error.
     fn read_audio_block(
         &self,
         content_hash: H,
+        sector_count: u32,
     ) -> Result<Vec<u8>, SpriteShrinkCDError> {
         let chunk_loc = self.indices.audio_block_index.get(&content_hash)
             .ok_or_else(|| ReconstructionError::InternalError(
@@ -381,7 +388,10 @@ where
             ))?;
 
         let comp_data = self.read_stored(*chunk_loc)?;
-        let decomp = decompress_flac_block(&comp_data)
+        let decomp = decompress_flac_block(
+            &comp_data,
+            audio_block_len(sector_count)
+        )
             .map_err(|e| SpriteShrinkCDError::External(Box::new(e)))?;
 
         let actual = H::from_bytes_with_seed(&decomp);
@@ -416,9 +426,10 @@ where
         match reconstruction_info {
             Some(ReconstructionInfo::FromBlock {
                 content_hash,
+                sector_count,
                 offset_in_block
             }) => {
-                let decomp = self.read_audio_block(content_hash)?;
+                let decomp = self.read_audio_block(content_hash, sector_count)?;
 
                 let start = offset_in_block as usize;
                 let end = start + 2352;
@@ -697,6 +708,7 @@ impl<'a, H: Copy + Eq> ReconstructionContext<'a, H> {
 
                         return Some(ReconstructionInfo::FromBlock {
                             content_hash: block.content_hash,
+                            sector_count: block.sector_count,
                             offset_in_block,
                         });
                     }
@@ -722,6 +734,8 @@ impl<'a, H: Copy + Eq> ReconstructionContext<'a, H> {
 pub enum ReconstructionInfo<H> {
     FromBlock {
         content_hash: H,
+        /// The whole block's length in sectors, from the disc manifest.
+        sector_count: u32,
         offset_in_block: u32,
     },
 

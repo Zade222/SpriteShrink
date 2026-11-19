@@ -478,6 +478,21 @@ fn a_damaged_audio_block_is_not_read_back() {
     }
 }
 
+/// A sector read stops decoding an audio block at its recorded length.
+/// With the record one sector short, the block's last sector is left
+/// uncovered, and the others fail as too long.
+#[test]
+fn a_sector_read_rejects_an_audio_block_longer_than_its_record() {
+    let mut disc = archive(full_disc(), FULL_DISC_CUE);
+    disc.manifest.audio_block_map[0].sector_count -= 1;
+
+    let errors = failed_sector_reads(&disc);
+    assert!(
+        errors.iter().any(|e| e.contains("Audio block decodes to more than")),
+        "{errors:?}"
+    );
+}
+
 /// A manifest that doesn't cover every sector fails on the uncovered ones,
 /// rather than returning sectors rebuilt around zeros. The data cut drops
 /// whole chunks, at least 3000 bytes, so at least the last 2048-byte
@@ -664,6 +679,19 @@ fn write_disc_rejects_a_chunk_longer_than_its_record() {
     let (cancelled, err) = result.unwrap_err();
     assert!(!cancelled, "{err}");
     assert!(err.contains("Chunk decodes to more than"), "{err}");
+}
+
+/// The same for an audio block and its recorded sector count.
+#[test]
+fn write_disc_rejects_an_audio_block_longer_than_its_record() {
+    let mut disc = archive(full_disc(), FULL_DISC_CUE);
+    disc.manifest.audio_block_map[0].sector_count -= 1;
+
+    let result = write_disc_or_hang(disc, std::io::sink(), || false)
+        .expect("write_disc hung after an audio block failed");
+    let (cancelled, err) = result.unwrap_err();
+    assert!(!cancelled, "{err}");
+    assert!(err.contains("Audio block decodes to more than"), "{err}");
 }
 
 #[test]

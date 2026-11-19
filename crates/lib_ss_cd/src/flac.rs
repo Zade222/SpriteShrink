@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::{
     lib_error_handling::SpriteShrinkCDError,
+    lib_structs::MAX_AUDIO_BLOCK_SECTORS,
 };
 
 use sprite_shrink::{ChunkLocation, IsCancelled, compress_chunks_with};
@@ -27,6 +28,26 @@ pub enum FlacError {
 
     #[error("Flac init error: {0}")]
     Init(String),
+
+    #[error("Audio block decodes to more than the {limit} bytes allowed. \
+        The archive may be damaged.")]
+    TooLong { limit: usize },
+}
+
+/// Bytes in one sector of CD audio.
+const AUDIO_SECTOR_LEN: usize = 2352;
+
+/// The most bytes an audio block decodes to: [`MAX_AUDIO_BLOCK_SECTORS`]
+/// sectors.
+const MAX_AUDIO_BLOCK_LEN: usize =
+    MAX_AUDIO_BLOCK_SECTORS as usize * AUDIO_SECTOR_LEN;
+
+/// The decoded length of an audio block of `sector_count` sectors, as the
+/// disc manifest records it. Saturates rather than overflowing; the result
+/// is only used as a decoding limit, which `decompress_flac_block` caps.
+pub(crate) fn audio_block_len(sector_count: u32) -> usize {
+    usize::try_from(sector_count)
+        .map_or(usize::MAX, |count| count.saturating_mul(AUDIO_SECTOR_LEN))
 }
 
 
@@ -57,18 +78,43 @@ pub fn compress_audio_block(
 }
 
 
+/// Decodes a FLAC audio block to 16-bit little-endian PCM.
+///
+/// `max_len` is the most bytes the block may decode to, normally its
+/// sector count times 2352. Values above [`MAX_AUDIO_BLOCK_SECTORS`] worth
+/// of audio are lowered to that. Decoding stops one byte past the limit,
+/// and the reader decodes one FLAC frame at a time, so a small block that
+/// expands without end can't use much more memory than this.
+///
+/// The output isn't checked against the block's hash.
+///
+/// # Errors
+///
+/// Returns `FlacError::Init` or `FlacError::Decode` if the block isn't
+/// valid FLAC, or `FlacError::TooLong` if it decodes to more than the
+/// limit.
 pub fn decompress_flac_block(
-    flac_block: &[u8]
+    flac_block: &[u8],
+    max_len: usize,
 ) -> Result<Vec<u8>, FlacError> {
-    let mut reader = FlacByteReader::endian(
+    let max_len = max_len.min(MAX_AUDIO_BLOCK_LEN);
+
+    let reader = FlacByteReader::endian(
         flac_block,
         LittleEndian
     ).map_err(|e| FlacError::Init(e.to_string()))?;
 
+    /*Read one byte more than allowed, so output past `max_len` is seen
+    without decoding the rest of it.*/
+    let limit = u64::try_from(max_len).map_or(u64::MAX, |len| len.saturating_add(1));
     let mut audio_bytes = Vec::new();
 
-    reader.read_to_end(&mut audio_bytes)
+    reader.take(limit).read_to_end(&mut audio_bytes)
         .map_err(|e| FlacError::Decode(e.to_string()))?;
+
+    if audio_bytes.len() > max_len {
+        return Err(FlacError::TooLong { limit: max_len });
+    }
 
     Ok(audio_bytes)
 }
@@ -204,7 +250,7 @@ mod tests {
             for best in [true, false] {
                 let flac = compress_audio_block(&audio, best).unwrap();
                 assert_eq!(
-                    decompress_flac_block(&flac).unwrap(),
+                    decompress_flac_block(&flac, audio.len()).unwrap(),
                     audio,
                     "{name}, best {best}"
                 );
@@ -251,8 +297,34 @@ mod tests {
 
     #[test]
     fn garbage_does_not_decode() {
-        decompress_flac_block(&[]).unwrap_err();
-        decompress_flac_block(&noise(100)).unwrap_err();
+        decompress_flac_block(&[], SECTOR).unwrap_err();
+        decompress_flac_block(&noise(100), SECTOR).unwrap_err();
+    }
+
+    #[test]
+    fn a_block_that_decodes_past_max_len_fails() {
+        let flac = compress_audio_block(&sine(32 * SECTOR / 4), true).unwrap();
+        let result = decompress_flac_block(&flac, 16 * SECTOR);
+        assert!(
+            matches!(result, Err(FlacError::TooLong { limit }) if limit == 16 * SECTOR),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn decoding_never_passes_the_largest_audio_block() {
+        // Silence encodes to a few bytes per frame, so this is small.
+        let sectors = MAX_AUDIO_BLOCK_SECTORS as usize + 1;
+        let flac = compress_audio_block(&silence(sectors * SECTOR / 4), false)
+            .unwrap();
+        let result = decompress_flac_block(&flac, usize::MAX);
+        assert!(
+            matches!(
+                result,
+                Err(FlacError::TooLong { limit: MAX_AUDIO_BLOCK_LEN })
+            ),
+            "{result:?}"
+        );
     }
 
     type ReadResult = Result<Vec<Vec<u8>>, SpriteShrinkError>;
@@ -330,7 +402,7 @@ mod tests {
             );
             offset += u64::from(location.compressed_length);
             assert_eq!(
-                decompress_flac_block(flac).unwrap(),
+                decompress_flac_block(flac, blocks[hash].len()).unwrap(),
                 blocks[hash],
                 "block {hash}"
             );

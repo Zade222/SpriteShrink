@@ -186,9 +186,12 @@ where
 }
 
 
+/// Spawns a worker that reads, decodes and buffers each audio block in
+/// `blocks`, given as its hash and its decoded length from the disc
+/// manifest. Decoding stops just past that length.
 pub fn spawn_audio_decomp_worker<'scope, 'env, H>(
     scope: &'scope Scope<'scope, 'env>,
-    hash_list: Vec<H>,
+    blocks: Vec<(H, usize)>,
     audio_index: &'env HashMap<H, ChunkLocation>,
     archive_file: &'env File,
     shared_state: SharedBuffer,
@@ -203,7 +206,7 @@ where
             shared_state: shared_state.clone(),
         };
 
-        for hash in hash_list {
+        for (hash, len) in blocks {
 
             let result = (|| -> Result<Vec<u8>, SpriteShrinkCDError> {
                 let chunk_loc = audio_index.get(&hash)
@@ -216,7 +219,7 @@ where
                 #[cfg(windows)]
                 archive_file.seek_read(&mut comp_data, chunk_loc.offset)?;
 
-                Ok(decompress_flac_block(&comp_data)?)
+                Ok(decompress_flac_block(&comp_data, len)?)
             })();
 
 
