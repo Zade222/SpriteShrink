@@ -6,7 +6,6 @@
 //! core components needed to locate and extract the contained files.
 
 use std::{
-    fs::metadata,
     hash::Hash,
     path::Path,
 };
@@ -155,21 +154,12 @@ where
     Ok(parse_ssmd_prefix(&prefix)?)
 }
 
-/// Reads the first `prefix_end` bytes of an archive. The length comes from
-/// the archive itself, so it's checked against the file size before a
-/// buffer that large is allocated.
+/// Reads the first `prefix_end` bytes of an archive. `read_file_data`
+/// checks the length against the file size before allocating.
 fn read_archive_prefix(
     file_path: &Path,
     prefix_end: u64,
 ) -> Result<Vec<u8>, CliError> {
-    let file_len = metadata(file_path)?.len();
-
-    if prefix_end > file_len {
-        return Err(CliError::DataIntegrity(format!(
-            "the metadata ends at byte {prefix_end}, past the end of the \
-            {file_len}-byte file"
-        )));
-    }
     let Ok(prefix_len) = usize::try_from(prefix_end) else {
         return Err(CliError::InternalError(format!(
             "The archive's {prefix_end}-byte metadata is too large to read \

@@ -295,43 +295,98 @@ fn temp_prefix(final_path: &Path) -> String {
     prefix
 }
 
-/// Reads a specific segment of a file into a byte vector.
+/// Reads `data_length` bytes of a file, starting at `data_index`. See
+/// [`ArchiveFile::read`].
 ///
-/// This function opens a file, seeks to a specified starting offset,
-/// and reads a given number of bytes into a buffer. It is useful for
-/// accessing parts of a large file without loading the entire content
-/// into memory, such as reading a data chunk from an archive.
+/// # Errors
 ///
-/// # Arguments
-///
-/// * `filepath`: A `Path` pointing to the file to be read.
-/// * `data_index`: A `u64` for the starting offset.
-/// * `data_length`: A `u64` for the number of bytes to read.
-///
-/// # Returns
-///
-/// A `Result` which is:
-/// - `Ok(Vec<u8>)` containing the bytes read from the file segment.
-/// - `Err(CliError::Io)` if the file cannot be opened or read.
+/// Returns `CliError::DataIntegrity` if the bytes run past the end of the
+/// file, or `CliError::Io` if the file can't be opened or read.
 pub fn read_file_data(
     filepath: &Path,
     data_index: u64,
     data_length: usize
 ) -> Result<Vec<u8>, CliError> {
-    //Open file, but don't read whole file data into memory.
-    let mut file = File::open(filepath)?;
+    ArchiveFile::open(filepath)?.read(data_index, data_length)
+}
 
-    //Create mutable vector the size of the data length to be read.
-    let mut file_buffer: Vec<u8> =  vec![0; data_length];
+/// An archive opened for reading, with its length read once.
+///
+/// Reads don't move a shared file position, so several threads can read
+/// through one `&ArchiveFile` at once.
+#[derive(Debug)]
+pub struct ArchiveFile {
+    file: File,
+    len: u64,
+}
 
-    //Offset the start of where the read will begin.
-    file.seek(SeekFrom::Start(data_index))?;
+impl ArchiveFile {
+    /// # Errors
+    ///
+    /// Returns `CliError::Io` if the file can't be opened or its length
+    /// can't be read.
+    pub fn open(path: &Path) -> Result<Self, CliError> {
+        let file = File::open(path)?;
+        let len = file.metadata()?.len();
+        Ok(Self { file, len })
+    }
 
-    //Read the data data from the file.
-    file.read_exact(&mut file_buffer)?;
+    /// Reads `length` bytes starting at `offset`.
+    ///
+    /// The offset and length usually come from the archive itself, so
+    /// they're checked against the file's length before a buffer that large
+    /// is allocated.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CliError::DataIntegrity` if the bytes run past the end of
+    /// the file, or `CliError::Io` if they can't be read.
+    pub fn read(&self, offset: u64, length: usize) -> Result<Vec<u8>, CliError> {
+        let end = u64::try_from(length).ok()
+            .and_then(|length| offset.checked_add(length));
+        if end.is_none_or(|end| end > self.len) {
+            return Err(CliError::DataIntegrity(format!(
+                "{length} bytes at offset {offset} run past the end of the \
+                {}-byte file",
+                self.len
+            )));
+        }
 
-    //Return read data from file.
-    Ok(file_buffer)
+        let mut buf = vec![0; length];
+        read_exact_at(&self.file, &mut buf, offset)?;
+        Ok(buf)
+    }
+}
+
+#[cfg(unix)]
+fn read_exact_at(file: &File, buf: &mut [u8], offset: u64) -> io::Result<()> {
+    std::os::unix::fs::FileExt::read_exact_at(file, buf, offset)
+}
+
+/// Fills `buf` from `offset`. `seek_read`, like `read`, can return fewer
+/// bytes than asked for, and Windows has no `read_exact_at`, so this calls
+/// it until `buf` is full.
+#[cfg(windows)]
+fn read_exact_at(
+    file: &File,
+    mut buf: &mut [u8],
+    mut offset: u64,
+) -> io::Result<()> {
+    use std::os::windows::fs::FileExt;
+
+    while !buf.is_empty() {
+        match file.seek_read(buf, offset) {
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(read) => {
+                let rest = buf;
+                buf = &mut rest[read..];
+                offset += read as u64;
+            }
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 /// Returns the folder `path` is in, or `.` when `path` is a bare file name
@@ -776,6 +831,24 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
+
+    #[test]
+    fn a_file_read_must_end_inside_the_file() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("data");
+        fs::write(&path, [1, 2, 3, 4]).unwrap();
+
+        assert_eq!(read_file_data(&path, 2, 2).unwrap(), [3, 4]);
+
+        for (offset, length) in [(2, 3), (u64::MAX, 1)] {
+            let Err(CliError::DataIntegrity(message)) =
+                read_file_data(&path, offset, length)
+            else {
+                panic!("{length} bytes at {offset} were read");
+            };
+            assert!(message.contains("4-byte file"), "{message}");
+        }
+    }
 
     #[test]
     fn the_default_config_file_holds_the_default_config() {

@@ -6,6 +6,7 @@ use bitcode::{
     Decode, decode
 };
 use sprite_shrink::{
+    MAX_CHUNK_LEN,
     ChunkLocation, FileHeader, FileRegion, SpriteShrinkError,
     check_entry_name, parse_file_header
 };
@@ -14,7 +15,7 @@ use thiserror::Error;
 use crate::{
     lib_error_handling::SpriteShrinkCDError,
     lib_structs::{
-        MAX_DISC_SECTORS, SSMD_UID,
+        MAX_AUDIO_BLOCK_SECTORS, MAX_DISC_SECTORS, SSMD_UID,
         ContentBlock, DataChunkLayout, DiscManifest, ParsedSSMD,
         RleSectorMap, SSMDFormatData, SSMDIndices, SSMDTocEntry,
         SubHeaderEntry
@@ -38,6 +39,23 @@ pub enum DecodeError {
     #[error("Disc {disc} lists {sectors} sectors, more than the {max} a CD \
         or GD-ROM can hold.", max = MAX_DISC_SECTORS)]
     TooManySectors { disc: usize, sectors: u64 },
+
+    #[error("Disc {disc} lists a chunk of {length} bytes, more than the \
+        {max} bytes a chunk can hold.", max = MAX_CHUNK_LEN)]
+    ChunkTooLong { disc: usize, length: u32 },
+
+    #[error("Disc {disc} lists an audio block of {sectors} sectors, more \
+        than the {max} a block can hold.", max = MAX_AUDIO_BLOCK_SECTORS)]
+    AudioBlockTooLong { disc: usize, sectors: u32 },
+
+    #[error("Disc {disc} lists an audio block of {sector_count} sectors at \
+        sector {start_sector}, past the disc's {disc_sectors} sectors.")]
+    AudioBlockOutOfRange {
+        disc: usize,
+        start_sector: u32,
+        sector_count: u32,
+        disc_sectors: u64,
+    },
 
     //#[error("Failed to decode file manifest: {0}")]
     //ManifestDecodeError(String),
@@ -110,7 +128,9 @@ pub fn decode_ssmd_format_data(
 /// Returns an error if the header is invalid or isn't for an SSMD
 /// archive, a section lies outside `prefix`, a section fails to decode, a
 /// disc's name fails `check_entry_name`,
-/// a disc lists more than `MAX_DISC_SECTORS` sectors, the subheader
+/// a disc lists more than `MAX_DISC_SECTORS` sectors, a chunk longer than
+/// `MAX_CHUNK_LEN`, an audio block longer than `MAX_AUDIO_BLOCK_SECTORS`
+/// or an audio block that runs past the end of the disc, the subheader
 /// table's length isn't a multiple of 8, or a chunk's absolute offset
 /// doesn't fit in a `u64`.
 pub fn parse_ssmd_prefix<H>(
@@ -152,17 +172,8 @@ where
         format_data.enc_disc_manifest.bytes_in(prefix, "disc manifest")?,
         header.file_version
     )?;
-    /*Readers size their sector maps from this total, so a damaged manifest
-    could otherwise ask for gigabytes.*/
     for (index, manifest) in disc_manifests.iter().enumerate() {
-        let sectors = manifest.rle_sector_map.runs.iter()
-            .fold(0_u64, |total, &(count, _)| total.saturating_add(count.into()));
-        if sectors > MAX_DISC_SECTORS {
-            return Err(DecodeError::TooManySectors {
-                disc: index + 1,
-                sectors,
-            }.into());
-        }
+        check_manifest_sizes(manifest, index + 1)?;
     }
 
     let data_dictionary = format_data.data_dictionary
@@ -217,6 +228,58 @@ where
         subheader_table: subheader_table.to_vec(),
         exception_blob,
     })
+}
+
+/// Checks the sizes a disc manifest records against the format's
+/// ceilings. Readers size their sector maps, chunk buffers and audio
+/// buffers from these values, so a damaged manifest could otherwise ask
+/// for gigabytes. An audio block must also lie inside the disc, or reading
+/// it would index past the sector map.
+///
+/// `disc` is the disc's 1-based number, for error messages.
+fn check_manifest_sizes<H>(
+    manifest: &DiscManifest<H>,
+    disc: usize,
+) -> Result<(), DecodeError> {
+    let disc_sectors = manifest.rle_sector_map.runs.iter()
+        .fold(0_u64, |total, &(count, _)| total.saturating_add(count.into()));
+    if disc_sectors > MAX_DISC_SECTORS {
+        return Err(DecodeError::TooManySectors {
+            disc,
+            sectors: disc_sectors,
+        });
+    }
+
+    if let Some(chunk) = manifest.data_stream_layout.iter()
+        .find(|chunk| chunk.uncomp_len as usize > MAX_CHUNK_LEN)
+    {
+        return Err(DecodeError::ChunkTooLong {
+            disc,
+            length: chunk.uncomp_len,
+        });
+    }
+
+    for block in &manifest.audio_block_map {
+        if block.sector_count > MAX_AUDIO_BLOCK_SECTORS {
+            return Err(DecodeError::AudioBlockTooLong {
+                disc,
+                sectors: block.sector_count,
+            });
+        }
+        /*Both are u32, so the sum fits in a u64.*/
+        let block_end =
+            u64::from(block.start_sector) + u64::from(block.sector_count);
+        if block_end > disc_sectors {
+            return Err(DecodeError::AudioBlockOutOfRange {
+                disc,
+                start_sector: block.start_sector,
+                sector_count: block.sector_count,
+                disc_sectors,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 /// Decodes the disc manifests in the layout `file_version` wrote them

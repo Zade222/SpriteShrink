@@ -396,6 +396,8 @@ These scripts are located in the [`helper_scripts`](../helper_scripts/) director
 
 *   **"Archive format 1.0 is not supported"**: The archive was made by a SpriteShrink release that wrote format 1.x, which this version can't read. The message lists the formats it does read. Extract the archive with the release that made it, then compress the files again.
 
+*   **When listing or extracting, errors that say "may be damaged", "past the end", "past the disc's", or "more than the ... can hold"**: The archive records a size that doesn't match its contents, usually because the file was cut short (an interrupted download or copy) or damaged on disk. SpriteShrink stops rather than reading or decoding past what the archive should hold. Copy or download the archive again. If only some files fail, extract the others by number with `-e`.
+
 *   **Hash Verification Fails**: During compression, SpriteShrink verifies that its internal representation of the data is correct. If this fails, it may be due to a rare hash collision. You can try the compression again with `--hash-bit-length 128` to use a more robust (but slightly slower) hashing algorithm.
 
 *   **Log Files**: SpriteShrink creates a detailed log file that can be very helpful for debugging persistent issues. If you encounter a crash or unexpected behavior, the contents of this log file provide valuable information. The log level can be configured in the [configuration file](#the-configuration-file) to provide more or less detail.

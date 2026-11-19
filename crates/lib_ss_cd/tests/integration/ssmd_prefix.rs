@@ -4,12 +4,12 @@
 
 use bitcode::{Encode, encode};
 use sprite_shrink::{
-    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128,
+    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, MAX_CHUNK_LEN,
     ChunkLocation, CompressionResult, FileHeader,
     parse_file_header,
 };
 use sprite_shrink_cd::{
-    MAX_DISC_SECTORS, SSMD_UID,
+    MAX_AUDIO_BLOCK_SECTORS, MAX_DISC_SECTORS, SSMD_UID,
     ContentBlock, DataChunkLayout, DiscArea, DiscFile, DiscIndex, DiscManifest,
     DiscTrack, RleSectorMap, SSMDFormatData, SSMDPrefix, SSMDTocEntry,
     SectorType, SpriteShrinkCDError, SubHeaderEntry, TrackType,
@@ -388,6 +388,74 @@ fn a_disc_past_the_sector_cap_is_rejected_before_its_maps_are_built() {
         e.to_string().contains(&format!("Disc 2 lists {}", MAX_DISC_SECTORS + 1)),
         "{e}"
     );
+}
+
+/// Builds the sample archive with `edit` applied to its second disc, then
+/// parses it. The second disc, so an error must name it. Building must
+/// succeed, so a test can't mistake a build error for a parse error.
+fn parse_with_disc_2(
+    edit: impl FnOnce(&mut DiscManifest<u64>),
+) -> Result<(), SpriteShrinkCDError> {
+    let prefix = prefix_with_disc_2(edit);
+    parse_ssmd_prefix::<u64>(&prefix).map(drop)
+}
+
+fn prefix_with_disc_2(edit: impl FnOnce(&mut DiscManifest<u64>)) -> Vec<u8> {
+    let mut inputs = inputs_with_audio([1_u64, 2, 3]);
+    edit(&mut inputs.disc_manifests[1]);
+    build_ssmd_prefix(&inputs.parts(HASH_TYPE_XXH3_64)).unwrap()
+}
+
+#[test]
+fn a_chunk_past_the_length_cap_is_rejected() {
+    let cap = u32::try_from(MAX_CHUNK_LEN).unwrap();
+    parse_with_disc_2(|disc| disc.data_stream_layout[0].uncomp_len = cap)
+        .unwrap();
+
+    let e = parse_with_disc_2(|disc| {
+        disc.data_stream_layout[0].uncomp_len = cap + 1;
+    }).unwrap_err();
+    assert!(
+        e.to_string().contains(&format!("Disc 2 lists a chunk of {}", cap + 1)),
+        "{e}"
+    );
+}
+
+#[test]
+fn an_audio_block_past_the_sector_cap_is_rejected() {
+    // Room on the disc for a block one sector past the cap, so only the
+    // cap can reject it.
+    let with_block = |sectors: u32| {
+        move |disc: &mut DiscManifest<u64>| {
+            disc.rle_sector_map.runs[1].0 = MAX_AUDIO_BLOCK_SECTORS + 1;
+            disc.audio_block_map[0].sector_count = sectors;
+        }
+    };
+    parse_with_disc_2(with_block(MAX_AUDIO_BLOCK_SECTORS)).unwrap();
+
+    let e = parse_with_disc_2(with_block(MAX_AUDIO_BLOCK_SECTORS + 1))
+        .unwrap_err();
+    assert!(
+        e.to_string().contains(&format!(
+            "Disc 2 lists an audio block of {} sectors",
+            MAX_AUDIO_BLOCK_SECTORS + 1
+        )),
+        "{e}"
+    );
+}
+
+#[test]
+fn an_audio_block_past_the_end_of_the_disc_is_rejected() {
+    // The sample block covers sectors 300 to 374 of a 375-sector disc.
+    let e = parse_with_disc_2(|disc| disc.audio_block_map[0].sector_count = 76)
+        .unwrap_err();
+    assert!(e.to_string().contains("Disc 2 lists an audio block"), "{e}");
+
+    // start_sector + sector_count doesn't fit in a u32.
+    let e = parse_with_disc_2(|disc| {
+        disc.audio_block_map[0].start_sector = u32::MAX;
+    }).unwrap_err();
+    assert!(e.to_string().contains("past the disc's 375 sectors"), "{e}");
 }
 
 // A host may read more than the prefix, up to the whole archive.

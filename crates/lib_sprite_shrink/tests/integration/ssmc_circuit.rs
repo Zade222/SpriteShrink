@@ -14,7 +14,7 @@ use bitcode::{Decode, Encode};
 use dashmap::DashMap;
 use serde::Deserialize;
 use sprite_shrink::{
-    HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128,
+    HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128,MAX_CHUNK_LEN,
     ArchiveBuilder, FileData, FileHeader, Hashable, ParsedSSMC, SSMCFormatData,
     SpriteShrinkError,
     build_ssmc_prefix, create_file_manifest_and_chunks, decompress_chunk,
@@ -144,13 +144,19 @@ impl<H: TestHash> Reader<H> {
         Self { archive, parsed }
     }
 
-    /// Decompresses one chunk from the archive's data section.
+    /// Decompresses one chunk from the archive's data section. Some
+    /// callers have only the hash, so the limit is the longest valid chunk;
+    /// `assert_files_extract` checks each chunk's length.
     fn chunk(&self, hash: &H) -> Vec<u8> {
         let location = &self.parsed.chunk_index[hash];
         let start = usize::try_from(location.offset).unwrap();
         let end = start + usize::try_from(location.compressed_length).unwrap();
-        decompress_chunk(&self.archive[start..end], &self.parsed.dictionary)
-            .unwrap()
+        decompress_chunk(
+            &self.archive[start..end],
+            &self.parsed.dictionary,
+            MAX_CHUNK_LEN,
+        )
+        .unwrap()
     }
 }
 

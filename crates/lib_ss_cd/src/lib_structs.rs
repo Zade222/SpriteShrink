@@ -1,18 +1,14 @@
 use std::{
     collections::HashMap,
     fmt::{self, Display, Formatter},
-    fs::File,
+    marker::PhantomData,
     mem,
     sync::atomic::{AtomicU16, AtomicU32, Ordering,}
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
 
 use crate::{
-    flac::decompress_flac_block,
+    flac::{audio_block_len, decompress_flac_block},
     lib_error_handling::SpriteShrinkCDError,
     reconstruction::{
         MsfOffsets, ReconstructionError,
@@ -20,6 +16,7 @@ use crate::{
         expand_sector_map, expand_subheader_map, rebuild_sector_simd,
         subheader_for
     },
+    util::read_stored_at,
 };
 
 use bitcode::{Decode, Encode};
@@ -39,6 +36,11 @@ pub const SSMD_UID: u16 = 0xd541;
 /// a 99-minute CD's 450,000. Archiving rejects a larger disc, and reading
 /// rejects a manifest that claims more, before anything is sized from it.
 pub const MAX_DISC_SECTORS: u64 = 549_150;
+
+/// The most sectors one audio block may hold. The compressor writes 16; the
+/// rest is room to change that without a format change. Decoding an audio
+/// block never produces more than this many sectors of audio.
+pub const MAX_AUDIO_BLOCK_SECTORS: u32 = 1024;
 
 
 #[derive(Clone, Debug, Decode, Deserialize, Encode, Eq, PartialEq, Serialize)]
@@ -267,6 +269,7 @@ impl<H: Copy + Eq> DiscManifest<H> {
 
                 needed_chunks.push(StreamChunkInfo {
                     chunk_hash: chunk_layout.hash,
+                    uncomp_len: chunk_layout.uncomp_len,
                     read_from_offset: (
                         overlap_start_in_stream - chunk_start
                     ) as u32,
@@ -294,11 +297,17 @@ impl<H: Copy + Eq> DiscManifest<H> {
 }
 
 
-pub struct DiscReconstructor<'a, H> {
+/// Reads single sectors of a disc from an archive.
+///
+/// `read_stored` returns the `compressed_length` bytes stored at a location
+/// in the archive, as for [`write_disc`]. `E` is its error type.
+///
+/// [`write_disc`]: crate::write_disc
+pub struct DiscReconstructor<'a, H, R, E> {
     manifest: &'a DiscManifest<H>,
     indices: &'a SSMDIndices<H>,
     dictionary: &'a [u8],
-    archive_file: &'a File,
+    read_stored: R,
     exception_blob: &'a [u8],
     subheader_table: &'a [[u8; 8]],
 
@@ -307,11 +316,15 @@ pub struct DiscReconstructor<'a, H> {
     expanded_subheader_map: Vec<Option<u16>>,
     expanded_exception_map: Vec<Option<u32>>,
     expanded_sector_types: Vec<SectorType>,
+
+    _error_type: PhantomData<fn() -> E>,
 }
 
-impl<'a, H> DiscReconstructor<'a, H>
+impl<'a, H, R, E> DiscReconstructor<'a, H, R, E>
 where
     H: Hashable + Display + Copy + Eq,
+    R: Fn(ChunkLocation) -> Result<Vec<u8>, E>,
+    E: std::error::Error + Send + Sync + 'static,
 {
     /// # Errors
     /// [`ReconstructionError::ExceptionSectorOutOfRange`] when the manifest's
@@ -320,7 +333,7 @@ where
         manifest: &'a DiscManifest<H>,
         indices: &'a SSMDIndices<H>,
         dictionary: &'a [u8],
-        archive_file: &'a File,
+        read_stored: R,
         exception_blob: &'a [u8],
         subheader_table: &'a [[u8; 8]],
     ) -> Result<Self, ReconstructionError> {
@@ -344,43 +357,36 @@ where
             manifest,
             indices,
             dictionary,
-            archive_file,
+            read_stored,
             exception_blob,
             subheader_table,
             context,
             expanded_subheader_map,
             expanded_exception_map,
             expanded_sector_types,
+            _error_type: PhantomData,
         })
     }
 
-    /// Reads the compressed bytes stored at `location` in the archive.
-    fn read_stored(
-        &self,
-        location: ChunkLocation,
-    ) -> Result<Vec<u8>, SpriteShrinkCDError> {
-        let mut buf = vec![0u8; location.compressed_length as usize];
-        #[cfg(unix)]
-        self.archive_file.read_at(&mut buf, location.offset)?;
-        #[cfg(windows)]
-        self.archive_file.seek_read(&mut buf, location.offset)?;
-        Ok(buf)
-    }
-
-    /// Reads and decodes the audio block stored under `content_hash`, and
-    /// checks that it decodes to the PCM that hash was taken from. FLAC can
-    /// decode some damage without an error.
+    /// Reads and decodes the audio block stored under `content_hash`, which
+    /// holds `sector_count` sectors, and checks that it decodes to the PCM
+    /// that hash was taken from. FLAC can decode some damage without an
+    /// error.
     fn read_audio_block(
         &self,
         content_hash: H,
+        sector_count: u32,
     ) -> Result<Vec<u8>, SpriteShrinkCDError> {
         let chunk_loc = self.indices.audio_block_index.get(&content_hash)
             .ok_or_else(|| ReconstructionError::InternalError(
                 format!("Missing audio hash {content_hash}")
             ))?;
 
-        let comp_data = self.read_stored(*chunk_loc)?;
-        let decomp = decompress_flac_block(&comp_data)
+        let comp_data = read_stored_at(&self.read_stored, *chunk_loc)?;
+        let decomp = decompress_flac_block(
+            &comp_data,
+            audio_block_len(sector_count)
+        )
             .map_err(|e| SpriteShrinkCDError::External(Box::new(e)))?;
 
         let actual = H::from_bytes_with_seed(&decomp);
@@ -415,9 +421,10 @@ where
         match reconstruction_info {
             Some(ReconstructionInfo::FromBlock {
                 content_hash,
+                sector_count,
                 offset_in_block
             }) => {
-                let decomp = self.read_audio_block(content_hash)?;
+                let decomp = self.read_audio_block(content_hash, sector_count)?;
 
                 let start = offset_in_block as usize;
                 let end = start + 2352;
@@ -437,11 +444,12 @@ where
                         format!("Missing data hash {}", chunk.chunk_hash)
                     ))?;
 
-                    let comp_data = self.read_stored(*chunk_loc)?;
+                    let comp_data = read_stored_at(&self.read_stored, *chunk_loc)?;
                     let decomp = decompress_chunk_checked(
                         &comp_data,
                         self.dictionary,
-                        chunk.chunk_hash
+                        chunk.chunk_hash,
+                        chunk.uncomp_len as usize
                     )?;
 
                     let start = chunk.read_from_offset as usize;
@@ -695,6 +703,7 @@ impl<'a, H: Copy + Eq> ReconstructionContext<'a, H> {
 
                         return Some(ReconstructionInfo::FromBlock {
                             content_hash: block.content_hash,
+                            sector_count: block.sector_count,
                             offset_in_block,
                         });
                     }
@@ -720,6 +729,8 @@ impl<'a, H: Copy + Eq> ReconstructionContext<'a, H> {
 pub enum ReconstructionInfo<H> {
     FromBlock {
         content_hash: H,
+        /// The whole block's length in sectors, from the disc manifest.
+        sector_count: u32,
         offset_in_block: u32,
     },
 
@@ -967,8 +978,11 @@ pub struct SSMDTocEntry {
 }
 
 
+/// The part of one data chunk that a sector's user data needs.
 pub struct StreamChunkInfo<H> {
     pub chunk_hash: H,
+    /// The whole chunk's decoded length, from the disc manifest.
+    pub uncomp_len: u32,
     pub read_from_offset: u32,
     pub read_length: u32,
 }

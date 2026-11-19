@@ -1,15 +1,11 @@
 use std::{
     collections::{HashMap, VecDeque},
+    error::Error as StdError,
     fmt::Display,
-    fs::File, thread,
+    thread,
     sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
     thread::{Scope, ScopedJoinHandle},
 };
-
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
 
 use crate::{
     flac::decompress_flac_block,
@@ -29,7 +25,38 @@ pub enum UtilError {
     #[error("Hash not found for {0} chunk")]
     MissingHash(String),
 
+    #[error("Reading the {expected} bytes stored at offset {offset} \
+        returned {actual} bytes.")]
+    WrongReadLength { offset: u64, expected: u32, actual: usize },
+}
 
+
+/// Calls the host's `read_stored` for the bytes at `location` and checks
+/// it returned all of them. An error from the host is kept as
+/// `SpriteShrinkCDError::External`.
+///
+/// # Errors
+///
+/// Returns the host's error, or `UtilError::WrongReadLength` if it
+/// returned more or fewer bytes than `location` records.
+pub fn read_stored_at<R, E>(
+    read_stored: &R,
+    location: ChunkLocation,
+) -> Result<Vec<u8>, SpriteShrinkCDError>
+where
+    R: Fn(ChunkLocation) -> Result<Vec<u8>, E>,
+    E: StdError + Send + Sync + 'static,
+{
+    let data = read_stored(location)
+        .map_err(|e| SpriteShrinkCDError::External(Box::new(e)))?;
+    if data.len() != location.compressed_length as usize {
+        return Err(UtilError::WrongReadLength {
+            offset: location.offset,
+            expected: location.compressed_length,
+            actual: data.len(),
+        }.into());
+    }
+    Ok(data)
 }
 
 
@@ -117,15 +144,24 @@ impl Drop for ConsumerGuard<'_> {
 
 /// Waits until the buffer has room for `data`, then appends it.
 ///
-/// The buffer may hold up to `max_buffer_size` bytes, or one larger piece of
-/// data when it's empty. Once it's full, the worker waits until the consumer
-/// has drained it to half. Returns `false`, without appending, if the
-/// consumer has stopped, so the worker can stop too.
+/// The buffer may hold up to `max_buffer_size` bytes. Once it's full, the
+/// worker waits until the consumer has drained it to half. Returns `false`,
+/// without appending, if the consumer has stopped, so the worker can stop
+/// too.
+///
+/// `data` must fit in the buffer beside the part of a sector the consumer
+/// may be waiting to complete, or both wait forever. `write_disc` checks
+/// this for the largest item at compile time.
 fn push_data(
     shared_state: &SharedBuffer,
     data: Vec<u8>,
     max_buffer_size: usize,
 ) -> bool {
+    debug_assert!(
+        data.len() <= max_buffer_size,
+        "a {}-byte item can't fit in a {max_buffer_size}-byte buffer",
+        data.len()
+    );
     let resume_threshold = max_buffer_size / 2;
     let (lock, cvar) = &**shared_state;
     let mut state = lock_state(lock);
@@ -186,37 +222,37 @@ where
 }
 
 
-pub fn spawn_audio_decomp_worker<'scope, 'env, H>(
+/// Spawns a worker that reads, decodes and buffers each audio block in
+/// `blocks`, given as its hash and its decoded length from the disc
+/// manifest. Decoding stops just past that length.
+pub fn spawn_audio_decomp_worker<'scope, 'env, H, R, E>(
     scope: &'scope Scope<'scope, 'env>,
-    hash_list: Vec<H>,
+    blocks: Vec<(H, usize)>,
     audio_index: &'env HashMap<H, ChunkLocation>,
-    archive_file: &'env File,
+    read_stored: &'env R,
     shared_state: SharedBuffer,
     max_buffer_size: usize,
     error_tx: Sender<SpriteShrinkCDError>,
 ) -> ScopedJoinHandle<'scope, ()>
 where
     H: Hashable + Display + Send + Sync + 'static,
+    R: Fn(ChunkLocation) -> Result<Vec<u8>, E> + Sync,
+    E: StdError + Send + Sync + 'static,
 {
     scope.spawn(move || {
         let _guard = WorkerGuard {
             shared_state: shared_state.clone(),
         };
 
-        for hash in hash_list {
+        for (hash, len) in blocks {
 
             let result = (|| -> Result<Vec<u8>, SpriteShrinkCDError> {
                 let chunk_loc = audio_index.get(&hash)
                     .ok_or_else(|| UtilError::MissingHash(hash.to_string()))?;
 
-                let mut comp_data = vec![0u8; chunk_loc.compressed_length as usize];
+                let comp_data = read_stored_at(read_stored, *chunk_loc)?;
 
-                #[cfg(unix)]
-                archive_file.read_at(&mut comp_data, chunk_loc.offset)?;
-                #[cfg(windows)]
-                archive_file.seek_read(&mut comp_data, chunk_loc.offset)?;
-
-                Ok(decompress_flac_block(&comp_data)?)
+                Ok(decompress_flac_block(&comp_data, len)?)
             })();
 
 
@@ -236,43 +272,40 @@ where
 }
 
 
-pub fn spawn_chunk_decomp_worker<'scope, 'env, H>(
+/// Spawns a worker that reads, decodes and buffers each data chunk in
+/// `chunks`, given as its hash and its length from the disc manifest.
+/// Decoding stops just past that length.
+pub fn spawn_chunk_decomp_worker<'scope, 'env, H, R, E>(
     scope: &'scope thread::Scope<'scope, 'env>,
-    hash_list: Vec<H>,
+    chunks: Vec<(H, usize)>,
     chunk_index: &'env HashMap<H, ChunkLocation>,
     dictionary: &'env [u8],
-    archive_file: &'env File,
+    read_stored: &'env R,
     shared_state: SharedBuffer,
     max_buffer_size: usize,
     error_tx: Sender<SpriteShrinkCDError>,
 ) -> ScopedJoinHandle<'scope, ()>
 where
     H: Hashable + Display + Send + Sync + 'static,
+    R: Fn(ChunkLocation) -> Result<Vec<u8>, E> + Sync,
+    E: StdError + Send + Sync + 'static,
 {
     scope.spawn(move || {
         let _guard = WorkerGuard {
             shared_state: shared_state.clone(),
         };
 
-        for hash in hash_list {
+        for (hash, len) in chunks {
             let result = (|| -> Result<Vec<u8>, SpriteShrinkCDError> {
                 let chunk_loc = chunk_index.get(&hash)
                     .ok_or_else(|| UtilError::MissingHash(hash.to_string()))?;
 
-                let mut comp_data = vec![0u8; chunk_loc.compressed_length as usize];
-
-                #[cfg(unix)]
-                if let Err(e) = archive_file.read_at(&mut comp_data, chunk_loc.offset) {
-                    return Err(SpriteShrinkCDError::External(Box::new(e)));
-                }
-                #[cfg(windows)]
-                if let Err(e) = archive_file.seek_read(&mut comp_data, chunk_loc.offset) {
-                    return Err(SpriteShrinkCDError::External(Box::new(e)));
-                }
+                let comp_data = read_stored_at(read_stored, *chunk_loc)?;
 
                 decompress_chunk(
                     &comp_data,
-                    dictionary
+                    dictionary,
+                    len
                 ).map_err(|e| SpriteShrinkCDError::External(Box::new(e)))
             })();
 
@@ -293,6 +326,13 @@ where
 }
 
 
+/// Waits until the buffer holds `amount` bytes, or its worker has stopped,
+/// and takes up to `amount` bytes from it.
+///
+/// # Errors
+///
+/// Returns the worker's error if it sent one on `error_rx` while this
+/// waited, or before it stopped with less than `amount` buffered.
 pub fn pull_data(
     shared_state: &SharedBuffer,
     amount: usize,
@@ -309,6 +349,12 @@ pub fn pull_data(
         }
     }
 
+    if state.data.len() < amount
+        && let Ok(err) = error_rx.try_recv()
+    {
+        return Err(err);
+    }
+
     let to_pull = std::cmp::min(amount, state.data.len());
     let data: Vec<u8> = state.data.drain(..to_pull).collect();
 
@@ -319,7 +365,50 @@ pub fn pull_data(
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use super::*;
+
+    #[test]
+    fn a_stored_read_must_return_every_byte_it_asks_for() {
+        let location = ChunkLocation { offset: 8, compressed_length: 3 };
+        let returning = |len: usize| {
+            move |_: ChunkLocation| Ok::<_, io::Error>(vec![0; len])
+        };
+
+        assert_eq!(read_stored_at(&returning(3), location).unwrap(), [0; 3]);
+
+        for len in [2, 4] {
+            let Err(SpriteShrinkCDError::Util(UtilError::WrongReadLength {
+                offset: 8, expected: 3, actual,
+            })) = read_stored_at(&returning(len), location) else {
+                panic!("a read returning {len} of 3 bytes was accepted");
+            };
+            assert_eq!(actual, len);
+        }
+
+        let failing = |_| Err(io::Error::other("host read failed"));
+        let err = read_stored_at(&failing, location).unwrap_err();
+        assert!(err.to_string().contains("host read failed"), "{err}");
+    }
+
+    /// The worker failed, sent its error and marked itself done before
+    /// the consumer asked for data, so the consumer never waits.
+    #[test]
+    fn a_pull_after_the_worker_failed_returns_its_error() {
+        let buffer: SharedBuffer =
+            Arc::new((Mutex::new(BufferState::with_capacity(0)), Condvar::new()));
+        lock_state(&buffer.0).producer_done = true;
+        let (error_tx, error_rx) = flume::unbounded();
+        error_tx.send(UtilError::MissingHash("7".to_string()).into()).unwrap();
+
+        let result = pull_data(&buffer, 2048, &error_rx);
+
+        assert!(
+            matches!(result, Err(SpriteShrinkCDError::Util(UtilError::MissingHash(_)))),
+            "{result:?}"
+        );
+    }
 
     /// A buffer whose lock was poisoned by a thread that panicked while
     /// holding it, after appending `data`.

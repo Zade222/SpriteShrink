@@ -1,7 +1,6 @@
 use std::{
     collections::{VecDeque},
     fmt::Display,
-    fs::File,
     hash::Hasher,
     io::{BufWriter, Write},
     sync::{Arc, Condvar, Mutex},
@@ -11,6 +10,7 @@ use std::{
 use crate::{
     analyze::SYNC_PATTERN,
     ecc::{calc_ecc_simd_inplace, calc_ecc_bitwise, calculate_edc},
+    flac::{AUDIO_SECTOR_LEN, MAX_AUDIO_BLOCK_LEN, audio_block_len},
     lib_error_handling::SpriteShrinkCDError,
     lib_structs::{
         DecodedSectorInfo, DiscManifest, MsfTime, RleSectorMap,
@@ -28,7 +28,8 @@ use flume::{
 };
 use sha2::{Digest,Sha512};
 use sprite_shrink::{
-    Hashable, SpriteShrinkError,
+    MAX_CHUNK_LEN,
+    ChunkLocation, Hashable, SpriteShrinkError,
 };
 use thiserror::Error;
 use xxhash_rust::xxh3::Xxh3;
@@ -816,8 +817,31 @@ const fn to_bcd(v: u8) -> u8 {
 
 
 
+/// The most decoded bytes `write_disc` buffers per stream: 25 MiB.
+const MAX_BUFFER_SIZE: usize = 25 * 1024 * 1024;
+/*A worker waits for an empty buffer before adding an item that doesn't
+fit, and the sector loop waits until a whole sector, at most
+AUDIO_SECTOR_LEN bytes, is buffered. If the buffer held part of a
+sector and the next item didn't fit beside it, both would wait forever.
+Decoding caps every item at these lengths, whatever the manifest
+records, so each must fit beside a partial sector.*/
+const _: () = assert!(
+    MAX_CHUNK_LEN + AUDIO_SECTOR_LEN <= MAX_BUFFER_SIZE,
+    "a chunk must fit in the buffer beside a partial sector"
+);
+const _: () = assert!(
+    MAX_AUDIO_BLOCK_LEN + AUDIO_SECTOR_LEN <= MAX_BUFFER_SIZE,
+    "an audio block must fit in the buffer beside a partial sector"
+);
+
 /// Rebuilds the disc `manifest` describes from the archive and writes its
 /// raw image to `writer`, checking it against the manifest's integrity hash.
+///
+/// `read_stored` returns the `compressed_length` bytes stored at a
+/// location in the archive, such as an entry of `indices`. The host does
+/// the reading, and should check the location against the archive's
+/// length before allocating, since the location comes from the archive.
+/// It's called from two worker threads at once.
 ///
 /// `is_cancelled` is called before each sector. Once it returns `true`,
 /// writing stops and the error is a `SpriteShrinkError::Cancelled`, for which
@@ -825,7 +849,8 @@ const fn to_bcd(v: u8) -> u8 {
 ///
 /// # Errors
 ///
-/// Returns an error if a chunk or audio block can't be read or decompressed,
+/// Returns an error if `read_stored` fails or returns the wrong number of
+/// bytes, a chunk or audio block can't be decompressed,
 /// a sector can't be rebuilt, writing fails, the rebuilt disc doesn't match
 /// the integrity hash, or `is_cancelled` returns `true`. `writer` may hold
 /// part of the disc after an error.
@@ -834,11 +859,11 @@ const fn to_bcd(v: u8) -> u8 {
     reason = "each archive section is a separate borrow; grouping them is \
               an API change of its own"
 )]
-pub fn write_disc<H, W, C>(
+pub fn write_disc<H, W, C, R, E>(
     manifest: &DiscManifest<H>,
     indices: &SSMDIndices<H>,
     dictionary: &[u8],
-    archive_file: &File,
+    read_stored: R,
     exception_blob: &[u8],
     subheader_table: &[[u8; 8]],
     writer: &mut BufWriter<W>,
@@ -849,19 +874,19 @@ where
     H: Hashable + Display,
     W: Write,
     C: Fn() -> bool,
+    R: Fn(ChunkLocation) -> Result<Vec<u8>, E> + Sync,
+    E: std::error::Error + Send + Sync + 'static,
 {
-    const MAX_BUFFER_SIZE: usize = 25 * 1024 * 1024; //25 megabytes
-
     let (data_tx, data_rx) = bounded(4);
     let (audio_tx, audio_rx) = bounded(4);
 
-    let chunk_hashes: Vec<H> = manifest.data_stream_layout.iter().map(|data| {
-        data.hash
-    }).collect();
+    let chunks: Vec<(H, usize)> = manifest.data_stream_layout.iter()
+        .map(|data| (data.hash, data.uncomp_len as usize))
+        .collect();
 
-    let audio_hashes: Vec<H> = manifest.audio_block_map.iter().map(|block| {
-        block.content_hash
-    }).collect();
+    let audio_blocks: Vec<(H, usize)> = manifest.audio_block_map.iter()
+        .map(|block| (block.content_hash, audio_block_len(block.sector_count)))
+        .collect();
 
     let expanded_sector_types = expand_sector_map(&manifest.rle_sector_map);
     let total_sectors = expanded_sector_types.len();
@@ -901,10 +926,10 @@ where
 
         let data_fetch_handle = spawn_chunk_decomp_worker(
             scope,
-            chunk_hashes,
+            chunks,
             &indices.chunk_index,
             dictionary,
-            archive_file,
+            &read_stored,
             cloned_data_buffer,
             MAX_BUFFER_SIZE,
             data_tx
@@ -912,9 +937,9 @@ where
 
         let audio_fetch_handle = spawn_audio_decomp_worker(
             scope,
-            audio_hashes,
+            audio_blocks,
             &indices.audio_block_index,
-            archive_file,
+            &read_stored,
             cloned_audio_buffer,
             MAX_BUFFER_SIZE,
             audio_tx

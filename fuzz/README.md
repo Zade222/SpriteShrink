@@ -8,6 +8,7 @@ runaway memory use are bugs.
 |---|---|---|
 | `ssmc_prefix` | archive bytes | `parse_ssmc_prefix` (u64 and u128 hashes) |
 | `ssmc_read` | archive bytes | the prefix, then `get_seek_chunks` and `decompress_chunk_checked` for each file |
+| `chunk_decode` | 2-byte length limit, then a zstd frame | `decompress_chunk` (never returns more than the limit) and `decompress_chunk_checked` |
 | `ssmd_prefix` | archive bytes | `parse_ssmd_prefix` (u64 and u128 hashes) |
 | `ssmd_read` | archive bytes | the prefix, then `DiscReconstructor::get_sector_data` and `write_disc` for each disc |
 | `cue_sheet` | 8-byte file size, then text | `analyze_cue_sheets`, including the CUE parser |

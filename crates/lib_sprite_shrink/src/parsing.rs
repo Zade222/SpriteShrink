@@ -15,6 +15,7 @@ use serde::{Deserialize};
 use thiserror::Error;
 
 use crate::lib_error_handling::SpriteShrinkError;
+use crate::processing::MAX_CHUNK_LEN;
 use crate::lib_structs::{
     SSMC_UID,
     HashType,
@@ -24,6 +25,10 @@ use crate::lib_structs::{
 
 #[derive(Error, Debug)]
 pub enum ParsingError {
+    #[error("File {file} lists a chunk of {length} bytes, more than the \
+        {max} bytes a chunk can hold.", max = MAX_CHUNK_LEN)]
+    ChunkTooLong { file: usize, length: u32 },
+
     #[error("Failed to decode chunk index: {0}")]
     IndexDecodeError(String),
 
@@ -351,8 +356,9 @@ pub fn parse_format_data(
 /// # Errors
 ///
 /// Returns a `ParsingError` if the header is invalid or isn't for an SSMC
-/// archive, a section lies outside `prefix`, a section fails to decode, or
-/// a chunk's absolute offset doesn't fit in a `u64`.
+/// archive, a section lies outside `prefix`, a section fails to decode, a
+/// file manifest lists a chunk longer than `MAX_CHUNK_LEN`, or a chunk's
+/// absolute offset doesn't fit in a `u64`.
 pub fn parse_ssmc_prefix<H>(
     prefix: &[u8]
 ) -> Result<ParsedSSMC<H>, SpriteShrinkError>
@@ -389,6 +395,19 @@ where
     let manifests = parse_file_metadata(
         format_data.enc_manifest.bytes_in(prefix, "file manifest")?
     )?;
+    /*Readers size their chunk buffers from these lengths, so a damaged
+    manifest could otherwise ask for gigabytes.*/
+    for (index, manifest) in manifests.iter().enumerate() {
+        let too_long = manifest.chunk_metadata.iter()
+            .map(|chunk| chunk.length)
+            .find(|&length| length as usize > MAX_CHUNK_LEN);
+        if let Some(length) = too_long {
+            return Err(ParsingError::ChunkTooLong {
+                file: index + 1,
+                length,
+            }.into());
+        }
+    }
 
     let dictionary = format_data.data_dictionary
         .bytes_in(prefix, "dictionary")?

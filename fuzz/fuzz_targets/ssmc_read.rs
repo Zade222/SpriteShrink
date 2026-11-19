@@ -45,6 +45,7 @@ fuzz_target!(|data: &[u8]| {
                 compressed,
                 &parsed.dictionary,
                 chunk.hash,
+                chunk.length as usize,
             ));
         }
     }
