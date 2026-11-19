@@ -57,7 +57,9 @@ pub struct Args {
         short,
         long,
         help_heading = "Primary Options",
-        help = "Path for the output archive or extracted files."
+        help = "Path for the output archive, or the folder for\nextracted \
+        files. The archive gets .ssmc (.ssmd in\noptical mode) unless its name \
+        already ends in it."
     )]
     pub output: Option<PathBuf>,
 
@@ -214,8 +216,8 @@ pub struct Args {
         long,
         help_heading = "Behavior and Output Control",
         default_value_t = false,
-        help = "Forces the application to overwrite the output file \nif it \
-        exists and/or if the output directory doesn't\nexist, creates it."
+        help = "Replaces output files that already exist (the archive,\nor \
+        extracted files) and creates the output folder\nif it doesn't exist."
     )]
     pub force: bool,
 
