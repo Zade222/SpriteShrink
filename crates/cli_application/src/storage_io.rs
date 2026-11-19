@@ -155,13 +155,19 @@ pub fn disc_title(path: &Path) -> Option<String> {
 /// names them, and returns each shared name with its paths, sorted by name.
 /// The archive keeps one entry per name, so all but one would be lost.
 ///
+/// Names that differ only in case count as the same: Windows and macOS
+/// would extract them to one file. A group is reported under the first
+/// name seen, and every path in it is listed.
+///
 /// The same file given twice, such as through its folder and on its own,
 /// isn't a conflict: both paths lead to one file.
 pub fn duplicate_names(
     paths: &[PathBuf],
     name_of: impl Fn(&Path) -> Option<String>,
 ) -> Vec<(String, Vec<PathBuf>)> {
-    let mut by_name: BTreeMap<String, Vec<(PathBuf, PathBuf)>> =
+    /*Keyed by the lowercase name, holding the first spelling seen and each
+    path with where it leads.*/
+    let mut by_name: BTreeMap<String, (String, Vec<(PathBuf, PathBuf)>)> =
         BTreeMap::new();
 
     for path in paths {
@@ -169,14 +175,16 @@ pub fn duplicate_names(
         /*Compare where paths lead, not how they're spelled. A path that
         can't be resolved is compared as given.*/
         let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.clone());
-        let same_name = by_name.entry(name).or_default();
+        let (_, same_name) = by_name
+            .entry(name.to_lowercase())
+            .or_insert_with(|| (name, Vec::new()));
         if !same_name.iter().any(|(_, other)| *other == resolved) {
             same_name.push((path.clone(), resolved));
         }
     }
 
     by_name
-        .into_iter()
+        .into_values()
         .filter(|(_, same_name)| same_name.len() > 1)
         .map(|(name, same_name)| {
             (name, same_name.into_iter().map(|(path, _)| path).collect())
@@ -1039,6 +1047,29 @@ mod tests {
                 ("b.bin".to_string(), vec![at("x", "b.bin"), at("y", "b.bin")]),
             ]
         );
+    }
+
+    /*One folder on Windows or macOS can't hold both, so the second would
+    replace the first when extracted. The disc titles come from the CUE
+    stems.*/
+    #[test]
+    fn names_that_differ_only_in_case_are_duplicates() {
+        let rom_a = PathBuf::from("x/a.bin");
+        let rom_b = PathBuf::from("y/A.BIN");
+        assert_eq!(
+            duplicate_names(&[rom_a.clone(), rom_b.clone()], entry_name),
+            [("a.bin".to_string(), vec![rom_a, rom_b])]
+        );
+
+        let disc_a = PathBuf::from("x/Game.cue");
+        let disc_b = PathBuf::from("y/GAME.cue");
+        assert_eq!(
+            duplicate_names(&[disc_a.clone(), disc_b.clone()], disc_title),
+            [("Game".to_string(), vec![disc_a, disc_b])]
+        );
+
+        let accented = [PathBuf::from("x/É.bin"), PathBuf::from("y/é.bin")];
+        assert_eq!(duplicate_names(&accented, entry_name).len(), 1);
     }
 
     #[test]

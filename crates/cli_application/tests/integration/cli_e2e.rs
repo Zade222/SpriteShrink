@@ -1123,13 +1123,16 @@ fn files_sharing_a_name_are_rejected() {
     assert!(!archive.exists());
 }
 
+/// The second disc's name differs only in case, which Windows and macOS
+/// would extract over the first. (The ROM test above covers names that
+/// are exactly the same.)
 #[test]
 fn discs_sharing_a_cue_name_are_rejected() {
     let tmp = TempDir::new().unwrap();
     let first_dir = tmp.path().join("first");
     let second_dir = tmp.path().join("second");
     write_blank_disc(&first_dir, "game", 300);
-    write_blank_disc(&second_dir, "game", 320);
+    write_blank_disc(&second_dir, "GAME", 320);
     let archive = tmp.path().join("discs.ssmd");
 
     let printed = failure_output(&[
