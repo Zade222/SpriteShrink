@@ -10,7 +10,7 @@ use std::{
     fmt::{Debug, Display},
     fs::{File, create_dir_all},
     io::{BufWriter, IntoInnerError, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex, atomic::{
         AtomicBool, Ordering
     }},
@@ -48,7 +48,7 @@ use crate::{
     error_handling::CliError,
     storage_io::{
         calc_tot_input_size, get_cache_paths, parent_dir, write_archive,
-        TempCache
+        ExistingFile, TempCache
     },
     utils::{process_in_memory_check, set_priority},
 };
@@ -100,6 +100,7 @@ use crate::{
 ///   data processing, verification, or final archive writing stages.
 pub fn default_compression<H>(
     file_paths: Vec<PathBuf>,
+    final_output_path: &Path,
     args: &Args,
     hash_type: HashType,
     running: Arc<AtomicBool>
@@ -486,14 +487,6 @@ where
         }
     };
 
-    /*Takes the specified output file destination and adds the ssmc file
-    extension if it's not present or replaces the specified extension with
-    ssmc.*/
-    let final_output_path = args.output
-        .as_ref()
-        .unwrap()
-        .with_extension("ssmc");
-
     let get_chunk_data_for_lib = {
         let cb = Arc::clone(&chunk_ret_cb);
         let lib_running_clone = Arc::clone(&running);
@@ -510,7 +503,7 @@ where
 
     /*Holds the compressed data until the prefix can be built. The file has
     no name, so the system deletes it however the run ends.*/
-    let tmp_file = tempfile_in(parent_dir(&final_output_path))?;
+    let tmp_file = tempfile_in(parent_dir(final_output_path))?;
 
     //Batches the compressed chunks into larger writes to the temporary file.
     let mut writer = BufWriter::with_capacity(64 * 1024, tmp_file);
@@ -564,7 +557,8 @@ where
     )?;
 
     //Write the prefix, then the compressed data, to the archive.
-    write_archive(&final_output_path, &final_data, &mut tmp_file)?;
+    let existing = ExistingFile::from_force(args.force);
+    write_archive(final_output_path, existing, &final_data, &mut tmp_file)?;
 
     info!(
         "Successfully created sprite-shrink multicart archive at: \

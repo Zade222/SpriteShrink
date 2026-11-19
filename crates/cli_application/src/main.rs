@@ -48,7 +48,7 @@ use crate::{
     modes::compress_modes::run_optical_compression,
     storage_io::{
     entry_name, cleanup_old_logs, disc_title, duplicate_names,
-    files_from_dirs, load_config, organize_paths
+    files_from_dirs, load_config, organize_paths, parent_dir
     }
 };
 mod utils;
@@ -170,11 +170,10 @@ fn run(
 
             check_input_names(&file_paths, &args.mode)?;
 
-            let out_dir = args.output
-                .as_ref()
-                .unwrap()
-                .parent()
-                .unwrap();
+            let archive_path = args.archive_path()?;
+            /*A bare name like `roms` has an empty parent, which
+            parent_dir reads as the current folder.*/
+            let out_dir = parent_dir(&archive_path);
 
             if !out_dir.exists() && !args.force{
                 return Err(CliError::InvalidOutputPath())
@@ -188,6 +187,7 @@ fn run(
                 "optical" => {
                     run_optical_compression(
                         file_paths,
+                        &archive_path,
                         args,
                         &hash_bit_length,
                         running,
@@ -196,6 +196,7 @@ fn run(
                 "default" =>{
                     run_default_compression(
                         file_paths,
+                        &archive_path,
                         args,
                         &hash_bit_length,
                         running,

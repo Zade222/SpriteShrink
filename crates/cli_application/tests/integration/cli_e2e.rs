@@ -485,12 +485,42 @@ fn rejected_arguments_exit_with_failure() {
 
     // The unit tests check each rejection `validate_args` makes. This checks
     // that `main` stops on one with a failure, before writing anything.
-    let printed = failure_output(&[
-        "-i", input_dir.to_str().unwrap(),
-        "-o", existing.to_str().unwrap(),
-    ]);
-    assert!(printed.contains("File already exists"), "output:\n{printed}");
-    assert_eq!(fs::read(&existing).unwrap(), b"keep me");
+    // `-o existing` writes `existing.ssmc` too, so it's refused the same way.
+    for output in [existing.clone(), tmp.path().join("existing")] {
+        let printed = failure_output(&[
+            "-i", input_dir.to_str().unwrap(),
+            "-o", output.to_str().unwrap(),
+        ]);
+        assert!(printed.contains("File already exists"), "output:\n{printed}");
+        assert_eq!(fs::read(&existing).unwrap(), b"keep me");
+    }
+}
+
+/// `-o` gets the archive's extension appended unless it already ends in
+/// it, and a bare name is written to the current folder without `-f`.
+#[test]
+fn the_archive_is_named_after_the_output_path() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+
+    for (output, written) in [
+        ("roms", "roms.ssmc"),
+        ("set.v2", "set.v2.ssmc"),
+        ("upper.SSMC", "upper.SSMC"),
+    ] {
+        let result = cli_command()
+            .current_dir(tmp.path())
+            .args(["--ignore-config", "--disable-logging", "--threads", "1"])
+            .args(["-i", input_dir.to_str().unwrap(), "-o", output])
+            .output()
+            .unwrap();
+        assert!(
+            !reported_error(&result),
+            "-o {output}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(tmp.path().join(written).is_file(), "-o {output} didn't write {written}");
+    }
 }
 
 /// These are checked in `run` and the extractors, after folders have been
@@ -592,6 +622,32 @@ fn an_archive_with_an_unsafe_name_is_refused_by_every_read_mode() {
     }
 }
 
+/// An archive whose entries differ only in case would write one over the
+/// other on Windows and macOS, so extraction refuses it before writing
+/// anything, `--force` or not.
+#[test]
+fn an_archive_whose_names_clash_is_refused() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = tmp.path().join("input");
+    fs::create_dir_all(&input_dir).unwrap();
+    fs::write(input_dir.join("a.bin"), tiled_bytes(1, 4096)).unwrap();
+    fs::write(input_dir.join(stand_in_for("A.BIN")), tiled_bytes(2, 4096))
+        .unwrap();
+    let built = tmp.path().join("built.ssmc");
+    run_cli(&["-i", input_dir.to_str().unwrap(), "-o", built.to_str().unwrap()]);
+    let archive = tmp.path().join("clash.ssmc");
+    fs::write(&archive, with_name(&fs::read(&built).unwrap(), "A.BIN")).unwrap();
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+
+    for force in [&[][..], &["-f"][..]] {
+        let args = ["-i", archive.to_str().unwrap(), "-o", out_dir.to_str().unwrap(), "-e", "1-2"];
+        let printed = failure_output(&[&args[..], force].concat());
+        assert!(printed.contains("two files to one name"), "{force:?}:\n{printed}");
+        assert!(fs::read_dir(&out_dir).unwrap().next().is_none(), "{force:?}");
+    }
+}
+
 /// Extraction writes `a.bin` through a temp file. Files already in the
 /// output folder under names a temp file once used, a link among them, are
 /// left alone.
@@ -622,6 +678,39 @@ fn files_already_in_the_output_folder_are_left_alone() {
         fs::read(out_dir.join("a.bin")).unwrap(),
         fs::read(input_dir.join("a.bin")).unwrap()
     );
+}
+
+/// Extraction replaces a file that is already in the output folder only
+/// with `-f`. Without it, the run is refused before anything is written,
+/// so `b.bin`, which isn't there yet, isn't written either.
+#[test]
+fn extraction_replaces_an_existing_file_only_with_force() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+    let archive = tmp.path().join("roms.ssmc");
+    run_cli(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+    let existing = out_dir.join("a.bin");
+    fs::write(&existing, b"my edited copy").unwrap();
+    let args = ["-i", archive.to_str().unwrap(), "-o", out_dir.to_str().unwrap(), "-e", "1-2"];
+
+    let printed = failure_output(&args);
+    assert!(printed.contains("already in the output folder"), "output:\n{printed}");
+    assert!(printed.contains("a.bin"), "output:\n{printed}");
+    assert_eq!(fs::read(&existing).unwrap(), b"my edited copy");
+    assert!(!out_dir.join("b.bin").exists(), "b.bin was written");
+
+    run_cli(&[&args[..], &["-f"]].concat());
+    for name in ["a.bin", "b.bin"] {
+        assert_eq!(
+            fs::read(out_dir.join(name)).unwrap(),
+            fs::read(input_dir.join(name)).unwrap()
+        );
+    }
 }
 
 /// A file name Windows can't use is refused before anything is compressed,
@@ -716,6 +805,17 @@ fn an_audio_only_disc_is_archived_and_extracted() {
     let extracted = fs::read(out_dir.join("disc.bin")).unwrap();
     assert_bytes_eq(&extracted, &image, "disc.bin");
     assert_eq!(fs::read_to_string(out_dir.join("disc.cue")).unwrap(), cue);
+
+    // Again without -f: both files are there, and both are named.
+    let printed = failure_output(&[
+        "-i", archive.to_str().unwrap(),
+        "-o", out_dir.to_str().unwrap(),
+        "-e", "1",
+    ]);
+    assert!(
+        printed.contains("disc.bin") && printed.contains("disc.cue"),
+        "output:\n{printed}"
+    );
 }
 
 #[test]
@@ -1023,13 +1123,16 @@ fn files_sharing_a_name_are_rejected() {
     assert!(!archive.exists());
 }
 
+/// The second disc's name differs only in case, which Windows and macOS
+/// would extract over the first. (The ROM test above covers names that
+/// are exactly the same.)
 #[test]
 fn discs_sharing_a_cue_name_are_rejected() {
     let tmp = TempDir::new().unwrap();
     let first_dir = tmp.path().join("first");
     let second_dir = tmp.path().join("second");
     write_blank_disc(&first_dir, "game", 300);
-    write_blank_disc(&second_dir, "game", 320);
+    write_blank_disc(&second_dir, "GAME", 320);
     let archive = tmp.path().join("discs.ssmd");
 
     let printed = failure_output(&[

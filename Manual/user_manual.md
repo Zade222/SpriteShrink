@@ -125,7 +125,7 @@ This is the primary function of SpriteShrink. You point it at a directory of fil
 `./sprite_shrink -i <path_to_your_files> -o <path_for_your_archive.ssmc>`
 
 *   `-i` or `--input`: The path to the directory containing the files you want to compress.
-*   `-o` or `--output`: The desired path and filename for the new `.ssmc` archive.
+*   `-o` or `--output`: The desired path and filename for the new `.ssmc` archive. If the name doesn't already end in `.ssmc` (in any case), `.ssmc` is added: `-o roms` writes `roms.ssmc`, and `-o roms.v2` writes `roms.v2.ssmc`. If that file already exists, SpriteShrink stops without changing it unless you add `-f`.
 
 **Example:**
 Let's say you have your game variants in a folder named `MyGameCollection`.
@@ -157,7 +157,7 @@ A name must also work as a file name on Windows, macOS and Linux, because the ar
 
    *   `--mode optical`: Activates the specialized disc processing engine.
    *   `-i`: Directory containing your `.cue` and `.m3u` files.
-   *   `-o`: The output filename. Note that Optical Mode creates **`.ssmd`** (SpriteShrink Media Disc) archives instead of `.ssmc`.
+   *   `-o`: The output filename. Note that Optical Mode creates **`.ssmd`** (SpriteShrink Media Disc) archives instead of `.ssmc`, and adds `.ssmd` to the name unless it already ends in it.
 
    **Example:**
    Compressing a folder of PlayStation games:
@@ -224,7 +224,7 @@ Let's extract the Japan and USA versions (indices 2 and 3) from our `MyGame.ssmc
 ```
 
 *   This will re-create `MyGame (USA).rom` and `MyGame (Japan).rom` inside the `ExtractedGames` folder.
-*   The `-f` (`--force`) flag is used here to create the output directory if it doesn't already exist.
+*   The `-f` (`--force`) flag is used here to create the output directory if it doesn't already exist, and to replace either file if it's already there. Without `-f`, SpriteShrink checks every file it would write before writing any of them, and stops, listing them, if any already exists.
 *   For `.ssmd` archives, if the disc image was split across multiple bin files or if it was just one bin file, extraction will reconstruct it as a single bin file and   the cue file will reflect that.
 
 ---
@@ -240,7 +240,7 @@ This is a quick reference for the most common arguments. For a full list, run `.
 | `-l`       | `--list`              | View archive contents in a plain text table.                             |
 | `-e`       | `--extract`           | Extract files by index (e.g., `1,3,5-7`).                                |
 | `-p`       | `--progress`          | Show a progress bar.                                                     |
-| `-f`       | `--force`             | Overwrite output file or create output directory if it doesn't exist.    |
+| `-f`       | `--force`             | Replace output files that already exist, and create the output directory if it doesn't exist. |
 | `-q`       | `--quiet`             | Suppress all non-error output.                                           |
 | `-h`       | `--help`              | Print the full help message and exit.                                    |
 |            | `--mode`              | Specify a specialized mode other than the default such as `optical`      |
@@ -391,6 +391,12 @@ These scripts are located in the [`helper_scripts`](../helper_scripts/) director
 ## Troubleshooting
 
 *   **"File not found" or "The system cannot find the path specified"**: Double-check your `-i` and `-o` paths. Make sure there are no typos. Remember to use `./` for files in the current directory.
+
+*   **"File already exists" or "These files are already in the output folder"**: SpriteShrink doesn't replace a file without being told to. Choose another `-o`, move or delete the files it lists, or add `-f` to replace them. When compressing, the name checked is the archive's full name, with `.ssmc` or `.ssmd` added.
+
+*   **"Files with duplicate file names aren't allowed"**: Two inputs would be stored under the same name, and one would be lost. Names that differ only in case, such as `game.bin` and `GAME.bin`, count as the same, because Windows and macOS would extract them to one file. Rename one of the files.
+
+*   **"The archive would write two files to one name"**: The archive lists two entries that would be extracted to the same file name, or names that differ only in case. SpriteShrink doesn't create such archives, so the archive is damaged or came from another program. `-f` doesn't override this; extract the other entries by number with `-e`.
 
 *   **"Permission Denied"**: Ensure you have the rights to read the input directory and write to the output directory. On Linux/macOS, you may need to use `chmod` to adjust permissions.
 

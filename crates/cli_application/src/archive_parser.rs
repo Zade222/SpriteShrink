@@ -84,8 +84,15 @@ pub fn parse_rom_indices(range: &str, file_count: u32)
         )));
     }
 
+    /*A repeated index would extract the same file twice, and the second
+    write would find the first one already there. Keep the first of each.*/
+    let mut seen = std::collections::HashSet::new();
     /*Every index is now at least 1, so `index - 1` can't underflow.*/
-    Ok(indices.into_iter().map(|index| (index - 1) as usize).collect())
+    Ok(indices
+        .into_iter()
+        .filter(|&index| seen.insert(index))
+        .map(|index| (index - 1) as usize)
+        .collect())
 }
 
 /// Reads and parses every part of an SSMC archive's metadata.
@@ -211,6 +218,8 @@ mod tests {
     #[test]
     fn indices_past_255_are_accepted() {
         assert_eq!(parse_rom_indices("255-256", 256).unwrap(), [254, 255]);
+        // A repeat is dropped, so a file isn't extracted over itself.
+        assert_eq!(parse_rom_indices("2,1,2,1-2", 2).unwrap(), [1, 0]);
         assert_eq!(
             parse_rom_indices("70000", 70_000).unwrap(),
             [69_999]

@@ -173,7 +173,7 @@ Here's a quick reference for the main arguments:
 | Short Flag | Long Flag             | Description                                                                              | Default       |
 | :---       | :---                  | :---                                                                                     | :---          |
 | `-i`       | `--input`             | Path to a file or directory for input. Can be specified multiple times.                  | Required      |
-| `-o`       | `--output`            | Path for the output archive (compression) or directory (extraction).                     | Mode Dependent|
+| `-o`       | `--output`            | Path for the output archive (compression) or directory (extraction). The archive gets `.ssmc` (`.ssmd` in optical mode) unless its name already ends in it: `roms` and `roms.ssmc` both give `roms.ssmc`, `roms.v2` gives `roms.v2.ssmc`. | Mode Dependent|
 | `-l`       | `--list`              | Activates file list mode. Lists archive contents in a plain text table. Used with `-i` (input archive).| N/A           |
 | `-m`       | `--metadata`          | Activates metadata mode. Lists archive contents in json format. Used with -i (input archive).| `false`       |
 | `-e`       | `--extract`           | Specifies file indices to extract (e.g., `1,3,5-7`). Requires `-o` and `-i`.             | N/A           |
@@ -187,7 +187,7 @@ Here's a quick reference for the main arguments:
 | `-t`       | `--threads`           | Sets max worker threads. Defaults to all available logical cores.                        | All cores     |
 |            | `ignore-config`       | Forces application to not read it's config and won't create one if it doesn't already exist. | `false`       |
 |            | `--low-memory`        | Forces low-memory mode by using an on disk cache for temporarily storing data. Can adversely affect application performance. | `false`       |
-| `-f`       | `--force`             | Overwrites the output file if it exists creates the output directory if it doesn't exist. | `false`       |
+| `-f`       | `--force`             | Replaces output files that already exist (the archive, or extracted files) and creates the output directory if it doesn't exist. | `false`       |
 | `-p`       | `--progress`          | Activates printing progress to console.                                                  | `false`       |
 | `-q`       | `--quiet`             | Activates quiet mode, suppressing non-essential output.                                  | `false`       |
 | `-h`       | `--help`              | Prints comprehensive help information and exits.                                         | N/A           |
@@ -206,7 +206,7 @@ The guide and the scripts can be found [here](./helper_scripts/):
 
 ## Error Handling & Reliability
 
-SpriteShrink is designed to be robust. It gracefully handles malformed inputs, ensures data integrity (byte-for-byte identical extraction), and provides clear, actionable error messages. Archives and extracted files are written to a temporary file in the destination folder and renamed into place only once complete, so a cancelled or failed run leaves no partial file and an existing file keeps its old contents. A process that is killed outright, rather than cancelled, can leave a hidden `.<name>.<random>.tmp` file behind, which is safe to delete.
+SpriteShrink is designed to be robust. It gracefully handles malformed inputs, ensures data integrity (byte-for-byte identical extraction), and provides clear, actionable error messages. Archives and extracted files are written to a temporary file in the destination folder and renamed into place only once complete, so a cancelled or failed run leaves no partial file and an existing file keeps its old contents. Without `-f`, SpriteShrink never replaces a file that is already there: compression checks the archive name first, extraction checks every file it will write before writing any of them, and the final rename refuses to replace a file that appeared in the meantime. A process that is killed outright, rather than cancelled, can leave a hidden `.<name>.<random>.tmp` file behind, which is safe to delete.
 
 ---
 
