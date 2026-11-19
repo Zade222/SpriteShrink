@@ -49,7 +49,7 @@ use xxhash_rust::xxh3::Xxh3;
 use crate::{
     arg_handling::Args,
     cli_types::DiscCompleteData,
-    storage_io::{parent_dir, write_archive},
+    storage_io::{ExistingFile, parent_dir, write_archive},
 };
 use crate::cli_types::{
     CacheTarget, OpticalChunkMessage
@@ -468,7 +468,8 @@ where
 
     println!("Estimated final data size with blob: {}", final_data.len() + blob_size as usize);
 
-    write_archive(final_output_path, &final_data, &mut tmp_file)?;
+    let existing = ExistingFile::from_force(args.force);
+    write_archive(final_output_path, existing, &final_data, &mut tmp_file)?;
 
     Ok(())
 }

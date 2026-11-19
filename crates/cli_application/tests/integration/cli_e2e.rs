@@ -654,6 +654,31 @@ fn files_already_in_the_output_folder_are_left_alone() {
     );
 }
 
+/// Extraction replaces a file that is already in the output folder only
+/// with `-f`.
+#[test]
+fn extraction_replaces_an_existing_file_only_with_force() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+    let archive = tmp.path().join("roms.ssmc");
+    run_cli(&[
+        "-i", input_dir.to_str().unwrap(),
+        "-o", archive.to_str().unwrap(),
+    ]);
+    let out_dir = tmp.path().join("extract");
+    fs::create_dir_all(&out_dir).unwrap();
+    let existing = out_dir.join("a.bin");
+    fs::write(&existing, b"my edited copy").unwrap();
+    let args = ["-i", archive.to_str().unwrap(), "-o", out_dir.to_str().unwrap(), "-e", "1"];
+
+    let printed = failure_output(&args);
+    assert!(printed.contains("File already exists"), "output:\n{printed}");
+    assert_eq!(fs::read(&existing).unwrap(), b"my edited copy");
+
+    run_cli(&[&args[..], &["-f"]].concat());
+    assert_eq!(fs::read(&existing).unwrap(), fs::read(input_dir.join("a.bin")).unwrap());
+}
+
 /// A file name Windows can't use is refused before anything is compressed,
 /// not by the archive writer at the end. Unix only: Windows can't create
 /// the input either.

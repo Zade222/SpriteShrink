@@ -48,7 +48,7 @@ use crate::{
     error_handling::CliError,
     storage_io::{
         calc_tot_input_size, get_cache_paths, parent_dir, write_archive,
-        TempCache
+        ExistingFile, TempCache
     },
     utils::{process_in_memory_check, set_priority},
 };
@@ -557,7 +557,8 @@ where
     )?;
 
     //Write the prefix, then the compressed data, to the archive.
-    write_archive(final_output_path, &final_data, &mut tmp_file)?;
+    let existing = ExistingFile::from_force(args.force);
+    write_archive(final_output_path, existing, &final_data, &mut tmp_file)?;
 
     info!(
         "Successfully created sprite-shrink multicart archive at: \

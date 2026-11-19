@@ -39,7 +39,7 @@ use crate::{
     archive_parser::{get_file_header, get_ssmc_prefix, get_ssmd_prefix},
     arg_handling::Args,
     error_handling::CliError,
-    storage_io::{ArchiveFile, read_file_data, write_via_temp},
+    storage_io::{ArchiveFile, ExistingFile, read_file_data, write_via_temp},
 };
 
 /// Write buffer for a file from an SSMC archive: 8 KiB, the size
@@ -259,6 +259,7 @@ where
     } else {
         create_dir_all(out_dir)?;
     }
+    let existing = ExistingFile::from_force(args.force);
 
     for &index in rom_indices {
         let (fmp, entry) = file_manifest
@@ -276,7 +277,8 @@ where
         /*Each file is written to a temp file and renamed once every chunk
         has passed its hash check, so a failed or cancelled run leaves no
         partial file.*/
-        write_via_temp(&final_output_path, FILE_WRITE_BUFFER_SIZE, |writer| {
+        let buffer_size = FILE_WRITE_BUFFER_SIZE;
+        write_via_temp(&final_output_path, existing, buffer_size, |writer| {
             fmp.chunk_metadata
                 .iter()
                 .try_for_each(|scm| -> Result<(), CliError> {
@@ -355,6 +357,7 @@ where
     } else {
         create_dir_all(out_dir)?;
     }
+    let existing = ExistingFile::from_force(args.force);
 
     println!("Opening archive...");
     let archive_file = ArchiveFile::open(file_path)?;
@@ -387,7 +390,8 @@ where
         /*The BIN and then the CUE sheet are each written to a temp file
         and renamed when complete, so a failed or cancelled run leaves no
         partial file.*/
-        write_via_temp(&final_output_path, DISC_WRITE_BUFFER_SIZE, |writer| {
+        let buffer_size = DISC_WRITE_BUFFER_SIZE;
+        write_via_temp(&final_output_path, existing, buffer_size, |writer| {
             write_disc(
                 dm,
                 &indices,
@@ -402,7 +406,7 @@ where
         })?;
 
         let cue_path = final_output_path.with_extension("cue");
-        write_via_temp(&cue_path, cue_content.len(), |writer| {
+        write_via_temp(&cue_path, existing, cue_content.len(), |writer| {
             writer.write_all(cue_content.as_bytes()).map_err(CliError::from)
         })?;
 

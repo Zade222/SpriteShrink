@@ -249,20 +249,26 @@ const TEMP_NAME_MAX: usize = 64;
 /// replaces or writes through a file that is already there, a symbolic
 /// link included. A process killed outright leaves its temp file behind.
 ///
+/// With [`ExistingFile::Refuse`], the rename fails if `final_path` exists
+/// by then, even if it appeared while `write` ran, so a file is never
+/// replaced without `--force`. See [`persist`].
+///
 /// The data isn't synced to disk before the rename, so after a power cut
 /// the file may be empty or short, depending on the file system.
 ///
 /// # Errors
 ///
-/// Returns `write`'s error, or the I/O error if the temp file can't be
-/// created, flushed or renamed.
+/// Returns `write`'s error, `CliError::FileExistsError` if `final_path`
+/// exists and `existing` is `Refuse`, or the I/O error if the temp file
+/// can't be created, flushed or renamed.
 pub fn write_via_temp<E>(
     final_path: &Path,
+    existing: ExistingFile,
     buffer_size: usize,
     write: impl FnOnce(&mut BufWriter<NamedTempFile>) -> Result<(), E>,
 ) -> Result<(), E>
 where
-    E: From<io::Error>,
+    E: From<io::Error> + From<CliError>,
 {
     /*The temp file has to be on the same file system as final_path for the
     rename to replace it in one step.*/
@@ -281,8 +287,59 @@ where
 
     let tmp = builder.tempfile_in(dir)?;
     let tmp = write_buffered(tmp, buffer_size, write)?;
-    tmp.persist(final_path).map_err(|err| E::from(err.error))?;
-    Ok(())
+    persist(tmp, final_path, existing)
+}
+
+/// What a write does when its final path already exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExistingFile {
+    /// Replace it, as `--force` asks.
+    Replace,
+    /// Leave it and fail with `CliError::FileExistsError`.
+    Refuse,
+}
+
+impl ExistingFile {
+    /// `Replace` with `--force`, `Refuse` without.
+    pub fn from_force(force: bool) -> Self {
+        if force { Self::Replace } else { Self::Refuse }
+    }
+}
+
+/// Renames the finished temp file to `final_path`. On an error the temp
+/// file is dropped, which deletes it.
+///
+/// `Refuse` uses tempfile's no-replace rename, which is one atomic step on
+/// Linux, macOS and Windows: an existing file, or one created after any
+/// earlier check, is never replaced. Elsewhere tempfile hard-links the
+/// file to its name instead. On a file system that supports neither, such
+/// as some network shares, the no-replace rename fails for that reason
+/// and the file is renamed after checking that nothing is there. That
+/// leaves a short window in which a file created by another program could
+/// be replaced.
+fn persist<E>(
+    tmp: NamedTempFile,
+    final_path: &Path,
+    existing: ExistingFile,
+) -> Result<(), E>
+where
+    E: From<io::Error> + From<CliError>,
+{
+    let exists = || CliError::FileExistsError(final_path.to_path_buf());
+    let result = match existing {
+        ExistingFile::Replace => tmp.persist(final_path),
+        ExistingFile::Refuse => match tmp.persist_noclobber(final_path) {
+            /*Whatever the error, a name already at final_path is the
+            reason to report. symlink_metadata checks the link itself, so
+            a dangling symbolic link counts as there.*/
+            Err(_) if fs::symlink_metadata(final_path).is_ok() => {
+                return Err(exists().into());
+            }
+            Err(err) => err.file.persist(final_path),
+            Ok(file) => Ok(file),
+        },
+    };
+    result.map(drop).map_err(|err| E::from(err.error))
 }
 
 /// Runs `write` on a `BufWriter` over `inner`, then flushes it and returns
@@ -429,20 +486,22 @@ pub fn parent_dir(path: &Path) -> &Path {
 /// modes collected in a temp file.
 ///
 /// The archive is written through [`write_via_temp`], so an existing
-/// archive at `final_path` is replaced only once the new one is complete.
-/// A failure leaves it as it was.
+/// archive at `final_path` is replaced only once the new one is complete,
+/// and only with [`ExistingFile::Replace`]. A failure leaves it as it was.
 ///
 /// # Errors
 ///
-/// Returns the I/O error if `data` can't be read or the archive can't be
-/// written.
+/// Returns `CliError::FileExistsError` if `final_path` exists and
+/// `existing` is `Refuse`, or the I/O error if `data` can't be read or the
+/// archive can't be written.
 pub fn write_archive(
     final_path: &Path,
+    existing: ExistingFile,
     prefix: &[u8],
     data: &mut File,
 ) -> Result<(), CliError> {
     data.rewind()?;
-    write_via_temp(final_path, 64 * 1024, |writer| {
+    write_via_temp(final_path, existing, 64 * 1024, |writer| {
         writer.write_all(prefix)?;
         /*Copy file to file, past the buffer, so std can use the system's
         file copy (copy_file_range on Linux). The buffer has to be empty
@@ -1174,13 +1233,61 @@ mod tests {
         let path = tmp.path().join("game.bin");
         fs::write(&path, b"old").unwrap();
 
-        let result = write_via_temp(&path, 64, |writer| {
+        let result = write_via_temp(&path, ExistingFile::Replace, 64, |writer| {
             writer.write_all(b"new")?;
-            Err(io::Error::other("hash mismatch"))
+            Err(CliError::DataIntegrity("hash mismatch".to_string()))
         });
 
-        assert_eq!(result.unwrap_err().to_string(), "hash mismatch");
+        assert!(
+            matches!(&result, Err(CliError::DataIntegrity(m)) if m == "hash mismatch"),
+            "{result:?}"
+        );
         assert_eq!(fs::read(&path).unwrap(), b"old");
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+    }
+
+    /*The file appears while the data is written, after any check made
+    before the write started. Without --force it must survive.*/
+    #[test]
+    fn a_file_that_appears_during_the_write_is_kept_without_force() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("game.bin");
+
+        let result = write_via_temp(&path, ExistingFile::Refuse, 64, |writer| {
+            fs::write(&path, b"theirs")?;
+            Ok::<_, CliError>(writer.write_all(b"ours")?)
+        });
+
+        assert!(
+            matches!(&result, Err(CliError::FileExistsError(p)) if *p == path),
+            "{result:?}"
+        );
+        assert_eq!(fs::read(&path).unwrap(), b"theirs");
+        assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+
+        write_via_temp::<CliError>(&path, ExistingFile::Replace, 64, |writer| {
+            Ok(writer.write_all(b"ours")?)
+        })
+        .unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"ours");
+    }
+
+    /*A link to nothing is still a name in the folder, and the link must
+    stay as it was.*/
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_link_is_not_replaced_without_force() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("game.bin");
+        std::os::unix::fs::symlink(tmp.path().join("missing"), &path).unwrap();
+
+        let result = write_via_temp::<CliError>(&path, ExistingFile::Refuse, 64, |writer| {
+            Ok(writer.write_all(b"ours")?)
+        });
+
+        assert!(matches!(result, Err(CliError::FileExistsError(_))), "{result:?}");
+        assert!(path.is_symlink());
+        assert!(!tmp.path().join("missing").exists());
         assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
     }
 
@@ -1195,7 +1302,10 @@ mod tests {
         fs::write(&archive, b"old archive").unwrap();
         let mut data = File::create(tmp.path().join("data")).unwrap();
 
-        assert!(write_archive(&archive, b"prefix", &mut data).is_err());
+        assert!(
+            write_archive(&archive, ExistingFile::Replace, b"prefix", &mut data)
+                .is_err()
+        );
 
         assert_eq!(fs::read(&archive).unwrap(), b"old archive");
         assert_eq!(fs::read_dir(&out_dir).unwrap().count(), 1);
@@ -1211,8 +1321,10 @@ mod tests {
         assert_eq!(name.len(), 255);
         let path = tmp.path().join(&name);
 
-        write_via_temp(&path, 64, |writer| writer.write_all(b"data"))
-            .unwrap();
+        write_via_temp::<CliError>(&path, ExistingFile::Refuse, 64, |writer| {
+            Ok(writer.write_all(b"data")?)
+        })
+        .unwrap();
 
         assert_eq!(fs::read(&path).unwrap(), b"data");
         // 1 + 31 × 2 = 63 bytes; the 32nd "é" would pass TEMP_NAME_MAX.
@@ -1231,8 +1343,10 @@ mod tests {
         File::create(&reference).unwrap();
         let path = tmp.path().join("game.bin");
 
-        write_via_temp(&path, 64, |writer| writer.write_all(b"data"))
-            .unwrap();
+        write_via_temp::<CliError>(&path, ExistingFile::Refuse, 64, |writer| {
+            Ok(writer.write_all(b"data")?)
+        })
+        .unwrap();
 
         let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode();
         assert_eq!(mode(&path), mode(&reference));
