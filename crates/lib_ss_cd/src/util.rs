@@ -326,6 +326,13 @@ where
 }
 
 
+/// Waits until the buffer holds `amount` bytes, or its worker has stopped,
+/// and takes up to `amount` bytes from it.
+///
+/// # Errors
+///
+/// Returns the worker's error if it sent one on `error_rx` while this
+/// waited, or before it stopped with less than `amount` buffered.
 pub fn pull_data(
     shared_state: &SharedBuffer,
     amount: usize,
@@ -340,6 +347,12 @@ pub fn pull_data(
         if let Ok(err) = error_rx.try_recv() {
             return Err(err);
         }
+    }
+
+    if state.data.len() < amount
+        && let Ok(err) = error_rx.try_recv()
+    {
+        return Err(err);
     }
 
     let to_pull = std::cmp::min(amount, state.data.len());
@@ -377,6 +390,24 @@ mod tests {
         let failing = |_| Err(io::Error::other("host read failed"));
         let err = read_stored_at(&failing, location).unwrap_err();
         assert!(err.to_string().contains("host read failed"), "{err}");
+    }
+
+    /// The worker failed, sent its error and marked itself done before
+    /// the consumer asked for data, so the consumer never waits.
+    #[test]
+    fn a_pull_after_the_worker_failed_returns_its_error() {
+        let buffer: SharedBuffer =
+            Arc::new((Mutex::new(BufferState::with_capacity(0)), Condvar::new()));
+        lock_state(&buffer.0).producer_done = true;
+        let (error_tx, error_rx) = flume::unbounded();
+        error_tx.send(UtilError::MissingHash("7".to_string()).into()).unwrap();
+
+        let result = pull_data(&buffer, 2048, &error_rx);
+
+        assert!(
+            matches!(result, Err(SpriteShrinkCDError::Util(UtilError::MissingHash(_)))),
+            "{result:?}"
+        );
     }
 
     /// A buffer whose lock was poisoned by a thread that panicked while
