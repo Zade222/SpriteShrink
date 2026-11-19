@@ -195,6 +195,22 @@ SSMD uses a complex manifest to reconstruct CD sectors.
     *   **Data (Mode1/Mode2):** Stored as a deduplicated stream of chunks (`data_stream_layout`), reconstructed using the `chunk_index`.
     *   **Audio:** Stored as deduplicated blocks, each compressed with FLAC, referenced by `audio_block_map` and `enc_audio_index`. Each `ContentBlock` records its own sector count. The reference writer uses 16 sectors per block, with a shorter last block where a run of audio sectors ends.
 
+### 4.4. Size Limits
+
+Lengths and counts in an archive are untrusted: a reader sizes buffers from them before it can check the data. A writer must stay within these limits, and a reader rejects an archive that doesn't, when it parses the prefix and before it allocates anything sized by the value.
+
+| Value | Limit | Why |
+| :--- | :--- | :--- |
+| `SSAChunkMeta.length` (SSMC) | at most 16,777,216 bytes (16 MiB, `MAX_CHUNK_LEN`) | the chunker's largest chunk: four times its largest average window |
+| `DataChunkLayout.uncomp_len` (SSMD) | at most 16,777,216 bytes (`MAX_CHUNK_LEN`) | same chunker |
+| `ContentBlock.sector_count` | at most 1,024 sectors (2,408,448 bytes, `MAX_AUDIO_BLOCK_SECTORS`) | the reference writer uses 16; the rest is room to change that without a format change |
+| `ContentBlock.start_sector + sector_count` | at most the disc's sector count (the sum of `rle_sector_map`) | a block must lie inside its disc |
+| A disc's sector count (the sum of `rle_sector_map`) | at most 549,150 sectors (`MAX_DISC_SECTORS`) | a GD-ROM's size, larger than a 99-minute CD's 450,000 |
+
+Each stored item must also decode to exactly the length its record gives: an SSMC chunk to its `length`, an SSMD data chunk to its `uncomp_len`, and an audio block to `sector_count` × 2352 bytes. A reader stops decoding one byte past that length and rejects the item, so a damaged or hostile frame can't make it decode more. Every `ChunkLocation` must lie inside the file: `offset` (made absolute by adding `data_offset`, or `audio_data`'s offset for an audio block) plus `compressed_length` must not exceed the file's length. The host, which reads the file, checks this before allocating.
+
+These limits don't change the format: every archive the reference writer has produced is within them.
+
 ## 5. Read Logic Summary
 
 1.  **Read Header (0-36 bytes)**.
