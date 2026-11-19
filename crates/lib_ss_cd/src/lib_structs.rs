@@ -1,15 +1,11 @@
 use std::{
     collections::HashMap,
     fmt::{self, Display, Formatter},
-    fs::File,
+    marker::PhantomData,
     mem,
     sync::atomic::{AtomicU16, AtomicU32, Ordering,}
 };
 
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
 
 use crate::{
     flac::{audio_block_len, decompress_flac_block},
@@ -20,6 +16,7 @@ use crate::{
         expand_sector_map, expand_subheader_map, rebuild_sector_simd,
         subheader_for
     },
+    util::read_stored_at,
 };
 
 use bitcode::{Decode, Encode};
@@ -300,11 +297,17 @@ impl<H: Copy + Eq> DiscManifest<H> {
 }
 
 
-pub struct DiscReconstructor<'a, H> {
+/// Reads single sectors of a disc from an archive.
+///
+/// `read_stored` returns the `compressed_length` bytes stored at a location
+/// in the archive, as for [`write_disc`]. `E` is its error type.
+///
+/// [`write_disc`]: crate::write_disc
+pub struct DiscReconstructor<'a, H, R, E> {
     manifest: &'a DiscManifest<H>,
     indices: &'a SSMDIndices<H>,
     dictionary: &'a [u8],
-    archive_file: &'a File,
+    read_stored: R,
     exception_blob: &'a [u8],
     subheader_table: &'a [[u8; 8]],
 
@@ -313,11 +316,15 @@ pub struct DiscReconstructor<'a, H> {
     expanded_subheader_map: Vec<Option<u16>>,
     expanded_exception_map: Vec<Option<u32>>,
     expanded_sector_types: Vec<SectorType>,
+
+    _error_type: PhantomData<fn() -> E>,
 }
 
-impl<'a, H> DiscReconstructor<'a, H>
+impl<'a, H, R, E> DiscReconstructor<'a, H, R, E>
 where
     H: Hashable + Display + Copy + Eq,
+    R: Fn(ChunkLocation) -> Result<Vec<u8>, E>,
+    E: std::error::Error + Send + Sync + 'static,
 {
     /// # Errors
     /// [`ReconstructionError::ExceptionSectorOutOfRange`] when the manifest's
@@ -326,7 +333,7 @@ where
         manifest: &'a DiscManifest<H>,
         indices: &'a SSMDIndices<H>,
         dictionary: &'a [u8],
-        archive_file: &'a File,
+        read_stored: R,
         exception_blob: &'a [u8],
         subheader_table: &'a [[u8; 8]],
     ) -> Result<Self, ReconstructionError> {
@@ -350,27 +357,15 @@ where
             manifest,
             indices,
             dictionary,
-            archive_file,
+            read_stored,
             exception_blob,
             subheader_table,
             context,
             expanded_subheader_map,
             expanded_exception_map,
             expanded_sector_types,
+            _error_type: PhantomData,
         })
-    }
-
-    /// Reads the compressed bytes stored at `location` in the archive.
-    fn read_stored(
-        &self,
-        location: ChunkLocation,
-    ) -> Result<Vec<u8>, SpriteShrinkCDError> {
-        let mut buf = vec![0u8; location.compressed_length as usize];
-        #[cfg(unix)]
-        self.archive_file.read_at(&mut buf, location.offset)?;
-        #[cfg(windows)]
-        self.archive_file.seek_read(&mut buf, location.offset)?;
-        Ok(buf)
     }
 
     /// Reads and decodes the audio block stored under `content_hash`, which
@@ -387,7 +382,7 @@ where
                 format!("Missing audio hash {content_hash}")
             ))?;
 
-        let comp_data = self.read_stored(*chunk_loc)?;
+        let comp_data = read_stored_at(&self.read_stored, *chunk_loc)?;
         let decomp = decompress_flac_block(
             &comp_data,
             audio_block_len(sector_count)
@@ -449,7 +444,7 @@ where
                         format!("Missing data hash {}", chunk.chunk_hash)
                     ))?;
 
-                    let comp_data = self.read_stored(*chunk_loc)?;
+                    let comp_data = read_stored_at(&self.read_stored, *chunk_loc)?;
                     let decomp = decompress_chunk_checked(
                         &comp_data,
                         self.dictionary,

@@ -6,10 +6,11 @@
 
 use std::{
     cell::Cell,
-    io::{self, BufWriter, Write},
+    io::{self, BufWriter},
 };
 
 use libfuzzer_sys::fuzz_target;
+use sprite_shrink::ChunkLocation;
 use sprite_shrink_cd::{DiscReconstructor, parse_ssmd_prefix, write_disc};
 
 /// Discs read per input.
@@ -24,20 +25,24 @@ fuzz_target!(|data: &[u8]| {
         return;
     };
 
-    // The readers take the archive as a `File`.
-    let Ok(mut archive) = tempfile::tempfile() else {
-        return;
+    // The input is the whole archive, so stored data is read from it, as a
+    // host reads it from the archive file.
+    let read_stored = |location: ChunkLocation| {
+        usize::try_from(location.offset).ok()
+            .and_then(|start| {
+                let end = start.checked_add(location.compressed_length as usize)?;
+                data.get(start..end)
+            })
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
     };
-    if archive.write_all(data).is_err() {
-        return;
-    }
 
     for manifest in parsed.disc_manifests.iter().take(MAX_DISCS) {
         if let Ok(reader) = DiscReconstructor::new(
             manifest,
             &parsed.indices,
             &parsed.data_dictionary,
-            &archive,
+            read_stored,
             &parsed.exception_blob,
             &parsed.subheader_table,
         ) {
@@ -54,7 +59,7 @@ fuzz_target!(|data: &[u8]| {
             manifest,
             &parsed.indices,
             &parsed.data_dictionary,
-            &archive,
+            read_stored,
             &parsed.exception_blob,
             &parsed.subheader_table,
             &mut sink,

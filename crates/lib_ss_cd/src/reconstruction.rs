@@ -1,7 +1,6 @@
 use std::{
     collections::{VecDeque},
     fmt::Display,
-    fs::File,
     hash::Hasher,
     io::{BufWriter, Write},
     sync::{Arc, Condvar, Mutex},
@@ -29,7 +28,7 @@ use flume::{
 };
 use sha2::{Digest,Sha512};
 use sprite_shrink::{
-    Hashable, SpriteShrinkError,
+    ChunkLocation, Hashable, SpriteShrinkError,
 };
 use thiserror::Error;
 use xxhash_rust::xxh3::Xxh3;
@@ -820,13 +819,20 @@ const fn to_bcd(v: u8) -> u8 {
 /// Rebuilds the disc `manifest` describes from the archive and writes its
 /// raw image to `writer`, checking it against the manifest's integrity hash.
 ///
+/// `read_stored` returns the `compressed_length` bytes stored at a
+/// location in the archive, such as an entry of `indices`. The host does
+/// the reading, and should check the location against the archive's
+/// length before allocating, since the location comes from the archive.
+/// It's called from two worker threads at once.
+///
 /// `is_cancelled` is called before each sector. Once it returns `true`,
 /// writing stops and the error is a `SpriteShrinkError::Cancelled`, for which
 /// `is_cancelled()` holds. Pass `|| false` to never cancel.
 ///
 /// # Errors
 ///
-/// Returns an error if a chunk or audio block can't be read or decompressed,
+/// Returns an error if `read_stored` fails or returns the wrong number of
+/// bytes, a chunk or audio block can't be decompressed,
 /// a sector can't be rebuilt, writing fails, the rebuilt disc doesn't match
 /// the integrity hash, or `is_cancelled` returns `true`. `writer` may hold
 /// part of the disc after an error.
@@ -835,11 +841,11 @@ const fn to_bcd(v: u8) -> u8 {
     reason = "each archive section is a separate borrow; grouping them is \
               an API change of its own"
 )]
-pub fn write_disc<H, W, C>(
+pub fn write_disc<H, W, C, R, E>(
     manifest: &DiscManifest<H>,
     indices: &SSMDIndices<H>,
     dictionary: &[u8],
-    archive_file: &File,
+    read_stored: R,
     exception_blob: &[u8],
     subheader_table: &[[u8; 8]],
     writer: &mut BufWriter<W>,
@@ -850,6 +856,8 @@ where
     H: Hashable + Display,
     W: Write,
     C: Fn() -> bool,
+    R: Fn(ChunkLocation) -> Result<Vec<u8>, E> + Sync,
+    E: std::error::Error + Send + Sync + 'static,
 {
     const MAX_BUFFER_SIZE: usize = 25 * 1024 * 1024; //25 megabytes
 
@@ -905,7 +913,7 @@ where
             chunks,
             &indices.chunk_index,
             dictionary,
-            archive_file,
+            &read_stored,
             cloned_data_buffer,
             MAX_BUFFER_SIZE,
             data_tx
@@ -915,7 +923,7 @@ where
             scope,
             audio_blocks,
             &indices.audio_block_index,
-            archive_file,
+            &read_stored,
             cloned_audio_buffer,
             MAX_BUFFER_SIZE,
             audio_tx

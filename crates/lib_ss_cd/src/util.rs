@@ -1,15 +1,11 @@
 use std::{
     collections::{HashMap, VecDeque},
+    error::Error as StdError,
     fmt::Display,
-    fs::File, thread,
+    thread,
     sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
     thread::{Scope, ScopedJoinHandle},
 };
-
-#[cfg(unix)]
-use std::os::unix::fs::FileExt;
-#[cfg(windows)]
-use std::os::windows::fs::FileExt;
 
 use crate::{
     flac::decompress_flac_block,
@@ -29,7 +25,38 @@ pub enum UtilError {
     #[error("Hash not found for {0} chunk")]
     MissingHash(String),
 
+    #[error("Reading the {expected} bytes stored at offset {offset} \
+        returned {actual} bytes.")]
+    WrongReadLength { offset: u64, expected: u32, actual: usize },
+}
 
+
+/// Calls the host's `read_stored` for the bytes at `location` and checks
+/// it returned all of them. An error from the host is kept as
+/// `SpriteShrinkCDError::External`.
+///
+/// # Errors
+///
+/// Returns the host's error, or `UtilError::WrongReadLength` if it
+/// returned more or fewer bytes than `location` records.
+pub fn read_stored_at<R, E>(
+    read_stored: &R,
+    location: ChunkLocation,
+) -> Result<Vec<u8>, SpriteShrinkCDError>
+where
+    R: Fn(ChunkLocation) -> Result<Vec<u8>, E>,
+    E: StdError + Send + Sync + 'static,
+{
+    let data = read_stored(location)
+        .map_err(|e| SpriteShrinkCDError::External(Box::new(e)))?;
+    if data.len() != location.compressed_length as usize {
+        return Err(UtilError::WrongReadLength {
+            offset: location.offset,
+            expected: location.compressed_length,
+            actual: data.len(),
+        }.into());
+    }
+    Ok(data)
 }
 
 
@@ -189,17 +216,19 @@ where
 /// Spawns a worker that reads, decodes and buffers each audio block in
 /// `blocks`, given as its hash and its decoded length from the disc
 /// manifest. Decoding stops just past that length.
-pub fn spawn_audio_decomp_worker<'scope, 'env, H>(
+pub fn spawn_audio_decomp_worker<'scope, 'env, H, R, E>(
     scope: &'scope Scope<'scope, 'env>,
     blocks: Vec<(H, usize)>,
     audio_index: &'env HashMap<H, ChunkLocation>,
-    archive_file: &'env File,
+    read_stored: &'env R,
     shared_state: SharedBuffer,
     max_buffer_size: usize,
     error_tx: Sender<SpriteShrinkCDError>,
 ) -> ScopedJoinHandle<'scope, ()>
 where
     H: Hashable + Display + Send + Sync + 'static,
+    R: Fn(ChunkLocation) -> Result<Vec<u8>, E> + Sync,
+    E: StdError + Send + Sync + 'static,
 {
     scope.spawn(move || {
         let _guard = WorkerGuard {
@@ -212,12 +241,7 @@ where
                 let chunk_loc = audio_index.get(&hash)
                     .ok_or_else(|| UtilError::MissingHash(hash.to_string()))?;
 
-                let mut comp_data = vec![0u8; chunk_loc.compressed_length as usize];
-
-                #[cfg(unix)]
-                archive_file.read_at(&mut comp_data, chunk_loc.offset)?;
-                #[cfg(windows)]
-                archive_file.seek_read(&mut comp_data, chunk_loc.offset)?;
+                let comp_data = read_stored_at(read_stored, *chunk_loc)?;
 
                 Ok(decompress_flac_block(&comp_data, len)?)
             })();
@@ -242,18 +266,20 @@ where
 /// Spawns a worker that reads, decodes and buffers each data chunk in
 /// `chunks`, given as its hash and its length from the disc manifest.
 /// Decoding stops just past that length.
-pub fn spawn_chunk_decomp_worker<'scope, 'env, H>(
+pub fn spawn_chunk_decomp_worker<'scope, 'env, H, R, E>(
     scope: &'scope thread::Scope<'scope, 'env>,
     chunks: Vec<(H, usize)>,
     chunk_index: &'env HashMap<H, ChunkLocation>,
     dictionary: &'env [u8],
-    archive_file: &'env File,
+    read_stored: &'env R,
     shared_state: SharedBuffer,
     max_buffer_size: usize,
     error_tx: Sender<SpriteShrinkCDError>,
 ) -> ScopedJoinHandle<'scope, ()>
 where
     H: Hashable + Display + Send + Sync + 'static,
+    R: Fn(ChunkLocation) -> Result<Vec<u8>, E> + Sync,
+    E: StdError + Send + Sync + 'static,
 {
     scope.spawn(move || {
         let _guard = WorkerGuard {
@@ -265,16 +291,7 @@ where
                 let chunk_loc = chunk_index.get(&hash)
                     .ok_or_else(|| UtilError::MissingHash(hash.to_string()))?;
 
-                let mut comp_data = vec![0u8; chunk_loc.compressed_length as usize];
-
-                #[cfg(unix)]
-                if let Err(e) = archive_file.read_at(&mut comp_data, chunk_loc.offset) {
-                    return Err(SpriteShrinkCDError::External(Box::new(e)));
-                }
-                #[cfg(windows)]
-                if let Err(e) = archive_file.seek_read(&mut comp_data, chunk_loc.offset) {
-                    return Err(SpriteShrinkCDError::External(Box::new(e)));
-                }
+                let comp_data = read_stored_at(read_stored, *chunk_loc)?;
 
                 decompress_chunk(
                     &comp_data,
@@ -326,7 +343,32 @@ pub fn pull_data(
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use super::*;
+
+    #[test]
+    fn a_stored_read_must_return_every_byte_it_asks_for() {
+        let location = ChunkLocation { offset: 8, compressed_length: 3 };
+        let returning = |len: usize| {
+            move |_: ChunkLocation| Ok::<_, io::Error>(vec![0; len])
+        };
+
+        assert_eq!(read_stored_at(&returning(3), location).unwrap(), [0; 3]);
+
+        for len in [2, 4] {
+            let Err(SpriteShrinkCDError::Util(UtilError::WrongReadLength {
+                offset: 8, expected: 3, actual,
+            })) = read_stored_at(&returning(len), location) else {
+                panic!("a read returning {len} of 3 bytes was accepted");
+            };
+            assert_eq!(actual, len);
+        }
+
+        let failing = |_| Err(io::Error::other("host read failed"));
+        let err = read_stored_at(&failing, location).unwrap_err();
+        assert!(err.to_string().contains("host read failed"), "{err}");
+    }
 
     /// A buffer whose lock was poisoned by a thread that panicked while
     /// holding it, after appending `data`.

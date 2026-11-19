@@ -8,7 +8,7 @@
 
 use std::{
     fmt::Display,
-    fs::{File, create_dir_all},
+    fs::create_dir_all,
     hash::Hash,
     io::Write,
     path::Path,
@@ -25,7 +25,7 @@ use tracing::{
 use sprite_shrink::{
     SSMC_UID,
     HashType,
-    Hashable, FileHeader, ParsedSSMC, SpriteShrinkError,
+    ChunkLocation, Hashable, FileHeader, ParsedSSMC, SpriteShrinkError,
     check_entry_name, decompress_chunk_checked
 };
 
@@ -39,7 +39,7 @@ use crate::{
     archive_parser::{get_file_header, get_ssmc_prefix, get_ssmd_prefix},
     arg_handling::Args,
     error_handling::CliError,
-    storage_io::{read_file_data, write_via_temp},
+    storage_io::{ArchiveFile, read_file_data, write_via_temp},
 };
 
 /// Write buffer for a file from an SSMC archive: 8 KiB, the size
@@ -357,7 +357,13 @@ where
     }
 
     println!("Opening archive...");
-    let archive_file = File::open(file_path)?;
+    let archive_file = ArchiveFile::open(file_path)?;
+    let read_stored = |location: ChunkLocation| {
+        archive_file.read(
+            location.offset,
+            location.compressed_length as usize
+        )
+    };
 
     println!("Beginning extraction loop...");
     for &index in disc_indices {
@@ -386,7 +392,7 @@ where
                 dm,
                 &indices,
                 &dictionary,
-                &archive_file,
+                read_stored,
                 &exception_blob,
                 &subheader_table,
                 writer,

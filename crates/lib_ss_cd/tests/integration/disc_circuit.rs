@@ -7,8 +7,7 @@
 use std::{
     collections::{HashMap, hash_map::Entry},
     convert::Infallible,
-    fs::File,
-    io::{BufWriter, Cursor, Read, Seek, SeekFrom, Write},
+    io::{self, BufWriter, Cursor, Read, Write},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -146,7 +145,7 @@ struct Archived {
     bin: Vec<u8>,
     manifest: DiscManifest<u64>,
     indices: SSMDIndices<u64>,
-    file: File,
+    archive: Vec<u8>,
     exception_blob: Vec<u8>,
     subheader_table: Vec<[u8; 8]>,
     data_chunks: HashMap<u64, Vec<u8>>,
@@ -161,12 +160,30 @@ fn is_audio(sector_type: SectorType) -> bool {
 }
 
 /// Appends `compressed` to the archive and returns where it went.
-fn store(file: &mut File, compressed: &[u8]) -> ChunkLocation {
-    let offset = file.stream_position().unwrap();
-    file.write_all(compressed).unwrap();
+fn store(archive: &mut Vec<u8>, compressed: &[u8]) -> ChunkLocation {
+    let offset = archive.len() as u64;
+    archive.extend_from_slice(compressed);
     ChunkLocation {
         offset,
         compressed_length: u32::try_from(compressed.len()).unwrap(),
+    }
+}
+
+/// Reads stored data out of `archive`, as a host reads it from the archive
+/// file. Data past the end is an error.
+fn read_stored(
+    archive: &[u8],
+) -> impl Fn(ChunkLocation) -> io::Result<Vec<u8>> + Sync + '_ {
+    move |location| {
+        usize::try_from(location.offset).ok()
+            .and_then(|start| {
+                archive.get(start..start + location.compressed_length as usize)
+            })
+            .map(<[u8]>::to_vec)
+            .ok_or_else(|| io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "stored data runs past the end of the archive",
+            ))
     }
 }
 
@@ -200,7 +217,7 @@ fn archive_files(bins: Vec<(&str, Vec<u8>)>, cue: &str) -> Archived {
     .unwrap();
     let rle_sector_map = rle_encode_map(&mapped.sector_map);
 
-    let mut file = tempfile::tempfile().unwrap();
+    let mut stored = Vec::new();
     let mut source = Cursor::new(bin.clone());
     let mut indices = SSMDIndices {
         chunk_index: HashMap::new(),
@@ -223,7 +240,7 @@ fn archive_files(bins: Vec<(&str, Vec<u8>)>, cue: &str) -> Archived {
                 let hash = u64::from_bytes_with_seed(block);
                 if let Entry::Vacant(slot) = audio_blocks.entry(hash) {
                     let flac = compress_audio_block(block, false).unwrap();
-                    indices.audio_block_index.insert(hash, store(&mut file, &flac));
+                    indices.audio_block_index.insert(hash, store(&mut stored, &flac));
                     slot.insert(block.to_vec());
                 }
                 audio_block_map.push(ContentBlock {
@@ -246,7 +263,7 @@ fn archive_files(bins: Vec<(&str, Vec<u8>)>, cue: &str) -> Archived {
                 let hash = u64::from_bytes_with_seed(chunk);
                 if let Entry::Vacant(slot) = data_chunks.entry(hash) {
                     let zstd = zstd::bulk::compress(chunk, 3).unwrap();
-                    indices.chunk_index.insert(hash, store(&mut file, &zstd));
+                    indices.chunk_index.insert(hash, store(&mut stored, &zstd));
                     slot.insert(chunk.to_vec());
                 }
                 data_stream_layout.push(DataChunkLayout {
@@ -257,8 +274,6 @@ fn archive_files(bins: Vec<(&str, Vec<u8>)>, cue: &str) -> Archived {
         }
         run_start += run_len;
     }
-    file.flush().unwrap();
-    file.seek(SeekFrom::Start(0)).unwrap();
 
     let (exception_blob, exception_index) = exceptions.generate_blob_and_index();
     indices.exception_index = exception_index;
@@ -279,7 +294,7 @@ fn archive_files(bins: Vec<(&str, Vec<u8>)>, cue: &str) -> Archived {
         bin,
         manifest,
         indices,
-        file,
+        archive: stored,
         exception_blob,
         subheader_table: subheaders.generate_blob(),
         data_chunks,
@@ -317,7 +332,7 @@ fn write_out(disc: &Archived) -> Vec<u8> {
         &disc.manifest,
         &disc.indices,
         &[],
-        &disc.file,
+        read_stored(&disc.archive),
         &disc.exception_blob,
         &disc.subheader_table,
         &mut writer,
@@ -336,7 +351,7 @@ fn assert_reads_back(disc: &Archived) {
         &disc.manifest,
         &disc.indices,
         &[],
-        &disc.file,
+        read_stored(&disc.archive),
         &disc.exception_blob,
         &disc.subheader_table,
     )
@@ -436,7 +451,7 @@ fn failed_sector_reads(disc: &Archived) -> Vec<String> {
         &disc.manifest,
         &disc.indices,
         &[],
-        &disc.file,
+        read_stored(&disc.archive),
         &disc.exception_blob,
         &disc.subheader_table,
     )
@@ -572,7 +587,7 @@ fn a_wrong_integrity_hash_fails_write_disc() {
         &disc.manifest,
         &disc.indices,
         &[],
-        &disc.file,
+        read_stored(&disc.archive),
         &disc.exception_blob,
         &disc.subheader_table,
         &mut writer,
@@ -642,7 +657,7 @@ where
             &disc.manifest,
             &disc.indices,
             &[],
-            &disc.file,
+            read_stored(&disc.archive),
             &disc.exception_blob,
             &disc.subheader_table,
             &mut writer,
@@ -692,6 +707,42 @@ fn write_disc_rejects_an_audio_block_longer_than_its_record() {
     let (cancelled, err) = result.unwrap_err();
     assert!(!cancelled, "{err}");
     assert!(err.contains("Audio block decodes to more than"), "{err}");
+}
+
+/// A failed read of stored data stops `write_disc` and fails sector
+/// reads, with the host's error, for data chunks and audio blocks alike.
+#[test]
+fn a_failed_read_of_stored_data_is_reported() {
+    // Every chunk, or every audio block, recorded one byte past the end.
+    let past_the_end = |audio: bool| {
+        let mut disc = archive(full_disc(), FULL_DISC_CUE);
+        let archive_len = disc.archive.len() as u64;
+        let index = if audio {
+            &mut disc.indices.audio_block_index
+        } else {
+            &mut disc.indices.chunk_index
+        };
+        for location in index.values_mut() {
+            location.offset =
+                archive_len - u64::from(location.compressed_length) + 1;
+        }
+        disc
+    };
+    let host_error = "stored data runs past the end of the archive";
+
+    for audio in [false, true] {
+        let errors = failed_sector_reads(&past_the_end(audio));
+        assert!(
+            errors.iter().any(|e| e.contains(host_error)),
+            "audio {audio}: {errors:?}"
+        );
+
+        let result = write_disc_or_hang(past_the_end(audio), io::sink(), || false)
+            .expect("write_disc hung after a read failed");
+        let (cancelled, err) = result.unwrap_err();
+        assert!(!cancelled, "{err}");
+        assert!(err.contains(host_error), "audio {audio}: {err}");
+    }
 }
 
 #[test]
