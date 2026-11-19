@@ -114,6 +114,32 @@ pub fn has_extension(path: &Path, extension: &str) -> bool {
         .is_some_and(|found| found.eq_ignore_ascii_case(extension))
 }
 
+/// The path compression writes its archive to: `output` with `.ssmc`
+/// appended, or `.ssmd` in optical mode, unless it already ends in that
+/// extension in any case. Any other extension is kept, so `roms.v2` gives
+/// `roms.v2.ssmc`.
+///
+/// # Errors
+///
+/// Returns `CliError::InvalidPath` if `output` has no file name to add
+/// the extension to, such as `..` or `/`.
+pub fn archive_path(output: &Path, mode: &str) -> Result<PathBuf, CliError> {
+    let extension = if mode == "optical" { "ssmd" } else { "ssmc" };
+    if has_extension(output, extension) {
+        return Ok(output.to_path_buf());
+    }
+    let Some(name) = output.file_name() else {
+        return Err(CliError::InvalidPath(format!(
+            "The output path {} has no file name for the archive.",
+            output.display()
+        )));
+    };
+    let mut name = name.to_owned();
+    name.push(".");
+    name.push(extension);
+    Ok(output.with_file_name(name))
+}
+
 /// The title a disc is stored under in an SSMD archive: its CUE file's stem,
 /// cut to the 255 characters `parse_cue` keeps. `None` for a file that
 /// isn't a CUE sheet, since only CUE sheets become discs.
@@ -966,6 +992,36 @@ mod tests {
             duplicate_names(&[direct, roundabout], entry_name),
             Vec::new()
         );
+    }
+
+    #[test]
+    fn the_archive_path_keeps_the_output_and_adds_the_extension() {
+        let cases = [
+            ("roms", "default", "roms.ssmc"),
+            ("roms", "optical", "roms.ssmd"),
+            ("out/roms.ssmc", "default", "out/roms.ssmc"),
+            ("out/roms.SSMC", "default", "out/roms.SSMC"),
+            ("roms.v2", "default", "roms.v2.ssmc"),
+            ("roms.ssmd", "default", "roms.ssmd.ssmc"),
+            ("out/", "default", "out.ssmc"),
+        ];
+        for (output, mode, expected) in cases {
+            assert_eq!(
+                archive_path(Path::new(output), mode).unwrap(),
+                Path::new(expected),
+                "{output} in {mode} mode"
+            );
+        }
+
+        for output in ["..", "/"] {
+            assert!(
+                matches!(
+                    archive_path(Path::new(output), "default"),
+                    Err(CliError::InvalidPath(_))
+                ),
+                "{output}"
+            );
+        }
     }
 
     #[test]

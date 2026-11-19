@@ -17,7 +17,8 @@ use sprite_shrink::{MAX_WINDOW_SIZE, MIN_WINDOW_SIZE};
 
 use crate::{
     cli_types::SpriteShrinkConfig,
-    error_handling::CliError
+    error_handling::CliError,
+    storage_io::archive_path,
 };
 
 const CUSTOM_HELP_TEMPLATE: &str = "\
@@ -249,6 +250,24 @@ pub struct Args {
     pub json_output: bool,
 }
 
+impl Args {
+    /// The path compression writes its archive to; see [`archive_path`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `CliError::MissingFlag` without `-o`, or `archive_path`'s
+    /// error.
+    pub fn archive_path(&self) -> Result<PathBuf, CliError> {
+        let output = self.output.as_deref().ok_or_else(|| {
+            CliError::MissingFlag(
+                "Output path (-o) is required when in compression mode."
+                    .to_string(),
+            )
+        })?;
+        archive_path(output, &self.mode)
+    }
+}
+
 /// Whether the user typed the argument `name` on the command line.
 ///
 /// `ArgMatches::contains_id` can't tell: it is also true for an argument
@@ -281,7 +300,9 @@ fn given_on_command_line(matches: &ArgMatches, name: &str) -> bool {
 /// # Errors
 ///
 /// Returns an error in the following cases:
-/// - The compression output (`-o`) already exists and `--force` isn't set.
+/// - The archive compression would write (`-o` with its extension, see
+///   [`archive_path`]) already exists and `--force` isn't set, or `-o`
+///   has no file name.
 /// - `--mode optical` with `--list`, `--extract` or `--metadata`.
 /// - Extraction with more than one input path.
 /// - An extraction range (`-e`) that isn't a list or range of numbers.
@@ -301,14 +322,17 @@ pub fn validate_args(
     matches: &ArgMatches
 ) -> Result<(), CliError> {
     let arg_was_provided = |name: &str| given_on_command_line(matches, name);
-    //Check if the output file already exists and if the force flag is set.
-    if let Some(output_path) = &args.output
+    /*Compression writes to the archive path, not to -o as typed, so that
+    is the path that must not exist.*/
+    if args.output.is_some()
         && !args.force
         && !args.list
         && args.extract.is_none()
-        && output_path.exists()
     {
-        return Err(CliError::FileExistsError(output_path.to_path_buf()));
+        let archive = args.archive_path()?;
+        if archive.exists() {
+            return Err(CliError::FileExistsError(archive));
+        }
     }
 
     if args.mode == "optical" && (args.list || args.extract.is_some() || args.metadata) {

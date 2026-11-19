@@ -485,12 +485,42 @@ fn rejected_arguments_exit_with_failure() {
 
     // The unit tests check each rejection `validate_args` makes. This checks
     // that `main` stops on one with a failure, before writing anything.
-    let printed = failure_output(&[
-        "-i", input_dir.to_str().unwrap(),
-        "-o", existing.to_str().unwrap(),
-    ]);
-    assert!(printed.contains("File already exists"), "output:\n{printed}");
-    assert_eq!(fs::read(&existing).unwrap(), b"keep me");
+    // `-o existing` writes `existing.ssmc` too, so it's refused the same way.
+    for output in [existing.clone(), tmp.path().join("existing")] {
+        let printed = failure_output(&[
+            "-i", input_dir.to_str().unwrap(),
+            "-o", output.to_str().unwrap(),
+        ]);
+        assert!(printed.contains("File already exists"), "output:\n{printed}");
+        assert_eq!(fs::read(&existing).unwrap(), b"keep me");
+    }
+}
+
+/// `-o` gets the archive's extension appended unless it already ends in
+/// it, and a bare name is written to the current folder without `-f`.
+#[test]
+fn the_archive_is_named_after_the_output_path() {
+    let tmp = TempDir::new().unwrap();
+    let input_dir = two_roms(tmp.path());
+
+    for (output, written) in [
+        ("roms", "roms.ssmc"),
+        ("set.v2", "set.v2.ssmc"),
+        ("upper.SSMC", "upper.SSMC"),
+    ] {
+        let result = cli_command()
+            .current_dir(tmp.path())
+            .args(["--ignore-config", "--disable-logging", "--threads", "1"])
+            .args(["-i", input_dir.to_str().unwrap(), "-o", output])
+            .output()
+            .unwrap();
+        assert!(
+            !reported_error(&result),
+            "-o {output}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(tmp.path().join(written).is_file(), "-o {output} didn't write {written}");
+    }
 }
 
 /// These are checked in `run` and the extractors, after folders have been

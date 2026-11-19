@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, atomic::AtomicBool};
 
 use sprite_shrink::{CompressionResult, HashType};
@@ -29,6 +29,7 @@ fn note_if_no_dictionary(comp_data: &CompressionResult) {
 
 pub fn run_default_compression(
     file_paths: Vec<PathBuf>,
+    archive_path: &Path,
     args: &Args,
     hash_bit_length: &u32,
     running: Arc<AtomicBool>,
@@ -36,12 +37,14 @@ pub fn run_default_compression(
     match hash_bit_length {
         64 => default_compression::<u64>(
             file_paths,
+            archive_path,
             args,
             HashType::Xxh3_64,
             running
         ),
         128 => default_compression::<u128>(
             file_paths,
+            archive_path,
             args,
             HashType::Xxh3_128,
             running
@@ -55,6 +58,7 @@ pub fn run_default_compression(
 
 pub fn run_optical_compression(
     file_paths: Vec<PathBuf>,
+    archive_path: &Path,
     args: &Args,
     hash_bit_length: &u32,
     running: Arc<AtomicBool>,
@@ -62,12 +66,14 @@ pub fn run_optical_compression(
     match hash_bit_length {
         64 => compress_optical_mode::<u64>(
             file_paths,
+            archive_path,
             args,
             HashType::Xxh3_64,
             running
         ),
         128 => compress_optical_mode::<u128>(
             file_paths,
+            archive_path,
             args,
             HashType::Xxh3_128,
             running

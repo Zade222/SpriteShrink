@@ -112,6 +112,7 @@ impl<T: Read + Seek + Send> ReadSeekSend for T {}
 
 pub(super) fn compress_optical_mode<H>(
     file_paths: Vec<PathBuf>,
+    final_output_path: &Path,
     args: &Args,
     hash_type: HashType,
     running: Arc<AtomicBool>,
@@ -350,14 +351,9 @@ where
     //Compress audio
     let mut audio_block_index: Vec<(H, ChunkLocation)> = Vec::new();
 
-    let final_output_path = args.output
-        .as_ref()
-        .unwrap()
-        .with_extension("ssmd");
-
     /*Holds the compressed audio and data until the prefix can be built.
     The file has no name, so the system deletes it however the run ends.*/
-    let tmp_file = tempfile_in(parent_dir(&final_output_path))?;
+    let tmp_file = tempfile_in(parent_dir(final_output_path))?;
 
     let writer = Arc::new(
         Mutex::new(BufWriter::with_capacity(64 * 1024, tmp_file))
@@ -472,7 +468,7 @@ where
 
     println!("Estimated final data size with blob: {}", final_data.len() + blob_size as usize);
 
-    write_archive(&final_output_path, &final_data, &mut tmp_file)?;
+    write_archive(final_output_path, &final_data, &mut tmp_file)?;
 
     Ok(())
 }
