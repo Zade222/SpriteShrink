@@ -144,15 +144,24 @@ impl Drop for ConsumerGuard<'_> {
 
 /// Waits until the buffer has room for `data`, then appends it.
 ///
-/// The buffer may hold up to `max_buffer_size` bytes, or one larger piece of
-/// data when it's empty. Once it's full, the worker waits until the consumer
-/// has drained it to half. Returns `false`, without appending, if the
-/// consumer has stopped, so the worker can stop too.
+/// The buffer may hold up to `max_buffer_size` bytes. Once it's full, the
+/// worker waits until the consumer has drained it to half. Returns `false`,
+/// without appending, if the consumer has stopped, so the worker can stop
+/// too.
+///
+/// `data` must fit in the buffer beside the part of a sector the consumer
+/// may be waiting to complete, or both wait forever. `write_disc` checks
+/// this for the largest item at compile time.
 fn push_data(
     shared_state: &SharedBuffer,
     data: Vec<u8>,
     max_buffer_size: usize,
 ) -> bool {
+    debug_assert!(
+        data.len() <= max_buffer_size,
+        "a {}-byte item can't fit in a {max_buffer_size}-byte buffer",
+        data.len()
+    );
     let resume_threshold = max_buffer_size / 2;
     let (lock, cvar) = &**shared_state;
     let mut state = lock_state(lock);

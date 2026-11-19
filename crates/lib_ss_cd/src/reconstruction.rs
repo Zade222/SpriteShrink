@@ -10,7 +10,7 @@ use std::{
 use crate::{
     analyze::SYNC_PATTERN,
     ecc::{calc_ecc_simd_inplace, calc_ecc_bitwise, calculate_edc},
-    flac::audio_block_len,
+    flac::{AUDIO_SECTOR_LEN, MAX_AUDIO_BLOCK_LEN, audio_block_len},
     lib_error_handling::SpriteShrinkCDError,
     lib_structs::{
         DecodedSectorInfo, DiscManifest, MsfTime, RleSectorMap,
@@ -28,6 +28,7 @@ use flume::{
 };
 use sha2::{Digest,Sha512};
 use sprite_shrink::{
+    MAX_CHUNK_LEN,
     ChunkLocation, Hashable, SpriteShrinkError,
 };
 use thiserror::Error;
@@ -816,6 +817,23 @@ const fn to_bcd(v: u8) -> u8 {
 
 
 
+/// The most decoded bytes `write_disc` buffers per stream: 25 MiB.
+const MAX_BUFFER_SIZE: usize = 25 * 1024 * 1024;
+/*A worker waits for an empty buffer before adding an item that doesn't
+fit, and the sector loop waits until a whole sector, at most
+AUDIO_SECTOR_LEN bytes, is buffered. If the buffer held part of a
+sector and the next item didn't fit beside it, both would wait forever.
+Decoding caps every item at these lengths, whatever the manifest
+records, so each must fit beside a partial sector.*/
+const _: () = assert!(
+    MAX_CHUNK_LEN + AUDIO_SECTOR_LEN <= MAX_BUFFER_SIZE,
+    "a chunk must fit in the buffer beside a partial sector"
+);
+const _: () = assert!(
+    MAX_AUDIO_BLOCK_LEN + AUDIO_SECTOR_LEN <= MAX_BUFFER_SIZE,
+    "an audio block must fit in the buffer beside a partial sector"
+);
+
 /// Rebuilds the disc `manifest` describes from the archive and writes its
 /// raw image to `writer`, checking it against the manifest's integrity hash.
 ///
@@ -859,8 +877,6 @@ where
     R: Fn(ChunkLocation) -> Result<Vec<u8>, E> + Sync,
     E: std::error::Error + Send + Sync + 'static,
 {
-    const MAX_BUFFER_SIZE: usize = 25 * 1024 * 1024; //25 megabytes
-
     let (data_tx, data_rx) = bounded(4);
     let (audio_tx, audio_rx) = bounded(4);
 

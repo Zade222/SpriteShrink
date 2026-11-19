@@ -35,11 +35,11 @@ pub enum FlacError {
 }
 
 /// Bytes in one sector of CD audio.
-const AUDIO_SECTOR_LEN: usize = 2352;
+pub(crate) const AUDIO_SECTOR_LEN: usize = 2352;
 
 /// The most bytes an audio block decodes to: [`MAX_AUDIO_BLOCK_SECTORS`]
 /// sectors.
-const MAX_AUDIO_BLOCK_LEN: usize =
+pub(crate) const MAX_AUDIO_BLOCK_LEN: usize =
     MAX_AUDIO_BLOCK_SECTORS as usize * AUDIO_SECTOR_LEN;
 
 /// The decoded length of an audio block of `sector_count` sectors, as the
