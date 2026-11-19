@@ -7,8 +7,9 @@
 //! to the designated output directory.
 
 use std::{
+    collections::HashMap,
     fmt::Display,
-    fs::create_dir_all,
+    fs::{create_dir_all, symlink_metadata},
     hash::Hash,
     io::Write,
     path::Path,
@@ -25,7 +26,8 @@ use tracing::{
 use sprite_shrink::{
     SSMC_UID,
     HashType,
-    ChunkLocation, Hashable, FileHeader, ParsedSSMC, SpriteShrinkError,
+    ChunkLocation, FileHeader, FileManifestParent, Hashable, ParsedSSMC,
+    SSMCTocEntry, SpriteShrinkError,
     check_entry_name, decompress_chunk_checked
 };
 
@@ -39,7 +41,10 @@ use crate::{
     archive_parser::{get_file_header, get_ssmc_prefix, get_ssmd_prefix},
     arg_handling::Args,
     error_handling::CliError,
-    storage_io::{ArchiveFile, ExistingFile, read_file_data, write_via_temp},
+    storage_io::{
+        ArchiveFile, ExistingFile, has_extension, read_file_data,
+        write_via_temp
+    },
 };
 
 /// Write buffer for a file from an SSMC archive: 8 KiB, the size
@@ -49,6 +54,114 @@ const FILE_WRITE_BUFFER_SIZE: usize = 8 * 1024;
 /// Write buffer for a disc image: 2048 raw sectors of 2352 bytes (about
 /// 4.6 MiB), so a disc is written in a few large writes.
 const DISC_WRITE_BUFFER_SIZE: usize = 2048 * 2352;
+
+/// What extracting one archive entry writes, checked by [`check_plan`]
+/// before anything is written.
+struct EntryPlan {
+    /// The entry's number, from 1, as `-l` and `-e` show it.
+    number: usize,
+    /// The names of the files it writes in the output folder.
+    names: Vec<String>,
+    /// The bytes it writes, from its manifest.
+    size: u64,
+}
+
+impl EntryPlan {
+    /// Plans entry `index` (from 0), named `name` in the table of
+    /// contents, which lists it as `listed` bytes. `size` is the size its
+    /// manifest gives.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CliError::DataIntegrity` if `size` isn't `listed`: the
+    /// archive contradicts itself, so it's damaged.
+    fn new(
+        index: usize,
+        names: Vec<String>,
+        size: u64,
+        listed: u64,
+    ) -> Result<Self, CliError> {
+        let number = index + 1;
+        if size != listed {
+            return Err(CliError::DataIntegrity(format!(
+                "entry {number} ({}) is listed as {listed} bytes, but its \
+                manifest gives {size}",
+                names.join(", ")
+            )));
+        }
+        Ok(Self { number, names, size })
+    }
+}
+
+/// The name of the CUE sheet written beside a disc's BIN: the BIN's name
+/// with a `.bin` extension, in any case, replaced by `.cue`, or with
+/// `.cue` appended to any other name. The two never share a name.
+fn cue_name(bin_name: &str) -> String {
+    if has_extension(Path::new(bin_name), "bin") {
+        Path::new(bin_name)
+            .with_extension("cue")
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        format!("{bin_name}.cue")
+    }
+}
+
+/// Checks everything extraction will write before it writes anything, and
+/// prints the total size.
+///
+/// Every name must be usable as a file name, and no two may be the same,
+/// even ignoring case, or one file would replace another on Windows and
+/// macOS. That holds even with `--force`, which permits replacing the
+/// user's files, not the archive's own. With [`ExistingFile::Refuse`], no
+/// name may already be in `out_dir`.
+///
+/// # Errors
+///
+/// Returns `ParsingError::InvalidEntryName` (inside
+/// `CliError::SpriteShrinkError`) for an unusable name,
+/// `CliError::ClashingNames` for two entries writing one name, or
+/// `CliError::FilesExist` listing every name already in `out_dir`.
+fn check_plan(
+    out_dir: &Path,
+    plans: &[EntryPlan],
+    existing: ExistingFile,
+) -> Result<(), CliError> {
+    let mut seen: HashMap<String, (usize, &str)> = HashMap::new();
+    for plan in plans {
+        for name in &plan.names {
+            check_entry_name(name).map_err(SpriteShrinkError::from)?;
+            if let Some((other, other_name)) =
+                seen.insert(name.to_lowercase(), (plan.number, name))
+            {
+                return Err(CliError::ClashingNames(format!(
+                    "entry {other} writes {other_name:?} and entry {} \
+                    writes {name:?}",
+                    plan.number
+                )));
+            }
+        }
+    }
+
+    if existing == ExistingFile::Refuse {
+        let present: Vec<String> = plans
+            .iter()
+            .flat_map(|plan| &plan.names)
+            .map(|name| out_dir.join(name))
+            .filter(|path| symlink_metadata(path).is_ok())
+            .map(|path| format!("  {}", path.display()))
+            .collect();
+        if !present.is_empty() {
+            return Err(CliError::FilesExist(present.join("\n")));
+        }
+    }
+
+    let total = plans
+        .iter()
+        .fold(0_u64, |total, plan| total.saturating_add(plan.size));
+    println!("Extracting {} entries, {total} bytes.", plans.len());
+    Ok(())
+}
 
 /// Executes the file extraction process from an archive.
 ///
@@ -172,6 +285,26 @@ where
     Ok(())
 }
 
+/// Entry `index` (from 0) of an SSMC archive: its manifest and its table
+/// of contents entry.
+///
+/// # Errors
+///
+/// Returns `CliError::InvalidRomIndex` if the archive has no entry
+/// `index`.
+fn ssmc_entry<'a, H>(
+    manifests: &'a [FileManifestParent<H>],
+    toc: &'a [SSMCTocEntry],
+    index: usize,
+) -> Result<(&'a FileManifestParent<H>, &'a SSMCTocEntry), CliError> {
+    manifests.get(index).zip(toc.get(index)).ok_or_else(|| {
+        CliError::InvalidRomIndex(format!(
+            "ROM index {} is out of bounds.",
+            index + 1
+        ))
+    })
+}
+
 /// Generic implementation of the file extraction process.
 ///
 /// This function is parameterized over the hash type `H` and contains the
@@ -215,6 +348,9 @@ where
 /// # Errors
 ///
 /// This function can return an error in several cases, including:
+/// - `CliError::DataIntegrity`, `CliError::ClashingNames` or
+///   `CliError::FilesExist` from the checks [`check_plan`] and
+///   [`EntryPlan::new`] make before anything is written.
 /// - `CliError::InvalidOutputPath` if `out_dir` does not exist and `args.force`
 ///   is false.
 /// - `CliError::InvalidRomIndex` if a requested ROM index is out of bounds
@@ -254,20 +390,32 @@ where
         ..
     } = prefix;
 
+    let existing = ExistingFile::from_force(args.force);
+    let plans = rom_indices
+        .iter()
+        .map(|&index| {
+            let (fmp, entry) = ssmc_entry(file_manifest, toc, index)?;
+            let size = fmp.chunk_metadata.iter().fold(0_u64, |total, chunk| {
+                total.saturating_add(chunk.length.into())
+            });
+            EntryPlan::new(
+                index,
+                vec![entry.filename.clone()],
+                size,
+                entry.uncompressed_size,
+            )
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    check_plan(out_dir, &plans, existing)?;
+
     if !out_dir.exists() && !args.force{
         return Err(CliError::InvalidOutputPath())
     } else {
         create_dir_all(out_dir)?;
     }
-    let existing = ExistingFile::from_force(args.force);
 
     for &index in rom_indices {
-        let (fmp, entry) = file_manifest
-        .get(index)
-        .zip(toc.get(index))
-        .ok_or_else(|| CliError::InvalidRomIndex(
-            format!("ROM index {} is out of bounds.", index + 1)
-        ))?;
+        let (fmp, entry) = ssmc_entry(file_manifest, toc, index)?;
 
         /*The prefix parser has checked every name already. Check again
         here, where a bad name would write outside out_dir.*/
@@ -352,12 +500,37 @@ where
         ..
     } = prefix;
 
+    let disc_entry = |index: usize| {
+        disc_manifests.get(index).zip(toc.get(index)).ok_or_else(|| {
+            CliError::InvalidRomIndex(format!(
+                "Disc index {} is out of bounds.",
+                index + 1
+            ))
+        })
+    };
+    let existing = ExistingFile::from_force(args.force);
+    let plans = disc_indices
+        .iter()
+        .map(|&index| {
+            let (dm, entry) = disc_entry(index)?;
+            let sectors = dm.rle_sector_map.runs.iter().fold(0_u64, |total, run| {
+                total.saturating_add(run.0.into())
+            });
+            EntryPlan::new(
+                index,
+                vec![entry.filename.clone(), cue_name(&entry.filename)],
+                sectors.saturating_mul(2352),
+                entry.uncompressed_size,
+            )
+        })
+        .collect::<Result<Vec<_>, CliError>>()?;
+    check_plan(out_dir, &plans, existing)?;
+
     if !out_dir.exists() && !args.force{
         return Err(CliError::InvalidOutputPath())
     } else {
         create_dir_all(out_dir)?;
     }
-    let existing = ExistingFile::from_force(args.force);
 
     println!("Opening archive...");
     let archive_file = ArchiveFile::open(file_path)?;
@@ -370,12 +543,7 @@ where
 
     println!("Beginning extraction loop...");
     for &index in disc_indices {
-        let (dm, entry) = disc_manifests
-            .get(index)
-            .zip(toc.get(index))
-            .ok_or_else(|| CliError::InvalidRomIndex(
-                format!("Disc index {} is out of bounds.", index + 1)
-            ))?;
+        let (dm, entry) = disc_entry(index)?;
 
         /*The prefix parser has checked every name already. Check again
         here, where a bad name would write outside out_dir.*/
@@ -405,7 +573,7 @@ where
             .map_err(CliError::from)
         })?;
 
-        let cue_path = final_output_path.with_extension("cue");
+        let cue_path = out_dir.join(cue_name(&entry.filename));
         write_via_temp(&cue_path, existing, cue_content.len(), |writer| {
             writer.write_all(cue_content.as_bytes()).map_err(CliError::from)
         })?;
@@ -414,4 +582,89 @@ where
     }
 
     Ok(())
+}
+
+
+#[cfg(test)]
+mod tests {
+    use tempfile::TempDir;
+
+    use super::*;
+
+    fn plan(number: usize, names: &[&str]) -> EntryPlan {
+        EntryPlan {
+            number,
+            names: names.iter().map(ToString::to_string).collect(),
+            size: 0,
+        }
+    }
+
+    #[test]
+    fn a_cue_sheet_is_named_after_its_bin() {
+        for (bin, cue) in [
+            ("disc.bin", "disc.cue"),
+            ("DISC.BIN", "DISC.cue"),
+            ("x.cue", "x.cue.cue"),
+            ("x.iso", "x.iso.cue"),
+            ("disc", "disc.cue"),
+        ] {
+            assert_eq!(cue_name(bin), cue, "{bin}");
+        }
+    }
+
+    #[test]
+    fn an_entry_whose_manifest_and_toc_disagree_is_refused() {
+        EntryPlan::new(0, vec!["a.bin".to_string()], 10, 10).unwrap();
+
+        let result = EntryPlan::new(1, vec!["b.bin".to_string()], 10, 11);
+        assert!(
+            matches!(&result, Err(CliError::DataIntegrity(m)) if m.contains("entry 2 (b.bin)")),
+            "{:?}",
+            result.err()
+        );
+    }
+
+    /*Names that one folder can't hold apart are refused, with --force too:
+    the same name, the same ignoring case, and one disc's BIN on another's
+    CUE.*/
+    #[test]
+    fn entries_writing_one_name_are_refused_even_with_force() {
+        let tmp = TempDir::new().unwrap();
+        for plans in [
+            [plan(1, &["a.bin"]), plan(2, &["a.bin"])],
+            [plan(1, &["a.bin"]), plan(2, &["A.BIN"])],
+            [plan(1, &["x.bin", "x.cue"]), plan(2, &["x.cue", "x.cue.cue"])],
+        ] {
+            let result = check_plan(tmp.path(), &plans, ExistingFile::Replace);
+            assert!(
+                matches!(&result, Err(CliError::ClashingNames(m)) if m.contains("entry 1")),
+                "{:?}: {result:?}",
+                plans.map(|p| p.names)
+            );
+        }
+
+        let distinct = [plan(1, &["a.bin"]), plan(2, &["b.bin", "b.cue"])];
+        check_plan(tmp.path(), &distinct, ExistingFile::Refuse).unwrap();
+    }
+
+    #[test]
+    fn every_name_already_in_the_folder_is_listed() {
+        let tmp = TempDir::new().unwrap();
+        fs_write(tmp.path(), "a.bin");
+        fs_write(tmp.path(), "b.cue");
+        let plans = [plan(1, &["a.bin"]), plan(2, &["b.bin", "b.cue"])];
+
+        let result = check_plan(tmp.path(), &plans, ExistingFile::Refuse);
+        let Err(CliError::FilesExist(listed)) = &result else {
+            panic!("{result:?}");
+        };
+        assert!(listed.contains("a.bin") && listed.contains("b.cue"), "{listed}");
+        assert!(!listed.contains("b.bin"), "{listed}");
+
+        check_plan(tmp.path(), &plans, ExistingFile::Replace).unwrap();
+    }
+
+    fn fs_write(dir: &Path, name: &str) {
+        std::fs::write(dir.join(name), b"x").unwrap();
+    }
 }

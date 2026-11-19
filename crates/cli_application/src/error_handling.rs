@@ -92,6 +92,14 @@ pub enum CliError {
     #[error("Files with duplicate file names aren't allowed.\n{0}")]
     DuplicateNames(String),
 
+    #[error("The archive would write two files to one name: {0}. The \
+    archive may be damaged.")]
+    ClashingNames(String),
+
+    #[error("These files are already in the output folder:\n{0}\nUse \
+    --force to replace them.")]
+    FilesExist(String),
+
     #[error("{0} can't be archived. {1}")]
     UnusableName(String, String),
 
