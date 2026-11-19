@@ -8,7 +8,8 @@
 
 use bitcode::{Encode, encode};
 use sprite_shrink::{
-    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, SSMC_UID,
+    ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, MAX_CHUNK_LEN,
+    SSMC_UID,
     ChunkLocation, CompressionResult, FileHeader, FileManifestParent,
     SSAChunkMeta, SSMCFormatData, SSMCTocEntry, SpriteShrinkError,
     build_ssmc_prefix, parse_file_chunk_index,
@@ -450,6 +451,30 @@ fn parse_ssmc_prefix_chunk_offset_overflow_returns_error() {
     });
 
     assert_parse_error(&near_max, "chunk offset overflow");
+}
+
+#[test]
+fn a_chunk_past_the_length_cap_is_rejected() {
+    let toc = sample_toc();
+    let comp = sample_comp([1_u64, 2, 3]);
+    let mut manifests = sample_manifests([1_u64, 2, 3]);
+    let cap = u32::try_from(MAX_CHUNK_LEN).unwrap();
+    // The second file, so the error must name it.
+    manifests[1].chunk_metadata[1].length = cap;
+    let prefix =
+        build_ssmc_prefix(&toc, &manifests, &comp, HASH_TYPE_XXH3_64).unwrap();
+    parse_ssmc_prefix::<u64>(&prefix).unwrap();
+
+    manifests[1].chunk_metadata[1].length = cap + 1;
+    let prefix =
+        build_ssmc_prefix(&toc, &manifests, &comp, HASH_TYPE_XXH3_64).unwrap();
+    let Err(e) = parse_ssmc_prefix::<u64>(&prefix) else {
+        panic!("a chunk of {} bytes was accepted", cap + 1);
+    };
+    assert!(
+        e.to_string().contains(&format!("File 2 lists a chunk of {}", cap + 1)),
+        "{e}"
+    );
 }
 
 #[test]

@@ -94,6 +94,10 @@ impl From<ArchiveError> for FFIStatus {
 impl From<ParsingError> for FFIStatus {
     fn from(err: ParsingError) -> Self {
         match err {
+            ParsingError::ChunkTooLong { .. }
+            | ParsingError::ManifestDecodeError(_) => {
+                FFIStatus::ManifestDecodeError
+            }
             ParsingError::IndexDecodeError(_) => FFIStatus::IndexDecodeError,
             ParsingError::InvalidEntryName { .. } => {
                 FFIStatus::InvalidEntryName
@@ -103,9 +107,6 @@ impl From<ParsingError> for FFIStatus {
             }
             ParsingError::InvalidHeader(_) => FFIStatus::InvalidHeader,
             ParsingError::InvalidFormatData(_) => FFIStatus::InvalidFormatData,
-            ParsingError::ManifestDecodeError(_) => {
-                FFIStatus::ManifestDecodeError
-            }
             ParsingError::SectionOutOfBounds(_) => {
                 FFIStatus::SectionOutOfBounds
             }
@@ -199,6 +200,7 @@ mod tests {
             (ParsingError::InvalidHeader(String::new()).into(), -2),
             (ParsingError::InvalidFileVersion(0).into(), -3),
             (ParsingError::ManifestDecodeError(String::new()).into(), -4),
+            (ParsingError::ChunkTooLong { file: 1, length: 0 }.into(), -4),
             (ParsingError::SectionOutOfBounds(String::new()).into(), -20),
             (ParsingError::UnsupportedHashType(0).into(), -21),
             (ParsingError::IndexDecodeError(String::new()).into(), -24),
