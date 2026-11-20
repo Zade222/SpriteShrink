@@ -644,32 +644,6 @@ pub type FFIFileManifestParentU64 = FFIFileManifestParent<u64>;
 /// boundary as a [u8; 16] byte array in a U128Bytes struct.
 pub type FFIFileManifestParentU128 = FFIFileManifestParent<U128Bytes>;
 
-// Converts a tuple containing a Rust-native `FileManifestParent` and raw
-// pointers for its heap-allocated fields into the FFI-safe
-// `FFIFileManifestParent` struct.
-//
-// This is a convenience for assembling the FFI struct after its constituent
-// parts (like the C-string filename and the chunk metadata array) have been
-// manually allocated and prepared for C ownership.
-impl<H> From<(
-    FileManifestParent<H>,
-    *const FFISSAChunkMeta<H>,
-    usize,
-)> for FFIFileManifestParent<H> {
-    fn from(parts: (
-        FileManifestParent<H>,
-        *const FFISSAChunkMeta<H>,
-        usize,
-    )) -> Self {
-        let (fmp, chunk_metadata, chunk_metadata_cap) = parts;
-        Self {
-            chunk_metadata,
-            chunk_metadata_len: fmp.chunk_count as usize,
-            chunk_metadata_cap,
-        }
-    }
-}
-
 /// Borrows the chunk metadata of a manifest received from a C caller.
 ///
 /// # Errors
