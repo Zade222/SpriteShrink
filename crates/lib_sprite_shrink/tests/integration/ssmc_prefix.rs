@@ -455,12 +455,12 @@ fn parse_ssmc_prefix_chunk_offset_overflow_returns_error() {
 
 #[test]
 fn a_chunk_past_the_length_cap_is_rejected() {
-    let toc = sample_toc();
+    let mut toc = sample_toc();
     let comp = sample_comp([1_u64, 2, 3]);
     let mut manifests = sample_manifests([1_u64, 2, 3]);
     let cap = u32::try_from(MAX_CHUNK_LEN).unwrap();
-    // The second file, so the error must name it.
     manifests[1].chunk_metadata[1].length = cap;
+    toc[1].uncompressed_size = 4096 + u64::from(cap);
     let prefix =
         build_ssmc_prefix(&toc, &manifests, &comp, HASH_TYPE_XXH3_64).unwrap();
     parse_ssmc_prefix::<u64>(&prefix).unwrap();
@@ -475,6 +475,36 @@ fn a_chunk_past_the_length_cap_is_rejected() {
         e.to_string().contains(&format!("File 2 lists a chunk of {}", cap + 1)),
         "{e}"
     );
+}
+
+/// Each way a manifest can disagree with itself or with the table of
+/// contents is refused when the archive is opened, naming the file.
+#[test]
+fn a_manifest_that_disagrees_with_itself_or_the_toc_is_rejected() {
+    let comp = sample_comp([1_u64, 2, 3]);
+    let parse = |toc: &[SSMCTocEntry], manifests: &[FileManifestParent<u64>]| {
+        let prefix =
+            build_ssmc_prefix(toc, manifests, &comp, HASH_TYPE_XXH3_64).unwrap();
+        parse_ssmc_prefix::<u64>(&prefix).map(drop)
+    };
+
+    let mut gap = sample_manifests([1_u64, 2, 3]);
+    gap[1].chunk_metadata[1].offset += 1;
+    let mut wrong_size = sample_toc();
+    wrong_size[1].uncompressed_size += 1;
+    let one_entry = &sample_toc()[..1];
+
+    let cases: [(&str, &[SSMCTocEntry], Vec<_>, &str); 3] = [
+        ("a gap", &sample_toc(), gap, "file 2: chunk 2 starts at byte 4097"),
+        ("a size the TOC disagrees with", &wrong_size, sample_manifests([1, 2, 3]), "file 2 is listed as 8193 bytes"),
+        ("a missing TOC entry", one_entry, sample_manifests([1, 2, 3]), "2 file manifests but 1 table"),
+    ];
+    for (case, toc, manifests, expected) in cases {
+        let Err(e) = parse(toc, &manifests) else {
+            panic!("{case} was accepted");
+        };
+        assert!(e.to_string().contains(expected), "{case}: {e}");
+    }
 }
 
 #[test]
