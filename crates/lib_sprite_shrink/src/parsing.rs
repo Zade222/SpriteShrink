@@ -319,7 +319,15 @@ where
 ///
 /// # Errors
 ///
-/// Returns the rule the manifest breaks, as text, so a caller can add which
+/// Returns `ParsingError::InvalidManifest` saying which rule the manifest
+/// breaks.
+pub(crate) fn check_manifest<H>(
+    manifest: &FileManifestParent<H>
+) -> Result<u64, ParsingError> {
+    manifest_size(manifest).map_err(ParsingError::InvalidManifest)
+}
+
+/// [`check_manifest`], with the problem as text, so a caller can add which
 /// file it's in.
 fn manifest_size<H>(manifest: &FileManifestParent<H>) -> Result<u64, String> {
     let listed = manifest.chunk_metadata.len();
@@ -399,7 +407,7 @@ pub fn parse_format_data(
 /// Returns a `ParsingError` if the header is invalid or isn't for an SSMC
 /// archive, a section lies outside `prefix`, a section fails to decode, a
 /// file manifest lists a chunk longer than `MAX_CHUNK_LEN`, a manifest
-/// fails [`manifest_size`] or disagrees with its table of contents entry
+/// fails [`check_manifest`] or disagrees with its table of contents entry
 /// (`InvalidManifest`), or a chunk's absolute offset doesn't fit in a
 /// `u64`.
 pub fn parse_ssmc_prefix<H>(

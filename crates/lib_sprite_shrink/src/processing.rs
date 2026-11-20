@@ -28,7 +28,7 @@ use crate::lib_error_handling::{
 use crate::lib_structs::{
     FileData, FileManifestParent, ProcessedFileData, SeekMetadata, SSAChunkMeta
 };
-use crate::parsing::{SS_SEED};
+use crate::parsing::{SS_SEED, check_manifest};
 
 #[derive(Error, Debug)]
 pub enum ProcessingError {
@@ -805,21 +805,26 @@ where
 ///
 /// A `seek_length` of 0 returns an empty `Vec`.
 ///
+/// The manifest is checked with [`check_manifest`] first, whether it came
+/// from an archive or was built by the caller, since chunks are picked by
+/// their offsets.
+///
 /// # Errors
 ///
-/// Returns `ProcessingError::SeekOutOfBounds` if the requested range ends
-/// past the end of the file, including when `seek_offset + seek_length`
-/// overflows a `u64`.
+/// Returns `ParsingError::InvalidManifest` if the manifest's chunks don't
+/// lie end to end from byte 0 or its `chunk_count` is wrong, or
+/// `ProcessingError::SeekOutOfBounds` if the requested range ends past the
+/// end of the file, including when `seek_offset + seek_length` overflows a
+/// `u64`.
 pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     manifest: &FileManifestParent<H>,
     seek_offset: u64,
     seek_length: u64,
 ) -> Result<Vec<SeekMetadata<H>>, SpriteShrinkError> {
-    //Calculate original file size.
-    let original_file_size: u64 = manifest.chunk_metadata
-        .iter()
-        .map(|c| c.length as u64)
-        .sum();
+    /*The chunks must lie end to end, or picking them by offset below
+    returns the wrong bytes. Once they do, no offset + length can overflow:
+    each is at most the file size.*/
+    let original_file_size = check_manifest(manifest)?;
 
     /*Using the calculated file size, if the seek request is beyond the file
     size fail early. A request whose end doesn't fit in a u64 is beyond it
@@ -841,7 +846,15 @@ pub fn get_seek_chunks<H: Copy + Eq + Hash>(
     //Prepare the return vector
     let mut required_chunks: Vec<SeekMetadata<H>> = Vec::new();
 
-    for chunk_meta in &manifest.chunk_metadata {
+    /*The chunks lie end to end, so their ends never decrease, and the
+    chunks that end at or before seek_offset are a prefix of the list.
+    Binary search finds where that prefix stops, so a read near the end of
+    a large file doesn't walk every chunk before it.*/
+    let first = manifest.chunk_metadata.partition_point(|chunk| {
+        chunk.offset + u64::from(chunk.length) <= seek_offset
+    });
+
+    for chunk_meta in manifest.chunk_metadata.iter().skip(first) {
         //Calculate start offset of the chunk within the virtual file.
         let chunk_start_offset = chunk_meta.offset;
         //Calculate end offset of the chunk within the virtual file.
@@ -1354,6 +1367,32 @@ mod tests {
         FileManifestParent {
             chunk_count: chunk_metadata.len() as u64,
             chunk_metadata,
+        }
+    }
+
+    /*The manifest is checked before any chunk is picked. The second case
+    used to overflow adding the offset to the length, a panic in debug
+    builds.*/
+    #[test]
+    fn a_seek_in_a_manifest_whose_chunks_do_not_lie_end_to_end_fails() {
+        use crate::parsing::ParsingError;
+
+        let mut gap = manifest_of(&[50, 50]);
+        gap.chunk_metadata[1].offset = 60;
+        let mut overflowing = manifest_of(&[50, 50]);
+        overflowing.chunk_metadata[1].offset = u64::MAX - 10;
+
+        for manifest in [gap, overflowing] {
+            let result = get_seek_chunks(&manifest, 0, 100);
+            assert!(
+                matches!(
+                    result,
+                    Err(SpriteShrinkError::Parsing(
+                        ParsingError::InvalidManifest(_)
+                    ))
+                ),
+                "{result:?}"
+            );
         }
     }
 

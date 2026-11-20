@@ -1001,6 +1001,11 @@ pub unsafe extern "C" fn test_compression_u128(
 /// Calculates which chunks are needed for a seek operation via an
 /// FFI-safe interface.
 ///
+/// On failure, returns `FFIResult::ManifestDecodeError` if the manifest's
+/// chunks don't lie end to end from offset 0 (see `get_seek_chunks`), or
+/// `FFIResult::SeekOutOfBounds` if the range ends past the end of the
+/// file.
+///
 /// # Safety
 /// - `file_manifest_parent` must be a valid, non-null pointer.
 /// - `out_ptr` must be a valid pointer to a
@@ -1071,6 +1076,11 @@ pub unsafe extern "C" fn get_seek_chunks_u64(
 
 /// Calculates which chunks are needed for a seek operation via an
 /// FFI-safe interface.
+///
+/// On failure, returns `FFIResult::ManifestDecodeError` if the manifest's
+/// chunks don't lie end to end from offset 0 (see `get_seek_chunks`), or
+/// `FFIResult::SeekOutOfBounds` if the range ends past the end of the
+/// file.
 ///
 /// # Safety
 /// - `file_manifest_parent` must be a valid, non-null pointer.
