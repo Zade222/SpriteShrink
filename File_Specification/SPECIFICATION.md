@@ -128,6 +128,8 @@ Each `filename` is the name extraction gives the file, so it must be a single fi
       offset: u64,
       length: u32,
   }
+
+  A file's chunks are listed in file order and lie end to end: the first starts at `offset` 0, and each later one starts at the previous one's `offset + length`. `chunk_count` equals the number of chunks listed. The manifests are in table of contents order, one per entry, and each entry's `uncompressed_size` equals the sum of its file's chunk lengths.
 *   **Chunk Index:** Serialized `Vec<(H, ChunkLocation)>`, one entry per unique chunk.
   struct ChunkLocation {
       offset: u64,           // Relative to data_offset
@@ -206,10 +208,14 @@ Lengths and counts in an archive are untrusted: a reader sizes buffers from them
 | `ContentBlock.sector_count` | at most 1,024 sectors (2,408,448 bytes, `MAX_AUDIO_BLOCK_SECTORS`) | the reference writer uses 16; the rest is room to change that without a format change |
 | `ContentBlock.start_sector + sector_count` | at most the disc's sector count (the sum of `rle_sector_map`) | a block must lie inside its disc |
 | A disc's sector count (the sum of `rle_sector_map`) | at most 549,150 sectors (`MAX_DISC_SECTORS`) | a GD-ROM's size, larger than a 99-minute CD's 450,000 |
+| `SSAChunkMeta.offset` (SSMC) | the previous chunk's `offset + length`, starting at 0 | readers pick chunks by offset, so a gap or overlap returns the wrong bytes |
+| `FileManifestParent.chunk_count` and the TOC's `uncompressed_size` (SSMC) | the number of chunks listed, and the sum of their lengths | they repeat what the chunk list already says |
 
 Each stored item must also decode to exactly the length its record gives: an SSMC chunk to its `length`, an SSMD data chunk to its `uncomp_len`, and an audio block to `sector_count` × 2352 bytes. A reader stops decoding one byte past that length and rejects the item, so a damaged or hostile frame can't make it decode more. Every `ChunkLocation` must lie inside the file: `offset` (made absolute by adding `data_offset`, or `audio_data`'s offset for an audio block) plus `compressed_length` must not exceed the file's length. The host, which reads the file, checks this before allocating.
 
 These limits don't change the format: every archive the reference writer has produced is within them.
+
+The metadata sections (the TOC, the manifests and the indexes) are bitcode-encoded, and bitcode packs small values tightly: a field whose values fit in one bit takes one bit, then is widened to its full type when decoded. A legitimate archive's metadata needs a few times its encoded size in memory while it's decoded, since chunk hashes don't pack. Crafted metadata whose fields are all zero can need about 120 times its encoded size. The growth is in proportion to the metadata, which can't be larger than the file, so a reader that must bound its memory should bound the size of the archives it opens.
 
 ## 5. Read Logic Summary
 

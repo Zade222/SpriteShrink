@@ -50,6 +50,9 @@ pub enum ParsingError {
     #[error("Format data is malformed. {0}")]
     InvalidFormatData(String),
 
+    #[error("File manifest is invalid: {0}. The archive may be damaged.")]
+    InvalidManifest(String),
+
     #[error("Failed to decode file manifest: {0}")]
     ManifestDecodeError(String),
 
@@ -306,6 +309,52 @@ where
 }
 
 
+/// Checks that a file manifest's chunks describe one file, in order: the
+/// manifest holds `chunk_count` chunks, the first starts at byte 0, and
+/// each later one starts where the one before it ends. Returns the file's
+/// size.
+///
+/// Readers pick chunks by their offsets, so a gap, an overlap or an offset
+/// out of order would make them return the wrong bytes.
+///
+/// # Errors
+///
+/// Returns `ParsingError::InvalidManifest` saying which rule the manifest
+/// breaks.
+pub(crate) fn check_manifest<H>(
+    manifest: &FileManifestParent<H>
+) -> Result<u64, ParsingError> {
+    manifest_size(manifest).map_err(ParsingError::InvalidManifest)
+}
+
+/// [`check_manifest`], with the problem as text, so a caller can add which
+/// file it's in.
+fn manifest_size<H>(manifest: &FileManifestParent<H>) -> Result<u64, String> {
+    let listed = manifest.chunk_metadata.len();
+    if usize::try_from(manifest.chunk_count) != Ok(listed) {
+        return Err(format!(
+            "it gives its chunk count as {} but lists {listed} chunks",
+            manifest.chunk_count
+        ));
+    }
+
+    let mut end: u64 = 0;
+    for (index, chunk) in manifest.chunk_metadata.iter().enumerate() {
+        let number = index + 1;
+        if chunk.offset != end {
+            return Err(format!(
+                "chunk {number} starts at byte {}, not at byte {end}, where \
+                the chunks before it end",
+                chunk.offset
+            ));
+        }
+        end = end.checked_add(chunk.length.into()).ok_or_else(|| format!(
+            "chunk {number} ends past the largest possible file size"
+        ))?;
+    }
+    Ok(end)
+}
+
 /// Decodes an SSMC table of contents and checks each entry's name with
 /// [`check_entry_name`].
 ///
@@ -357,8 +406,10 @@ pub fn parse_format_data(
 ///
 /// Returns a `ParsingError` if the header is invalid or isn't for an SSMC
 /// archive, a section lies outside `prefix`, a section fails to decode, a
-/// file manifest lists a chunk longer than `MAX_CHUNK_LEN`, or a chunk's
-/// absolute offset doesn't fit in a `u64`.
+/// file manifest lists a chunk longer than `MAX_CHUNK_LEN`, a manifest
+/// fails [`check_manifest`] or disagrees with its table of contents entry
+/// (`InvalidManifest`), or a chunk's absolute offset doesn't fit in a
+/// `u64`.
 pub fn parse_ssmc_prefix<H>(
     prefix: &[u8]
 ) -> Result<ParsedSSMC<H>, SpriteShrinkError>
@@ -395,17 +446,36 @@ where
     let manifests = parse_file_metadata(
         format_data.enc_manifest.bytes_in(prefix, "file manifest")?
     )?;
-    /*Readers size their chunk buffers from these lengths, so a damaged
-    manifest could otherwise ask for gigabytes.*/
-    for (index, manifest) in manifests.iter().enumerate() {
+    /*Each table of contents entry describes the manifest at the same
+    position, so the two lists must be the same length.*/
+    if manifests.len() != toc.len() {
+        return Err(ParsingError::InvalidManifest(format!(
+            "the archive has {} file manifests but {} table of contents \
+            entries",
+            manifests.len(),
+            toc.len()
+        )).into());
+    }
+    for (index, (manifest, entry)) in manifests.iter().zip(&toc).enumerate() {
+        let file = index + 1;
+        /*Readers size their chunk buffers from these lengths, so a damaged
+        manifest could otherwise ask for gigabytes.*/
         let too_long = manifest.chunk_metadata.iter()
             .map(|chunk| chunk.length)
             .find(|&length| length as usize > MAX_CHUNK_LEN);
         if let Some(length) = too_long {
-            return Err(ParsingError::ChunkTooLong {
-                file: index + 1,
-                length,
-            }.into());
+            return Err(ParsingError::ChunkTooLong { file, length }.into());
+        }
+
+        let size = manifest_size(manifest).map_err(|problem| {
+            ParsingError::InvalidManifest(format!("file {file}: {problem}"))
+        })?;
+        if size != entry.uncompressed_size {
+            return Err(ParsingError::InvalidManifest(format!(
+                "file {file} is listed as {} bytes, but its chunks add up \
+                to {size}",
+                entry.uncompressed_size
+            )).into());
         }
     }
 
@@ -443,6 +513,44 @@ mod tests {
 
     use super::*;
     use crate::lib_structs::{ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, SSAChunkMeta};
+
+    /// A manifest of chunks given as (offset, length), with a matching
+    /// `chunk_count`.
+    fn chunks(layout: &[(u64, u32)]) -> FileManifestParent<u64> {
+        FileManifestParent {
+            chunk_count: layout.len() as u64,
+            chunk_metadata: layout
+                .iter()
+                .zip(0_u64..)
+                .map(|(&(offset, length), hash)| SSAChunkMeta { hash, offset, length })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_manifest_must_lay_its_chunks_end_to_end() {
+        assert_eq!(manifest_size(&chunks(&[(0, 50), (50, 50), (100, 7)])), Ok(107));
+        assert_eq!(manifest_size(&chunks(&[])), Ok(0));
+
+        let mut miscounted = chunks(&[(0, 50)]);
+        miscounted.chunk_count = 2;
+        let cases = [
+            ("a gap", chunks(&[(0, 50), (100, 50)]), "chunk 2 starts at byte 100"),
+            ("an overlap", chunks(&[(0, 50), (25, 50)]), "chunk 2 starts at byte 25"),
+            ("out of order", chunks(&[(50, 50), (0, 50)]), "chunk 1 starts at byte 50"),
+            ("a late start", chunks(&[(1, 50)]), "chunk 1 starts at byte 1"),
+            (
+                "an offset that would overflow",
+                chunks(&[(0, 50), (u64::MAX - 10, 50)]),
+                "chunk 2 starts",
+            ),
+            ("a wrong count", miscounted, "chunk count as 2 but lists 1"),
+        ];
+        for (case, manifest, expected) in cases {
+            let problem = manifest_size(&manifest).unwrap_err();
+            assert!(problem.contains(expected), "{case}: {problem}");
+        }
+    }
 
     /// An 8-byte aligned buffer, so a test can place bytes at an offset
     /// that is known to be misaligned.

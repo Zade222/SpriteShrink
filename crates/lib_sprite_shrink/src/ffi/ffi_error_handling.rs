@@ -95,6 +95,7 @@ impl From<ParsingError> for FFIStatus {
     fn from(err: ParsingError) -> Self {
         match err {
             ParsingError::ChunkTooLong { .. }
+            | ParsingError::InvalidManifest(_)
             | ParsingError::ManifestDecodeError(_) => {
                 FFIStatus::ManifestDecodeError
             }
@@ -201,6 +202,7 @@ mod tests {
             (ParsingError::InvalidFileVersion(0).into(), -3),
             (ParsingError::ManifestDecodeError(String::new()).into(), -4),
             (ParsingError::ChunkTooLong { file: 1, length: 0 }.into(), -4),
+            (ParsingError::InvalidManifest(String::new()).into(), -4),
             (ParsingError::SectionOutOfBounds(String::new()).into(), -20),
             (ParsingError::UnsupportedHashType(0).into(), -21),
             (ParsingError::IndexDecodeError(String::new()).into(), -24),

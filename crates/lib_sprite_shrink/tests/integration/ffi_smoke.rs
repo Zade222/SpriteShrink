@@ -2224,6 +2224,34 @@ fn get_seek_chunks_rejects_a_read_past_the_end() {
     }
 }
 
+/// A manifest the C host built with a gap between its chunks is refused,
+/// not read as if the gap weren't there.
+#[test]
+fn get_seek_chunks_rejects_chunks_that_do_not_lie_end_to_end() {
+    let chunks = [
+        FFISSAChunkMeta { hash: 1_u64, offset: 0, length: 4 },
+        FFISSAChunkMeta { hash: 2_u64, offset: 5, length: 4 },
+    ];
+    let manifest = FFIFileManifestParent {
+        chunk_metadata: chunks.as_ptr(),
+        chunk_metadata_len: chunks.len(),
+        chunk_metadata_cap: chunks.len(),
+    };
+    let mut out = ptr::null_mut();
+
+    // SAFETY: `manifest` points at `chunks`, which outlive the call, and
+    // `out` is a local.
+    let status = unsafe {
+        get_seek_chunks_u64(&raw const manifest, 0, 8, &raw mut out)
+    };
+
+    assert_eq!(
+        status_code(status),
+        status_code(FFIStatus::ManifestDecodeError)
+    );
+    assert!(out.is_null());
+}
+
 // Hashes passed to callbacks
 
 /// Reads the 16-byte little-endian hashes the u128 exports pass callbacks.

@@ -209,8 +209,9 @@ where
 ///   than `HASH_TYPE_XXH3_64` or `HASH_TYPE_XXH3_128`.
 /// - `FFIResult::SectionOutOfBounds` if a section lies past the end of the
 ///   prefix.
-/// - `FFIResult::ManifestDecodeError` if the manifest fails to decode or
-///   lists a chunk longer than `MAX_CHUNK_LEN`.
+/// - `FFIResult::ManifestDecodeError` if the manifest fails to decode,
+///   lists a chunk longer than `MAX_CHUNK_LEN`, or its chunks don't lie end
+///   to end or disagree with the table of contents.
 /// - `FFIResult::InternalError` for any other decode failure.
 ///
 /// # Safety
@@ -267,8 +268,9 @@ pub unsafe extern "C" fn parse_ssmc_prefix_u64(
 ///   than `HASH_TYPE_XXH3_64` or `HASH_TYPE_XXH3_128`.
 /// - `FFIResult::SectionOutOfBounds` if a section lies past the end of the
 ///   prefix.
-/// - `FFIResult::ManifestDecodeError` if the manifest fails to decode or
-///   lists a chunk longer than `MAX_CHUNK_LEN`.
+/// - `FFIResult::ManifestDecodeError` if the manifest fails to decode,
+///   lists a chunk longer than `MAX_CHUNK_LEN`, or its chunks don't lie end
+///   to end or disagree with the table of contents.
 /// - `FFIResult::InternalError` for any other decode failure.
 ///
 /// # Safety
