@@ -215,6 +215,8 @@ Each stored item must also decode to exactly the length its record gives: an SSM
 
 These limits don't change the format: every archive the reference writer has produced is within them.
 
+The metadata sections (the TOC, the manifests and the indexes) are bitcode-encoded, and bitcode packs small values tightly: a field whose values fit in one bit takes one bit, then is widened to its full type when decoded. A legitimate archive's metadata needs a few times its encoded size in memory while it's decoded, since chunk hashes don't pack. Crafted metadata whose fields are all zero can need about 120 times its encoded size. The growth is in proportion to the metadata, which can't be larger than the file, so a reader that must bound its memory should bound the size of the archives it opens.
+
 ## 5. Read Logic Summary
 
 1.  **Read Header (0-36 bytes)**.
