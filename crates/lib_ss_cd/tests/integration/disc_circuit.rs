@@ -19,9 +19,10 @@ use sha2::{Digest, Sha512};
 use sprite_shrink::{ChunkLocation, Hashable, IsCancelled};
 use sprite_shrink_cd::{
     ContentBlock, CueSheet, DataChunkLayout, DiscManifest, DiscReconstructor,
-    ExceptionRegistry, FileSizeProvider, SSMDIndices, SectorDataProvider,
-    SectorMap, SectorRegionStream, SectorType, SubheaderRegistry,
-    UserDataStream, analyze_and_map_disc, analyze_cue_sheets,
+    ExceptionRegistry, ExceptionTable, FileSizeProvider, SSMDIndices,
+    SectorDataProvider, SectorMap, SectorRegionStream, SectorType,
+    SubheaderRegistry, SubheaderTable, UserDataStream,
+    analyze_and_map_disc, analyze_cue_sheets,
     compress_audio_block, disc_files, generate_cue_string,
     rebuild_sector_simd, resolve_file_sector_counts, rle_encode_map,
     verify_disc_integrity, write_disc,
@@ -191,6 +192,20 @@ fn archive(bin: Vec<u8>, cue: &str) -> Archived {
     archive_files(vec![(BIN_NAME, bin)], cue)
 }
 
+/// Sorts the shared tables and renumbers the disc against them, as archiving
+/// does once every disc is analysed.
+fn sort_tables(
+    subheaders: &SubheaderRegistry,
+    exceptions: &ExceptionRegistry,
+    manifest: &mut DiscManifest<u64>,
+) -> (SubheaderTable, ExceptionTable) {
+    let subheader_table = subheaders.sorted_table().unwrap();
+    let exception_table = exceptions.sorted_table().unwrap();
+    subheader_table.renumber(&mut manifest.subheader_index).unwrap();
+    exception_table.renumber(&mut manifest.disc_exception_index).unwrap();
+    (subheader_table, exception_table)
+}
+
 /// Archives a disc stored as several BIN files, given in the CUE sheet's
 /// order. The sectors are read from the files joined, as the CLI reads
 /// them.
@@ -275,10 +290,7 @@ fn archive_files(bins: Vec<(&str, Vec<u8>)>, cue: &str) -> Archived {
         run_start += run_len;
     }
 
-    let (exception_blob, exception_index) = exceptions.generate_blob_and_index();
-    indices.exception_index = exception_index;
-
-    let manifest = DiscManifest {
+    let mut manifest = DiscManifest {
         files,
         lba_map: mapped.lba_map,
         rle_sector_map,
@@ -288,6 +300,9 @@ fn archive_files(bins: Vec<(&str, Vec<u8>)>, cue: &str) -> Archived {
         disc_exception_index: mapped.exception_index,
         integrity_hash: xxh3_64(&bin),
     };
+    let (subheader_table, exception_table) =
+        sort_tables(&subheaders, &exceptions, &mut manifest);
+    indices.exception_index = exception_table.index;
 
     Archived {
         sheet,
@@ -295,8 +310,8 @@ fn archive_files(bins: Vec<(&str, Vec<u8>)>, cue: &str) -> Archived {
         manifest,
         indices,
         archive: stored,
-        exception_blob,
-        subheader_table: subheaders.generate_blob(),
+        exception_blob: exception_table.blob,
+        subheader_table: subheader_table.entries,
         data_chunks,
         audio_blocks,
     }

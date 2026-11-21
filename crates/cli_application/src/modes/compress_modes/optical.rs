@@ -755,17 +755,23 @@ where
             "Failed to unwrap Arc for verification hashes".to_string()
         ))?;
 
-    let subheader_table = shared_subheader_registry.generate_blob();
+    // The discs registered subheaders and exceptions in thread order.
+    // Sorting both tables and renumbering every disc against them makes the
+    // archive the same on every run.
+    let subheader_table = shared_subheader_registry.sorted_table()?;
+    let exception_table = shared_exception_registry.sorted_table()?;
 
-    let (exception_blob, exception_index) = shared_exception_registry
-        .generate_blob_and_index();
+    for mut manifest in final_disc_man.iter_mut() {
+        subheader_table.renumber(&mut manifest.subheader_index)?;
+        exception_table.renumber(&mut manifest.disc_exception_index)?;
+    }
 
     Ok(OptProcResult {
             manifests: final_disc_man,
             veri_hashes: final_hashes,
-            exception_index,
-            exception_blob,
-            subheader_table
+            exception_index: exception_table.index,
+            exception_blob: exception_table.blob,
+            subheader_table: subheader_table.entries
     })
 }
 

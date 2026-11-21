@@ -28,6 +28,14 @@ pub enum MapperError {
     ProviderIo(#[from] io::Error),
     #[error("Failed to analyze sector data: {0}")]
     Analysis(#[from] crate::analyze::AnalysisError),
+    #[error("More different exceptions were found than a u32 ID can number.")]
+    TooManyExceptions,
+    #[error("More than 65,536 different subheaders were found, more than a u16 ID can number.")]
+    TooManySubheaders,
+    #[error("A disc refers to exception {0}, which was never registered.")]
+    UnregisteredException(u32),
+    #[error("A disc refers to subheader {0}, which was never registered.")]
+    UnregisteredSubheader(u16),
 }
 
 pub trait SectorDataProvider {

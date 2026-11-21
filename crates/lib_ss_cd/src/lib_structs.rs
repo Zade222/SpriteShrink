@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fmt::{self, Display, Formatter},
+    hash::Hash,
     marker::PhantomData,
     mem,
     sync::atomic::{AtomicU16, AtomicU32, Ordering,}
@@ -10,6 +11,7 @@ use std::{
 use crate::{
     flac::{audio_block_len, decompress_flac_block},
     lib_error_handling::SpriteShrinkCDError,
+    mapper::MapperError,
     reconstruction::{
         MsfOffsets, ReconstructionError,
         build_decoded_map, exception_data_for, expand_exception_index,
@@ -548,25 +550,67 @@ impl ExceptionRegistry {
         })
     }
 
-    pub fn generate_blob_and_index(&self) -> (Vec<u8>, Vec<u64>) {
-        let mut pairs: Vec<(Vec<u8>, u32)> = self.map
-            .iter()
-            .map(|pair| (pair.key().clone(), *pair.value()))
-            .collect();
-
-        pairs.sort_by_key(|(_data, id)| *id);
+    /// Builds the exception blob and its index with the entries sorted by
+    /// their bytes.
+    ///
+    /// Discs analysed in parallel register entries in whatever order their
+    /// threads reach them, so registration IDs differ from run to run.
+    /// Sorting makes the blob depend only on which entries exist, and the
+    /// returned table moves each disc's registration IDs onto it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MapperError::TooManyExceptions` if more entries were
+    /// registered than a `u32` ID can number.
+    pub fn sorted_table(&self) -> Result<ExceptionTable, SpriteShrinkCDError> {
+        let (entries, new_ids) = order_by_bytes(&self.map)
+            .ok_or(MapperError::TooManyExceptions)?;
 
         let mut blob = Vec::new();
-        let mut excep_index = Vec::new();
-        let mut current_offset = 0u64;
+        let mut index = Vec::with_capacity(entries.len());
 
-        for (data, _id) in pairs {
+        for data in entries {
+            index.push(blob.len() as u64);
             blob.extend_from_slice(&data);
-            excep_index.push(current_offset);
-            current_offset += data.len() as u64;
-        };
+        }
 
-        (blob, excep_index)
+        Ok(ExceptionTable { blob, index, new_ids })
+    }
+}
+
+
+/// The exception blob shared by every disc in an archive, sorted by bytes.
+#[derive(Debug)]
+pub struct ExceptionTable {
+    /// Every exception's data, one after another.
+    pub blob: Vec<u8>,
+    /// The offset of each exception in `blob`, by ID.
+    pub index: Vec<u64>,
+    /// The sorted ID of each registration ID.
+    new_ids: Vec<u32>,
+}
+
+
+impl ExceptionTable {
+    /// Replaces the registration IDs in a disc's exception index with
+    /// sorted IDs. Apply it once to each disc's index.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MapperError::UnregisteredException` for an ID the registry
+    /// never handed out. Entries before it have already been replaced.
+    pub fn renumber(
+        &self,
+        exception_index: &mut [(u32, u32)]
+    ) -> Result<(), SpriteShrinkCDError> {
+        for (_lba, id) in exception_index {
+            *id = usize::try_from(*id).ok()
+                .and_then(|old| self.new_ids.get(old))
+                .copied()
+                .ok_or(MapperError::UnregisteredException(*id))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -603,17 +647,95 @@ impl SubheaderRegistry {
         })
     }
 
-    /// Converts the map into sorted vector
-    pub fn generate_blob(&self) -> Vec<[u8; 8]> {
-        let mut pairs: Vec<([u8; 8], u16)> = self.map
-            .iter()
-            .map(|pair| (*pair.key(), *pair.value()))
-            .collect();
+    /// Builds the subheader table with the entries sorted by their bytes.
+    ///
+    /// Discs analysed in parallel register entries in whatever order their
+    /// threads reach them, so registration IDs differ from run to run.
+    /// Sorting makes the table depend only on which entries exist, and the
+    /// returned table moves each disc's registration IDs onto it.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MapperError::TooManySubheaders` if more than 65,536
+    /// different subheaders were registered. Their `u16` IDs wrapped around
+    /// during registration, so some discs share IDs that mean different
+    /// subheaders.
+    pub fn sorted_table(&self) -> Result<SubheaderTable, SpriteShrinkCDError> {
+        let (entries, new_ids) = order_by_bytes(&self.map)
+            .ok_or(MapperError::TooManySubheaders)?;
 
-        pairs.sort_by_key(|(_data, id)| *id);
-
-        pairs.into_iter().map(|(data, _)| data).collect()
+        Ok(SubheaderTable { entries, new_ids })
     }
+}
+
+
+/// The subheader table shared by every disc in an archive, sorted by bytes.
+#[derive(Debug)]
+pub struct SubheaderTable {
+    /// The subheaders, by ID.
+    pub entries: Vec<[u8; 8]>,
+    /// The sorted ID of each registration ID.
+    new_ids: Vec<u16>,
+}
+
+
+impl SubheaderTable {
+    /// Replaces the registration IDs in a disc's subheader index with
+    /// sorted IDs. Apply it once to each disc's index.
+    ///
+    /// Each registration ID maps to exactly one sorted ID, so neighbouring
+    /// runs that had different IDs still do.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MapperError::UnregisteredSubheader` for an ID the registry
+    /// never handed out. Entries before it have already been replaced.
+    pub fn renumber(
+        &self,
+        subheader_index: &mut [SubHeaderEntry]
+    ) -> Result<(), SpriteShrinkCDError> {
+        for entry in subheader_index {
+            entry.data_id = self.new_ids.get(usize::from(entry.data_id))
+                .copied()
+                .ok_or(MapperError::UnregisteredSubheader(entry.data_id))?;
+        }
+
+        Ok(())
+    }
+}
+
+
+/// Sorts a registry's entries by their bytes. Returns the entries in that
+/// order, and a table giving each registration ID's position in it.
+///
+/// A registry hands out IDs from a counter inside the map's entry lock, so
+/// the IDs are exactly `0..len` unless the counter wrapped. Returns `None`
+/// then, as a position no longer fits in `I`.
+fn order_by_bytes<K, I>(map: &DashMap<K, I>) -> Option<(Vec<K>, Vec<I>)>
+where
+    K: Clone + Eq + Hash + Ord,
+    I: Copy + Default + TryFrom<usize>,
+    usize: TryFrom<I>,
+{
+    let mut pairs: Vec<(K, I)> = map
+        .iter()
+        .map(|pair| (pair.key().clone(), *pair.value()))
+        .collect();
+
+    // Keys are unique, so an unstable sort still has one result.
+    pairs.sort_unstable_by(|(a, _), (b, _)| a.cmp(b));
+
+    let mut new_ids = vec![I::default(); pairs.len()];
+    let mut entries = Vec::with_capacity(pairs.len());
+
+    for (position, (key, old_id)) in pairs.into_iter().enumerate() {
+        let slot = usize::try_from(old_id).ok()
+            .and_then(|old| new_ids.get_mut(old))?;
+        *slot = I::try_from(position).ok()?;
+        entries.push(key);
+    }
+
+    Some((entries, new_ids))
 }
 
 impl Default for SubheaderRegistry {
@@ -1123,33 +1245,80 @@ mod tests {
     }
 
     #[test]
-    fn the_exception_index_points_at_each_entry_in_the_blob() {
-        let registry = ExceptionRegistry::default();
-        let entries = [vec![1; 296], vec![2; 20], vec![3; 296]];
-        let ids: Vec<u32> = entries.iter()
-            .map(|data| registry.get_or_register(data.clone()))
-            .collect();
-        registry.get_or_register(entries[1].clone());
+    fn exceptions_get_the_same_table_whatever_order_they_were_registered() {
+        let entries = [vec![3; 296], vec![1; 20], vec![2; 296]];
+        let build = |order: [usize; 3]| {
+            let registry = ExceptionRegistry::default();
+            for i in order {
+                registry.get_or_register(entries[i].clone());
+            }
+            // A disc that met the entries in their listed order.
+            let mut disc: Vec<(u32, u32)> = (0u32..)
+                .zip(&entries)
+                .map(|(lba, data)| (lba, registry.get_or_register(data.clone())))
+                .collect();
+            let table = registry.sorted_table().unwrap();
+            table.renumber(&mut disc).unwrap();
+            (table.blob, table.index, disc)
+        };
 
-        let (blob, index) = registry.generate_blob_and_index();
-        assert_eq!(index, [0, 296, 316]);
-        assert_eq!(blob.len(), 612);
-        for (id, data) in ids.into_iter().zip(&entries) {
-            let start = usize::try_from(index[id as usize]).unwrap();
+        let (blob, index, disc) = build([0, 1, 2]);
+        assert_eq!((blob.clone(), index.clone(), disc.clone()), build([2, 0, 1]));
+        assert_eq!(index, [0, 20, 316]);
+        for ((_, id), data) in disc.iter().zip(&entries) {
+            let start = usize::try_from(index[*id as usize]).unwrap();
             assert_eq!(&blob[start..start + data.len()], data.as_slice());
         }
     }
 
     #[test]
-    fn subheaders_are_deduplicated_and_listed_by_id() {
-        let registry = SubheaderRegistry::default();
-        let a = registry.get_or_register([0, 0, 8, 0, 0, 0, 8, 0]);
-        let b = registry.get_or_register([1, 0, 0x20, 0, 1, 0, 0x20, 0]);
-        assert_eq!(registry.get_or_register([0, 0, 8, 0, 0, 0, 8, 0]), a);
+    fn subheaders_get_the_same_table_whatever_order_they_were_registered() {
+        let mode2 = [0, 0, 8, 0, 0, 0, 8, 0];
+        let form2 = [1, 0, 0x20, 0, 1, 0, 0x20, 0];
+        let zeros = [0; 8];
+        let build = |order: [[u8; 8]; 3]| {
+            let registry = SubheaderRegistry::default();
+            for data in order {
+                registry.get_or_register(data);
+            }
+            let entry = |start_lba, data| SubHeaderEntry {
+                start_lba, count: 1, data_id: registry.get_or_register(data)
+            };
+            let mut disc = vec![entry(0, form2), entry(1, mode2), entry(2, form2)];
+            let table = registry.sorted_table().unwrap();
+            table.renumber(&mut disc).unwrap();
+            (table.entries, disc)
+        };
 
-        let table = registry.generate_blob();
-        assert_eq!(table.len(), 2);
-        assert_eq!(table[usize::from(a)], [0, 0, 8, 0, 0, 0, 8, 0]);
-        assert_eq!(table[usize::from(b)], [1, 0, 0x20, 0, 1, 0, 0x20, 0]);
+        let (entries, disc) = build([form2, mode2, zeros]);
+        assert_eq!((entries.clone(), disc.clone()), build([zeros, mode2, form2]));
+        assert_eq!(entries, [zeros, mode2, form2]);
+        let ids: Vec<u16> = disc.iter().map(|entry| entry.data_id).collect();
+        assert_eq!(ids, [2, 1, 2]);
+    }
+
+    #[test]
+    fn renumbering_an_id_the_registry_never_gave_fails() {
+        let registry = SubheaderRegistry::default();
+        registry.get_or_register([0; 8]);
+        let mut disc = [SubHeaderEntry { start_lba: 0, count: 1, data_id: 1 }];
+        let err = registry.sorted_table().unwrap().renumber(&mut disc).unwrap_err();
+        assert!(matches!(
+            err,
+            SpriteShrinkCDError::Mapper(MapperError::UnregisteredSubheader(1))
+        ));
+    }
+
+    #[test]
+    fn more_subheaders_than_a_u16_can_number_are_refused() {
+        let registry = SubheaderRegistry::default();
+        for n in 0..=u32::from(u16::MAX) + 1 {
+            let [a, b, c, d] = n.to_le_bytes();
+            registry.get_or_register([a, b, c, d, 0, 0, 0, 0]);
+        }
+        assert!(matches!(
+            registry.sorted_table().unwrap_err(),
+            SpriteShrinkCDError::Mapper(MapperError::TooManySubheaders)
+        ));
     }
 }
