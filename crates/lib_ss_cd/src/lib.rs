@@ -36,9 +36,10 @@ pub use lib_structs::{
     MAX_AUDIO_BLOCK_SECTORS, MAX_DISC_SECTORS, NO_COLLECTION, SSMD_UID,
     CueSheet, ContentBlock, DataChunkLayout, DiscArea, DiscFile, DiscIndex,
     DiscManifest, DiscTrack, TrackType,
-    ExceptionInfo, ExceptionRegistry, ExceptionType, DiscReconstructor,
-    ParsedSSMD, RleSectorMap, SectorMap, SectorType, SSMDFormatData,
-    SSMDIndices, SSMDTocEntry, SubHeaderEntry, SubheaderRegistry
+    ExceptionInfo, ExceptionRegistry, ExceptionTable, ExceptionType,
+    DiscReconstructor, ParsedSSMD, RleSectorMap, SectorMap, SectorType,
+    SSMDFormatData, SSMDIndices, SSMDTocEntry, SubHeaderEntry,
+    SubheaderRegistry, SubheaderTable
 };
 
 mod mapper;
