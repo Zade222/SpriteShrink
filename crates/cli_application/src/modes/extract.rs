@@ -7,6 +7,7 @@
 //! to the designated output directory.
 
 use std::{
+    cell::Cell,
     collections::HashMap,
     fmt::Display,
     fs::{create_dir_all, symlink_metadata},
@@ -27,8 +28,8 @@ use sprite_shrink::{
     SSMC_UID,
     HashType,
     ChunkLocation, FileHeader, FileManifestParent, Hashable, ParsedSSMC,
-    SSMCTocEntry, SpriteShrinkError,
-    check_entry_name, decompress_chunk_checked
+    IsCancelled, SSAChunkMeta, SSMCTocEntry, SpriteShrinkError,
+    check_entry_name, decompress_chunks_with
 };
 
 use sprite_shrink_cd::{
@@ -42,8 +43,8 @@ use crate::{
     arg_handling::Args,
     error_handling::CliError,
     storage_io::{
-        ArchiveFile, ExistingFile, has_extension, read_file_data,
-        write_via_temp
+        ArchiveFile, ExistingFile,
+        has_extension, write_via_temp
     },
 };
 
@@ -168,9 +169,8 @@ fn check_plan(
 /// This is the main entry point for the extraction operation. It reads an
 /// archive's metadata, including the header, manifest, and chunk index.
 /// It then extracts the specific files requested by the user, identified
-/// by their ROM indices. The extraction process is then performed sequentially
-/// to avoid IO contention with multiple threads reading and writing to disk at
-/// once.
+/// by their ROM indices. Files are extracted one after another. Within an
+/// SSMC file, chunks are decoded on several threads and written in order.
 ///
 /// # Arguments
 ///
@@ -179,8 +179,9 @@ fn check_plan(
 ///   be written.
 /// * `rom_indices`: Zero-based positions in the archive's table of contents
 ///   of the files to extract, as `parse_rom_indices` returns them.
-/// * `args`: A reference to the main `Args` struct, used here to configure
-///   the number of worker threads for parallel processing.
+/// * `args`: A reference to the main `Args` struct: `force`, and `threads`
+///   for the number of threads decoding SSMC chunks (0 or unset uses every
+///   core).
 ///
 /// # Returns
 ///
@@ -193,8 +194,6 @@ fn check_plan(
 /// This function can return an error in several cases, including:
 /// - `CliError` variants if reading the archive's header, manifest, or
 ///   chunk data fails.
-/// - `CliError::InternalError` if a worker thread pool cannot be
-///   created.
 /// - `CliError::InvalidRomIndex` if a requested ROM index does not exist
 ///   in the archive.
 /// - Any error propagated from the decompression or file writing stages.
@@ -334,8 +333,8 @@ fn ssmc_entry<'a, H>(
 ///   files to extract.
 /// * `prefix`: The archive's parsed metadata: TOC, manifest, dictionary,
 ///   and a chunk index holding absolute file offsets.
-/// * `args`: A reference to the main `Args` struct, used to check
-///   configuration options like `force`.
+/// * `args`: A reference to the main `Args` struct: `force`, and `threads`
+///   for the number of decoding threads (0 or unset uses every core).
 /// * `running`: An `Arc<AtomicBool>` used to signal and check for
 ///   cancellation of the extraction process.
 ///
@@ -359,7 +358,8 @@ fn ssmc_entry<'a, H>(
 ///   is missing from the chunk index, or if an unsupported hash type is
 ///   encountered.
 /// - `CliError::SpriteShrinkError` if a chunk doesn't decompress, or doesn't
-///   decompress to the bytes its hash says.
+///   decompress to the bytes its hash says, or if a decoding thread can't be
+///   started or panics.
 /// - `CliError::Cancelled` if the `running` flag is set to `false` during
 ///   the extraction process.
 /// - Any `std::io::Error` that occurs during file creation, writing, or
@@ -414,6 +414,11 @@ where
         create_dir_all(out_dir)?;
     }
 
+    /*One handle serves every read. Reads give their own offsets, so the
+    file has no shared position to keep in step.*/
+    let archive = ArchiveFile::open(file_path)?;
+    let worker_count = args.threads.unwrap_or(0);
+
     for &index in rom_indices {
         let (fmp, entry) = ssmc_entry(file_manifest, toc, index)?;
 
@@ -427,42 +432,56 @@ where
         partial file.*/
         let buffer_size = FILE_WRITE_BUFFER_SIZE;
         write_via_temp(&final_output_path, existing, buffer_size, |writer| {
-            fmp.chunk_metadata
-                .iter()
-                .try_for_each(|scm| -> Result<(), CliError> {
-                /*Get the chunk location from the chunk index.*/
-                let chunk_location = chunk_index.get(&scm.hash)
-                    .ok_or_else(|| {
-                    CliError::InternalError(format!(
-                        "Decompression failed: Missing chunk with hash\
-                        {}",
-                        scm.hash
-                    ))
-                })?;
+            /*The library passes on a callback's error as its message only.
+            Keep the error itself, so the user sees it as it was raised (an
+            I/O error stays an I/O error).*/
+            let callback_error = Cell::new(None);
+            let keep = |e: CliError| {
+                let stand_in = if e.is_cancelled() {
+                    CliError::Cancelled
+                } else {
+                    CliError::InternalError(e.to_string())
+                };
+                callback_error.set(Some(e));
+                stand_in
+            };
 
-                //The chunk index already holds absolute file offsets.
-                let comp_chunk_data = read_file_data(
-                    file_path,
-                    chunk_location.offset,
-                    chunk_location.compressed_length as usize
-                )?;
-
-                let decomp_chunk_data = decompress_chunk_checked(
-                    &comp_chunk_data,
-                    dictionary,
-                    scm.hash,
-                    scm.length as usize
-                )?;
-
-                //Check if the user has cancelled the operation
+            let read_chunks = |chunks: &[SSAChunkMeta<H>]| {
                 if !running.load(Ordering::SeqCst) {
-                    return Err(CliError::Cancelled);
+                    return Err(keep(CliError::Cancelled));
                 }
 
-                writer.write_all(&decomp_chunk_data)?;
+                chunks.iter().map(|scm| {
+                    let location = chunk_index.get(&scm.hash)
+                        .ok_or_else(|| CliError::InternalError(format!(
+                            "Decompression failed: Missing chunk with hash \
+                            {}",
+                            scm.hash
+                        )))?;
 
-                Ok(())
-            })
+                    //The chunk index already holds absolute file offsets.
+                    archive.read(
+                        location.offset,
+                        location.compressed_length as usize
+                    )
+                }).collect::<Result<_, _>>().map_err(keep)
+            };
+
+            let write_chunk = |data: &[u8]| {
+                if !running.load(Ordering::SeqCst) {
+                    return Err(keep(CliError::Cancelled));
+                }
+                writer.write_all(data).map_err(|e| keep(e.into()))
+            };
+
+            decompress_chunks_with(
+                worker_count,
+                dictionary,
+                &fmp.chunk_metadata,
+                read_chunks,
+                write_chunk,
+            ).map_err(|e| callback_error.take()
+                .unwrap_or_else(|| CliError::from(e)))
         })?;
 
         debug!("{} extracted successfully", entry.filename);
