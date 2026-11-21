@@ -31,7 +31,7 @@ use crate::{IsCancelled, SpriteShrinkError,
     FFIProgress, FFIProgressType, FFIUserData
     },
     lib_structs::{
-        ChunkLocation, CompressionResult, Progress,
+        ChunkLocation, CompressionResult, Progress, SSAChunkMeta,
     }
 };
 
@@ -168,12 +168,20 @@ const PREFETCH_LOW_THRESHOLD: usize = 100;
 const PREFETCH_HIGH_THRESHOLD: usize = 500;
 
 /// The most chunks the coordinator holds at once, from the next one to
-/// write to the last one read: queued, being compressed, or compressed and
+/// write to the last one read: queued, being worked on, or done and
 /// waiting for an earlier chunk. Two batches, so one can be read while the
 /// one before is still being written.
 const REORDER_WINDOW: usize = 2 * PREFETCH_HIGH_THRESHOLD;
 
-/// Maps an error from one of `run_pipeline`'s callbacks to an
+/// The most chunk data the coordinator plans to hold at once, read or
+/// produced, across every chunk in the window. A chunk larger than this
+/// is read on its own once the window is empty.
+///
+/// At the default 2 KiB window, `REORDER_WINDOW` chunks are a few MiB, so
+/// the count is the limit. With large chunks (up to 16 MiB), this is.
+const PIPELINE_BYTE_BUDGET: usize = 64 * 1024 * 1024;
+
+/// Maps an error from one of the pipeline's callbacks to an
 /// `ArchiveError`, keeping cancellation distinct.
 fn callback_error<E: std::error::Error + IsCancelled>(e: &E) -> ArchiveError {
     if e.is_cancelled() {
@@ -185,7 +193,7 @@ fn callback_error<E: std::error::Error + IsCancelled>(e: &E) -> ArchiveError {
 
 /// Compresses chunks with Zstandard, in parallel, for an archive.
 ///
-/// A wrapper around `run_pipeline` that gives each worker a Zstandard
+/// A wrapper around `compress_pipeline` that gives each worker a Zstandard
 /// compressor with `dictionary` loaded.
 ///
 /// # Arguments
@@ -203,7 +211,7 @@ fn callback_error<E: std::error::Error + IsCancelled>(e: &E) -> ArchiveError {
 ///
 /// - `ArchiveError::Dictionary` if zstd can't use `dictionary`. This is
 ///   checked before any chunk is read.
-/// - Any error from `run_pipeline`, or from compressing a chunk.
+/// - Any error from `compress_pipeline`, or from compressing a chunk.
 pub(crate) fn compress_chunks<ERead, EWrite, H, R, W>(
     worker_count: usize,
     dictionary: &[u8],
@@ -228,7 +236,7 @@ where
         })
     };
 
-    run_pipeline(
+    compress_pipeline(
         worker_count,
         sorted_hashes,
         new_compressor,
@@ -320,7 +328,7 @@ where
             .map_err(compression_error)
     };
 
-    run_pipeline(
+    compress_pipeline(
         worker_count,
         sorted_hashes,
         new_archive_compressor,
@@ -329,38 +337,12 @@ where
     ).map_err(SpriteShrinkError::from)
 }
 
-/// Compresses a collection of data chunks in parallel using a
-/// producer-consumer model.
+/// Compresses chunks in parallel and writes them in order, recording where
+/// each one was written.
 ///
-/// The calling thread coordinates: it reads uncompressed chunks in batches
-/// through `chunk_list_read_cb`, queues them for a pool of worker threads,
-/// and writes the compressed results through `chunk_write_cb` in
-/// `sorted_hashes` order. Workers can finish out of order, so results are
-/// held by position until every earlier chunk has been written. That order
-/// is what makes the returned chunk index's offsets correct.
-///
-/// # Type Parameters
-///
-/// * `F`: Makes a compressor. Each worker calls it once.
-/// * `C`: A compressor: takes a chunk's data and returns it compressed.
-/// * `H`: The hash type.
-/// * `R`: The read callback. Given a slice of hashes, it returns the
-///   uncompressed data of each, in the same order.
-/// * `W`: The write callback, called once per chunk, in order, with the
-///   compressed bytes.
-///
-/// # Arguments
-///
-/// * `worker_count`: The number of worker threads to compress with. `0`
-///   uses the available parallelism. The calling thread coordinates
-///   besides these, and mostly waits.
-/// * `sorted_hashes`: The chunks to compress, in the order to write them. A
-///   hash that appears twice is compressed and written twice.
-/// * `new_compressor`: Makes each worker's compressor. The first one is
-///   made on the calling thread before any chunk is read.
-/// * `chunk_list_read_cb`: Reads the uncompressed data for a set of hashes.
-/// * `chunk_write_cb`: Writes the ordered, compressed chunk data to its
-///   final destination (e.g., a file or an in-memory buffer).
+/// Runs `run_pipeline` with each worker's compressor, and builds the chunk
+/// index from the compressed lengths as they're written. The order of
+/// writes is what makes the index's offsets correct.
 ///
 /// # Returns
 ///
@@ -369,22 +351,15 @@ where
 ///
 /// # Errors
 ///
-/// - `ArchiveError::Cancelled` if either callback reports a cancellation,
-///   and `ArchiveError::External` for any other error from them.
-/// - `ArchiveError::External` if the read callback returns a different
-///   number of chunks than it was asked for.
-/// - `ArchiveError::Io` if `worker_count` is 0 and the available
-///   parallelism can't be determined.
-/// - `ArchiveError::WorkerError` if a worker thread panics.
 /// - `ArchiveError::CompressionError` if a compressed chunk is 4 GiB or
 ///   more, which the chunk index can't record. Nothing is written for it.
-/// - Any error from `new_compressor` or a compressor.
-fn run_pipeline<C, ERead, EWrite, F, H, R, W>(
+/// - Any error from `run_pipeline`.
+fn compress_pipeline<C, ERead, EWrite, F, H, R, W>(
     worker_count: usize,
     sorted_hashes: &[H],
     new_compressor: F,
     chunk_list_read_cb: R,
-    chunk_write_cb: W,
+    mut chunk_write_cb: W,
 ) -> Result<Vec<(H, ChunkLocation)>, ArchiveError>
 where
     C: FnMut(&[u8]) -> Result<Vec<u8>, ArchiveError> + Send,
@@ -395,30 +370,244 @@ where
     R: Fn(&[H]) -> Result<Vec<Vec<u8>>, ERead>,
     W: FnMut(&[u8]) -> Result<(), EWrite>,
 {
+    let new_worker = || {
+        new_compressor().map(|mut compress| {
+            move |_position: usize, data: &[u8]| compress(data)
+        })
+    };
+
+    /*Locations in write order, so the nth belongs to sorted_hashes[n]. They
+    are paired with their hashes at the end, which needs no indexing.*/
+    let mut locations = Vec::with_capacity(sorted_hashes.len());
+
+    //Offset of the next chunk in the written data.
+    let mut offset = 0u64;
+
+    let write = |data: &[u8]| -> Result<(), ArchiveError> {
+        /*The chunk index stores lengths as u32. A compressed chunk is a few
+        KiB, so this only fails if the chunker's limits change. It's checked
+        first so that a chunk the index can't describe is never written.*/
+        let compressed_length = u32::try_from(data.len())
+            .map_err(|_too_long| ArchiveError::CompressionError(format!(
+                "a compressed chunk is {} bytes, more than the chunk index \
+                can record",
+                data.len()
+            )))?;
+
+        chunk_write_cb(data).map_err(|e| callback_error(&e))?;
+
+        locations.push(ChunkLocation { offset, compressed_length });
+        offset += u64::from(compressed_length);
+        Ok(())
+    };
+
+    //Compression doesn't know a chunk's size until it has read it.
+    run_pipeline(
+        worker_count,
+        sorted_hashes,
+        |_: &H| None,
+        new_worker,
+        chunk_list_read_cb,
+        write,
+    )?;
+
+    //run_pipeline wrote every chunk, so both sides have the same length.
+    Ok(sorted_hashes.iter().copied().zip(locations).collect())
+}
+
+/// Decompresses an SSMC file's chunks in parallel and writes them in
+/// order: the reverse of what `ArchiveBuilder` does when it compresses
+/// them.
+///
+/// Reads stored chunks in batches through `chunk_list_read_cb`, decodes
+/// them on a pool of worker threads, each with its own
+/// [`ChunkDecompressor`], and writes the decoded bytes through
+/// `chunk_write_cb` in `chunks` order. Each chunk is checked as
+/// `decompress_chunk_checked` does: exactly its recorded length, and
+/// hashing to the hash it's stored under. Reading runs ahead of writing,
+/// so the workers don't wait, but holds at most 1,000 chunks or about
+/// 64 MiB of chunk data at once, sized from the recorded lengths.
+///
+/// The library does no file I/O: the callbacks read the stored chunks and
+/// write the output.
+///
+/// # Arguments
+///
+/// * `worker_count`: The number of worker threads to decode with. `0`
+///   uses the available parallelism. The calling thread coordinates
+///   besides these, and mostly waits.
+/// * `dictionary`: The archive's Zstandard dictionary. It may be empty.
+/// * `chunks`: The chunks to write, in order, as a file manifest lists them
+///   (`FileManifestParent::chunk_metadata`). A chunk that appears twice is
+///   read and decoded twice.
+/// * `chunk_list_read_cb`: Given a run of `chunks`, returns each one's
+///   stored (compressed) bytes, in the same order. A host looks each hash
+///   up in the chunk index (`ParsedSSMC::chunk_index`) and reads that
+///   location.
+/// * `chunk_write_cb`: Called once per chunk, in order, with its decoded
+///   bytes.
+///
+/// # Errors
+///
+/// - `SpriteShrinkError::Cancelled` if either callback reports a
+///   cancellation.
+/// - `SpriteShrinkError::Io` if zstd can't load `dictionary` (before any
+///   chunk is read), or can't decode a chunk.
+/// - `SpriteShrinkError::Archive` with `ArchiveError::ChunkTooLong`,
+///   `ChunkTooShort` or `ChunkHashMismatch` for a chunk that fails its
+///   checks, and for every other error: an error from either callback, a
+///   read callback that returns a different number of chunks than it was
+///   asked for, a worker thread that panics, or a `worker_count` of 0 when
+///   the available parallelism can't be determined.
+///
+/// Nothing after a failed chunk is written.
+pub fn decompress_chunks_with<ERead, EWrite, H, R, W>(
+    worker_count: usize,
+    dictionary: &[u8],
+    chunks: &[SSAChunkMeta<H>],
+    chunk_list_read_cb: R,
+    mut chunk_write_cb: W,
+) -> Result<(), SpriteShrinkError>
+where
+    ERead: std::error::Error + IsCancelled,
+    EWrite: std::error::Error + IsCancelled,
+    H: Hashable,
+    R: Fn(&[SSAChunkMeta<H>]) -> Result<Vec<Vec<u8>>, ERead>,
+    W: FnMut(&[u8]) -> Result<(), EWrite>,
+{
+    let new_worker = || {
+        let mut decompressor =
+            ChunkDecompressor::new(dictionary).map_err(into_archive_error)?;
+        Ok(move |position: usize, data: &[u8]| {
+            let chunk = chunks.get(position).ok_or_else(|| {
+                ArchiveError::WorkerError(format!(
+                    "a worker was given chunk {position}, which isn't in the \
+                    list"
+                ))
+            })?;
+            decompressor
+                .decompress_checked(data, chunk.hash, chunk.length as usize)
+                .map_err(into_archive_error)
+        })
+    };
+
+    let write = |data: &[u8]| -> Result<(), ArchiveError> {
+        chunk_write_cb(data).map_err(|e| callback_error(&e))
+    };
+
+    /*The manifest records each chunk's decoded length, and decoding stops
+    there, so reading ahead is planned from it. The stored bytes are
+    counted too once they're read.*/
+    run_pipeline(
+        worker_count,
+        chunks,
+        |chunk: &SSAChunkMeta<H>| Some(chunk.length as usize),
+        new_worker,
+        chunk_list_read_cb,
+        write,
+    )
+    .map_err(|e| match e {
+        //As decompress_chunk reports them.
+        ArchiveError::Io(e) => SpriteShrinkError::Io(e),
+        e => SpriteShrinkError::from(e),
+    })
+}
+
+/// A `SpriteShrinkError` from a `ChunkDecompressor` as an `ArchiveError`,
+/// for the pipeline. `decompress_chunks_with` turns `Io` back into
+/// `SpriteShrinkError::Io`, and `SpriteShrinkError::from` does the rest.
+fn into_archive_error(e: SpriteShrinkError) -> ArchiveError {
+    match e {
+        SpriteShrinkError::Archive(e) => e,
+        SpriteShrinkError::Io(e) => ArchiveError::Io(e),
+        SpriteShrinkError::Cancelled => ArchiveError::Cancelled,
+        e => ArchiveError::External(e.to_string()),
+    }
+}
+
+/// Transforms items' data in parallel and writes the results in order: the
+/// pipeline under both `compress_pipeline` and `decompress_chunks_with`.
+///
+/// The calling thread coordinates: it reads data in batches through
+/// `read`, queues it for a pool of worker threads, and writes the results
+/// through `write` in `items` order. Workers can finish out of order, so
+/// results are held by position until every earlier item has been written.
+///
+/// # Type Parameters
+///
+/// * `T`: An item: what the read callback is given to find a chunk's data.
+/// * `S`: Gives an item's size, if it's known before reading: the most
+///   bytes its data or its result will be. Used to plan reading ahead.
+/// * `F`: Makes a worker's transform. Each worker calls it once.
+/// * `C`: A transform: takes an item's position in `items` and its data,
+///   and returns the bytes to write.
+/// * `R`: The read callback. Given a run of `items`, it returns each one's
+///   data, in the same order.
+/// * `W`: Writes one item's result. Called in order.
+///
+/// # Arguments
+///
+/// * `worker_count`: The number of worker threads. `0` uses the available
+///   parallelism. The calling thread coordinates besides these, and
+///   mostly waits.
+/// * `items`: The items, in the order to write them.
+/// * `item_size`: See `S`.
+/// * `new_worker`: Makes each worker's transform. The first one is made on
+///   the calling thread before anything is read.
+/// * `read`: See `R`.
+/// * `write`: See `W`.
+///
+/// # Errors
+///
+/// - `ArchiveError::Cancelled` if the read callback reports a
+///   cancellation, and `ArchiveError::External` for any other error from
+///   it.
+/// - `ArchiveError::External` if the read callback returns a different
+///   number of chunks than it was asked for.
+/// - `ArchiveError::Io` if `worker_count` is 0 and the available
+///   parallelism can't be determined.
+/// - `ArchiveError::WorkerError` if a worker thread panics.
+/// - Any error from `new_worker`, a transform, or `write`.
+fn run_pipeline<C, ERead, F, R, S, T, W>(
+    worker_count: usize,
+    items: &[T],
+    item_size: S,
+    new_worker: F,
+    read: R,
+    write: W,
+) -> Result<(), ArchiveError>
+where
+    C: FnMut(usize, &[u8]) -> Result<Vec<u8>, ArchiveError> + Send,
+    ERead: std::error::Error + IsCancelled,
+    F: Fn() -> Result<C, ArchiveError> + Sync,
+    R: Fn(&[T]) -> Result<Vec<Vec<u8>>, ERead>,
+    S: Fn(&T) -> Option<usize>,
+    W: FnMut(&[u8]) -> Result<(), ArchiveError>,
+{
     let num_workers = if worker_count == 0 {
         thread::available_parallelism()?.get()
     } else {
         worker_count
     };
 
-    /*Jobs are (position, uncompressed data), where the position is the
-    chunk's index in sorted_hashes. The queue is bounded so that reading
-    can't run far ahead of compression.*/
-    let (to_compress_tx, to_compress_rx) =
+    /*Jobs are (position, data), where the position is the item's index in
+    items. The queue is bounded so that reading can't run far ahead of the
+    workers.*/
+    let (to_workers_tx, to_workers_rx) =
         flume::bounded::<(usize, Vec<u8>)>(PREFETCH_HIGH_THRESHOLD);
 
-    //Results are (position, compressed data), or the error a worker hit.
-    let (from_compress_tx, from_compress_rx) =
+    //Results are (position, result data), or the error a worker hit.
+    let (from_workers_tx, from_workers_rx) =
         flume::unbounded::<Result<(usize, Vec<u8>), ArchiveError>>();
 
-    /*Make one compressor before reading any chunks or starting any threads,
+    /*Make one transform before reading anything or starting any threads,
     so a bad configuration (e.g. a dictionary zstd rejects) fails first.
     It isn't thrown away: the first worker uses it.*/
-    let mut checked_compressor = Some(new_compressor()?);
+    let mut checked_worker = Some(new_worker()?);
 
     /*Each worker's closure is `move`, so it needs its own handle on the
     factory. A shared reference is Copy, and is Send because F is Sync.*/
-    let new_compressor = &new_compressor;
+    let new_worker = &new_worker;
 
     /*Scoped threads can borrow the factory and whatever it borrows (e.g.
     the dictionary), and are all joined before the scope returns, even when
@@ -426,33 +615,33 @@ where
     thread::scope(|scope| {
         let workers: Vec<_> = (0..num_workers)
             .map(|_| {
-                let to_compress_rx = to_compress_rx.clone();
-                let from_compress_tx = from_compress_tx.clone();
+                let to_workers_rx = to_workers_rx.clone();
+                let from_workers_tx = from_workers_tx.clone();
                 //Some for the first worker, None for the rest.
-                let checked = checked_compressor.take();
+                let checked = checked_worker.take();
                 scope.spawn(move || {
-                    let mut compress = match checked
-                        .map_or_else(new_compressor, Ok)
+                    let mut transform = match checked
+                        .map_or_else(new_worker, Ok)
                     {
-                        Ok(compress) => compress,
+                        Ok(transform) => transform,
                         Err(e) => {
                             /*A failed send means the coordinator has
                             already stopped and doesn't need the error.*/
-                            let _ignored = from_compress_tx.send(Err(e));
+                            let _ignored = from_workers_tx.send(Err(e));
                             return;
                         }
                     };
 
                     /*Workers loop until the queue is empty and the
                     coordinator has dropped its sender.*/
-                    while let Ok((position, data)) = to_compress_rx.recv() {
-                        let result = compress(&data)
-                            .map(|compressed| (position, compressed));
+                    while let Ok((position, data)) = to_workers_rx.recv() {
+                        let result = transform(position, &data)
+                            .map(|output| (position, output));
                         let failed = result.is_err();
 
                         /*A failed send means the coordinator has stopped,
                         and after an error there's nothing more to do.*/
-                        if from_compress_tx.send(result).is_err() || failed {
+                        if from_workers_tx.send(result).is_err() || failed {
                             break;
                         }
                     }
@@ -461,27 +650,28 @@ where
             .collect();
 
         //Only the workers' clones remain, so the coordinator sees them stop.
-        drop(to_compress_rx);
-        drop(from_compress_tx);
+        drop(to_workers_rx);
+        drop(from_workers_tx);
 
         let result = coordinate_chunks(
-            sorted_hashes,
-            &chunk_list_read_cb,
-            chunk_write_cb,
-            &to_compress_tx,
-            &from_compress_rx,
+            items,
+            &item_size,
+            &read,
+            write,
+            &to_workers_tx,
+            &from_workers_rx,
         );
 
         /*Closing the queue ends each worker's loop once it's empty; without
         it, joining the workers would wait forever. Closing the results
         makes a worker stop at its next send after an early return, instead
-        of compressing the rest of the queue for nothing.*/
-        drop(to_compress_tx);
-        drop(from_compress_rx);
+        of working through the rest of the queue for nothing.*/
+        drop(to_workers_tx);
+        drop(from_workers_rx);
 
         for worker in workers {
             worker.join().map_err(|_panic| ArchiveError::WorkerError(
-                "A compression worker thread panicked.".to_string()
+                "A pipeline worker thread panicked.".to_string()
             ))?;
         }
 
@@ -489,82 +679,130 @@ where
     })
 }
 
-/// Runs the calling thread's side of `run_pipeline`: reads chunks and
-/// queues them for the workers, and writes the results in order.
-fn coordinate_chunks<ERead, EWrite, H, R, W>(
-    sorted_hashes: &[H],
-    chunk_list_read_cb: &R,
-    mut chunk_write_cb: W,
-    to_compress_tx: &flume::Sender<(usize, Vec<u8>)>,
-    from_compress_rx: &flume::Receiver<Result<(usize, Vec<u8>), ArchiveError>>,
-) -> Result<Vec<(H, ChunkLocation)>, ArchiveError>
+/// One item in the coordinator's window.
+enum Slot {
+    /// Read and with the workers. Holds the bytes counted for it: the
+    /// larger of its data and its expected result.
+    Pending(usize),
+    /// Done, and waiting for every earlier item to be written.
+    Done(Vec<u8>),
+}
+
+/// How many of `upcoming` to read next, keeping the window under
+/// [`PIPELINE_BYTE_BUDGET`] as far as sizes are known.
+///
+/// Each item counts as its `item_size`, or, when that's unknown, as the
+/// largest data or result seen so far (`largest_seen`). With neither,
+/// one item is read to find out. `held` is what the window holds now.
+///
+/// Returns at least 1 when the window is empty (`window_empty`) and items
+/// remain, even for an item larger than the budget, so a large item is
+/// read on its own rather than never.
+fn batch_len<T>(
+    upcoming: &[T],
+    item_size: impl Fn(&T) -> Option<usize>,
+    largest_seen: usize,
+    held: usize,
+    window_empty: bool,
+) -> usize {
+    let mut planned = held;
+    let mut count = 0;
+    for item in upcoming.iter().take(PREFETCH_HIGH_THRESHOLD) {
+        let Some(size) = item_size(item)
+            .or_else(|| (largest_seen > 0).then_some(largest_seen))
+        else {
+            //Nothing to go on yet: read one item and learn its size.
+            return count.max(1);
+        };
+
+        let next = planned.saturating_add(size);
+        if next > PIPELINE_BYTE_BUDGET && !(window_empty && count == 0) {
+            break;
+        }
+        planned = next;
+        count += 1;
+    }
+    count
+}
+
+/// Runs the calling thread's side of `run_pipeline`: reads items' data and
+/// queues it for the workers, and writes the results in order.
+fn coordinate_chunks<ERead, R, S, T, W>(
+    items: &[T],
+    item_size: &S,
+    read: &R,
+    mut write: W,
+    to_workers_tx: &flume::Sender<(usize, Vec<u8>)>,
+    from_workers_rx: &flume::Receiver<Result<(usize, Vec<u8>), ArchiveError>>,
+) -> Result<(), ArchiveError>
 where
     ERead: std::error::Error + IsCancelled,
-    EWrite: std::error::Error + IsCancelled,
-    H: Copy,
-    R: Fn(&[H]) -> Result<Vec<Vec<u8>>, ERead>,
-    W: FnMut(&[u8]) -> Result<(), EWrite>,
+    R: Fn(&[T]) -> Result<Vec<Vec<u8>>, ERead>,
+    S: Fn(&T) -> Option<usize>,
+    W: FnMut(&[u8]) -> Result<(), ArchiveError>,
 {
-    let total_chunks = sorted_hashes.len();
+    let total_items = items.len();
 
-    //The batches of hashes still to read, in order.
-    let mut batches_to_read = sorted_hashes.chunks(PREFETCH_HIGH_THRESHOLD);
-
-    //Position of the next chunk to read and queue for the workers.
+    //Position of the next item to read and queue for the workers.
     let mut read_cursor = 0usize;
 
-    //Position of the next chunk to write.
+    //Position of the next item to write.
     let mut write_cursor = 0usize;
 
-    //Offset of the next chunk in the written data.
-    let mut offset = 0u64;
-
-    /*A ring buffer with a slot for every chunk from write_cursor up to
-    read_cursor: None while the chunk is with the workers, Some once it's
-    compressed. Chunks are written from the front as soon as the front slot
-    is filled. Reading stops while the window is full, so it never holds
+    /*A ring buffer with a slot for every item from write_cursor up to
+    read_cursor. Items are written from the front as soon as the front slot
+    is done. Reading stops while the window is full, so it never holds
     more than REORDER_WINDOW slots and allocates once.*/
-    let mut reordering_buffer: VecDeque<Option<Vec<u8>>> =
-        VecDeque::with_capacity(REORDER_WINDOW);
+    let mut window: VecDeque<Slot> = VecDeque::with_capacity(REORDER_WINDOW);
 
-    /*Locations in write order, so the nth belongs to sorted_hashes[n]. They
-    are paired with their hashes at the end, which needs no indexing.*/
-    let mut locations = Vec::with_capacity(total_chunks);
+    //Bytes counted for the slots in the window.
+    let mut held = 0usize;
 
-    while write_cursor < total_chunks {
-        /*Read another batch when the workers' queue runs low, unless a slow
-        chunk is holding up writing and the window is full. Then the
-        coordinator waits for results instead.*/
-        if to_compress_tx.len() < PREFETCH_LOW_THRESHOLD &&
-            reordering_buffer.len() + PREFETCH_HIGH_THRESHOLD
-                <= REORDER_WINDOW &&
-            let Some(hashes_to_read) = batches_to_read.next() {
-                let end = read_cursor + hashes_to_read.len();
+    //The largest data or result seen, to size items whose size is unknown.
+    let mut largest_seen = 0usize;
 
-                let chunks = chunk_list_read_cb(hashes_to_read)
-                    .map_err(|e| callback_error(&e))?;
+    while write_cursor < total_items {
+        /*Read another batch when the workers' queue runs low and the window
+        has room for a whole one. While a slow item holds up writing and
+        the window is full, the coordinator waits for results instead.*/
+        let upcoming = items.get(read_cursor..).unwrap_or_default();
+        if to_workers_tx.len() < PREFETCH_LOW_THRESHOLD &&
+            window.len() + upcoming.len().min(PREFETCH_HIGH_THRESHOLD)
+                <= REORDER_WINDOW
+        {
+            let count = batch_len(
+                upcoming,
+                item_size,
+                largest_seen,
+                held,
+                window.is_empty(),
+            );
+            if let Some(to_read) = upcoming.get(..count) &&
+                !to_read.is_empty()
+            {
+                let data = read(to_read).map_err(|e| callback_error(&e))?;
 
-                /*A missing chunk would never arrive, and the loop would
+                /*A missing item would never arrive, and the loop would
                 wait for it forever.*/
-                if chunks.len() != hashes_to_read.len() {
+                if data.len() != to_read.len() {
                     return Err(ArchiveError::External(format!(
                         "the read callback returned {} chunks for {} hashes",
-                        chunks.len(),
-                        hashes_to_read.len()
+                        data.len(),
+                        to_read.len()
                     )));
                 }
 
-                reordering_buffer.resize_with(
-                    reordering_buffer.len() + hashes_to_read.len(),
-                    || None
-                );
+                for (item, data) in to_read.iter().zip(data) {
+                    let counted = data.len().max(item_size(item).unwrap_or(0));
+                    largest_seen = largest_seen.max(data.len());
+                    held = held.saturating_add(counted);
+                    window.push_back(Slot::Pending(counted));
 
-                for (position, chunk) in (read_cursor..end).zip(chunks) {
                     /*The send fails only once every worker has stopped,
                     and a worker stops early only after sending its error,
                     so report that error rather than the send's.*/
-                    if to_compress_tx.send((position, chunk)).is_err() {
-                        return Err(from_compress_rx
+                    if to_workers_tx.send((read_cursor, data)).is_err() {
+                        return Err(from_workers_rx
                             .try_iter()
                             .find_map(Result::err)
                             .unwrap_or_else(|| ArchiveError::WorkerError(
@@ -572,14 +810,15 @@ where
                                 .to_string()
                             )));
                     }
+                    read_cursor += 1;
                 }
-                read_cursor = end;
+            }
         }
 
-        /*Every queued chunk is either still with a worker or already in
-        the reordering buffer, so the channel only disconnects if every
-        worker has stopped.*/
-        let (position, compressed_data) = from_compress_rx.recv()
+        /*Every queued item is either still with a worker or already in the
+        window, so the channel only disconnects if every worker has
+        stopped.*/
+        let (position, output) = from_workers_rx.recv()
             .map_err(|_disconnected| ArchiveError::WorkerError(
                 "Worker pool finished but not all chunks were processed."
                 .to_string()
@@ -588,43 +827,31 @@ where
         /*The front slot is write_cursor's. Workers only return positions
         the coordinator queued, which are all in the window.*/
         let slot = position.checked_sub(write_cursor)
-            .and_then(|index| reordering_buffer.get_mut(index))
+            .and_then(|index| window.get_mut(index))
+            .filter(|slot| matches!(slot, Slot::Pending(_)))
             .ok_or_else(|| ArchiveError::WorkerError(format!(
                 "a worker returned chunk {position}, which wasn't waiting \
-                to be written"
+                for a worker"
             )))?;
-        *slot = Some(compressed_data);
+        if let Slot::Pending(counted) = *slot {
+            held = held.saturating_sub(counted);
+        }
+        held = held.saturating_add(output.len());
+        largest_seen = largest_seen.max(output.len());
+        *slot = Slot::Done(output);
 
-        /*Write every chunk that is now next in order. take() empties the
-        front slot, and pop_front then removes it.*/
-        while let Some(front) = reordering_buffer.front_mut() &&
-            let Some(data_to_write) = front.take() {
-                reordering_buffer.pop_front();
-
-                /*The chunk index stores lengths as u32. A compressed chunk
-                is a few KiB, so this only fails if the chunker's limits
-                change. It's checked first so that a chunk the index can't
-                describe is never written.*/
-                let compressed_length = u32::try_from(data_to_write.len())
-                    .map_err(|_too_long| ArchiveError::CompressionError(
-                        format!(
-                            "a compressed chunk is {} bytes, more than the \
-                            chunk index can record",
-                            data_to_write.len()
-                        )
-                    ))?;
-
-                chunk_write_cb(&data_to_write)
-                    .map_err(|e| callback_error(&e))?;
-
-                locations.push(ChunkLocation { offset, compressed_length });
-                offset += u64::from(compressed_length);
-                write_cursor += 1;
+        //Write every item that is now next in order.
+        while matches!(window.front(), Some(Slot::Done(_))) {
+            let Some(Slot::Done(output)) = window.pop_front() else {
+                break;
+            };
+            write(&output)?;
+            held = held.saturating_sub(output.len());
+            write_cursor += 1;
         }
     }
 
-    //The loop wrote every chunk, so both sides have total_chunks entries.
-    Ok(sorted_hashes.iter().copied().zip(locations).collect())
+    Ok(())
 }
 
 impl<'a, E, H, R, W> ArchiveBuilder<'a, E, H, R, W>
@@ -1731,28 +1958,36 @@ mod tests {
         // Fewer chunks than asked for used to hang, waiting for the rest.
         for extra in [-1_isize, 1, -500] {
             let (hashes, chunks) = chunk_store(1200);
-            let read = move |requested: &[u64]| -> ReadResult {
-                let mut batch: Vec<Vec<u8>> = requested
-                    .iter()
-                    .map(|hash| chunks[hash].clone())
-                    .collect();
-                if extra < 0 {
-                    batch.truncate(batch.len() - extra.unsigned_abs());
-                } else {
-                    batch.push(vec![0; 10]);
+            let asked = Arc::new(AtomicUsize::new(0));
+            let read = {
+                let asked = Arc::clone(&asked);
+                move |requested: &[u64]| -> ReadResult {
+                    asked.store(requested.len(), AtomicOrdering::Relaxed);
+                    let mut batch: Vec<Vec<u8>> = requested
+                        .iter()
+                        .map(|hash| chunks[hash].clone())
+                        .collect();
+                    if extra < 0 {
+                        batch.truncate(
+                            batch.len().saturating_sub(extra.unsigned_abs()),
+                        );
+                    } else {
+                        batch.push(vec![0; 10]);
+                    }
+                    Ok(batch)
                 }
-                Ok(batch)
             };
 
             let (result, _) = compress_with(4, hashes, read);
-            let returned = 500_isize + extra;
+            let asked = asked.load(AtomicOrdering::Relaxed);
+            let returned = asked.saturating_add_signed(extra);
             let Err(ArchiveError::External(message)) = result else {
-                panic!("{returned} chunks for 500 hashes: {result:?}");
+                panic!("{returned} chunks for {asked} hashes: {result:?}");
             };
             assert_eq!(
                 message,
-                format!("the read callback returned {returned} chunks for 500 \
-                         hashes")
+                format!("the read callback returned {returned} chunks for \
+                         {asked} hashes")
             );
         }
     }
@@ -1873,8 +2108,9 @@ mod tests {
 
             let result = coordinate_chunks(
                 &hashes,
+                &|_: &u64| None,
                 &read_from(chunks),
-                |_: &[u8]| -> Result<(), SpriteShrinkError> {
+                |_: &[u8]| -> Result<(), ArchiveError> {
                     panic!("nothing should be written")
                 },
                 &to_compress_tx,
@@ -1932,6 +2168,203 @@ mod tests {
         assert!(
             max_read_ahead <= REORDER_WINDOW,
             "read {max_read_ahead} chunks ahead of writing"
+        );
+    }
+
+    #[test]
+    fn a_batch_is_sized_from_known_sizes_or_the_largest_seen() {
+        const MIB: usize = 1024 * 1024;
+        let budget = PIPELINE_BYTE_BUDGET;
+        let known = |size: &usize| Some(*size);
+        let unknown = |_: &usize| None;
+
+        // Known sizes: as many as fit beside what the window holds.
+        assert_eq!(batch_len(&[MIB; 600], known, 0, 0, true), 64);
+        assert_eq!(batch_len(&[MIB; 600], known, 0, budget - 3 * MIB, false), 3);
+        // Small items: the batch limit, not the budget.
+        assert_eq!(batch_len(&[2048; 600], known, 0, 0, true),
+            PREFETCH_HIGH_THRESHOLD);
+        // An item over the budget is read alone, and only into an empty
+        // window.
+        assert_eq!(batch_len(&[budget + 1; 2], known, 0, 0, true), 1);
+        assert_eq!(batch_len(&[budget + 1; 2], known, 0, 0, false), 0);
+        assert_eq!(batch_len(&[budget + 1; 2], known, 0, MIB, false), 0);
+
+        // Unknown sizes: one item to learn, then the largest seen.
+        assert_eq!(batch_len(&[0; 600], unknown, 0, 0, true), 1);
+        assert_eq!(batch_len(&[0; 600], unknown, 4 * MIB, 0, true), 16);
+    }
+
+    /// What `stored_chunks` returns: the chunk list, the stored bytes, where
+    /// each chunk is stored (start and length, by position), and the
+    /// expected output.
+    type StoredChunks =
+        (Vec<SSAChunkMeta<u64>>, Vec<u8>, Vec<(usize, usize)>, Vec<u8>);
+
+    /// A chunk list for `decompress_chunks_with`: `sizes.len()` ROM-like
+    /// chunks of those sizes, each compressed with the shared dictionary
+    /// and stored one after another.
+    fn stored_chunks(sizes: &[usize]) -> StoredChunks {
+        let mut metas = Vec::new();
+        let mut blob = Vec::new();
+        let mut locations = Vec::new();
+        let mut expected = Vec::new();
+        for (i, &size) in sizes.iter().enumerate() {
+            let data = tiled_bytes(0x5EED_D000 + i as u64, size);
+            let compressed = compress(&data, dictionary(), 1).unwrap();
+            locations.push((blob.len(), compressed.len()));
+            blob.extend_from_slice(&compressed);
+            metas.push(SSAChunkMeta {
+                hash: u64::from_bytes_with_seed(&data),
+                offset: expected.len() as u64,
+                length: u32::try_from(size).unwrap(),
+            });
+            expected.extend_from_slice(&data);
+        }
+        (metas, blob, locations, expected)
+    }
+
+    /// Decompresses `metas` with `workers` workers, reading each chunk at
+    /// its position's location in `blob`. Returns the result and what was
+    /// written, joined.
+    fn decompress_with(
+        workers: usize,
+        metas: &[SSAChunkMeta<u64>],
+        blob: &[u8],
+        locations: &[(usize, usize)],
+    ) -> (Result<(), SpriteShrinkError>, Vec<u8>) {
+        // Chunk positions by hash, as a host's chunk index finds them.
+        let by_hash: HashMap<u64, (usize, usize)> = metas
+            .iter()
+            .zip(locations)
+            .map(|(meta, &location)| (meta.hash, location))
+            .collect();
+        let mut written = Vec::new();
+        let result = decompress_chunks_with(
+            workers,
+            dictionary(),
+            metas,
+            |requested: &[SSAChunkMeta<u64>]| -> ReadResult {
+                Ok(requested
+                    .iter()
+                    .map(|meta| {
+                        let (start, len) = by_hash[&meta.hash];
+                        blob[start..start + len].to_vec()
+                    })
+                    .collect())
+            },
+            |data: &[u8]| -> Result<(), SpriteShrinkError> {
+                written.extend_from_slice(data);
+                Ok(())
+            },
+        );
+        (result, written)
+    }
+
+    #[test]
+    fn chunks_decompress_in_order_with_any_worker_count() {
+        // Uneven sizes so workers finish out of order; more than two
+        // batches; one chunk repeated.
+        let sizes: Vec<usize> =
+            (0..1200).map(|i| 1 + (i * 7919) % 5000).collect();
+        let (mut metas, blob, mut locations, mut expected) =
+            stored_chunks(&sizes);
+        metas.push(metas[3]);
+        locations.push(locations[3]);
+        expected.extend_from_within(
+            usize::try_from(metas[3].offset).unwrap()..
+                usize::try_from(metas[4].offset).unwrap(),
+        );
+
+        for workers in [1, 4] {
+            let (result, written) =
+                decompress_with(workers, &metas, &blob, &locations);
+            result.unwrap();
+            assert!(written == expected, "{workers} workers");
+        }
+    }
+
+    #[test]
+    fn a_damaged_chunk_stops_decompression_before_it_is_written() {
+        let (metas, mut blob, locations, expected) =
+            stored_chunks(&[3000; 600]);
+        // Flip a byte in chunk 400's stored data until it no longer
+        // decodes to the right bytes (zstd error or hash mismatch).
+        let (start, len) = locations[400];
+        blob[start + len / 2] ^= 0xFF;
+
+        let (result, written) = decompress_with(4, &metas, &blob, &locations);
+        assert!(
+            matches!(
+                result,
+                Err(SpriteShrinkError::Io(_)
+                    | SpriteShrinkError::Archive(
+                        ArchiveError::ChunkHashMismatch { .. }
+                        | ArchiveError::ChunkTooShort { .. }
+                    ))
+            ),
+            "{result:?}"
+        );
+        assert!(written.len() <= 400 * 3000, "{} bytes", written.len());
+        assert!(written == expected[..written.len()]);
+    }
+
+    #[test]
+    fn a_cancelled_read_cancels_decompression() {
+        let (metas, ..) = stored_chunks(&[100; 3]);
+        let result = decompress_chunks_with(
+            2,
+            dictionary(),
+            &metas,
+            |_: &[SSAChunkMeta<u64>]| -> ReadResult {
+                Err(SpriteShrinkError::Cancelled)
+            },
+            |_: &[u8]| -> Result<(), SpriteShrinkError> {
+                panic!("nothing should be written")
+            },
+        );
+        assert!(matches!(result, Err(SpriteShrinkError::Cancelled)), "{result:?}");
+    }
+
+    #[test]
+    fn decompression_reads_ahead_no_more_than_the_byte_budget() {
+        // 200 chunks of 512 KiB: the 1,000-chunk window alone would allow
+        // reading 100 MiB ahead.
+        let (metas, blob, locations, _) = stored_chunks(&[512 * 1024; 200]);
+        let by_hash: HashMap<u64, (usize, usize)> = metas
+            .iter()
+            .zip(&locations)
+            .map(|(meta, &location)| (meta.hash, location))
+            .collect();
+
+        let read = Cell::new(0usize);
+        let written = Cell::new(0usize);
+        let max_ahead = Cell::new(0usize);
+        decompress_chunks_with(
+            4,
+            dictionary(),
+            &metas,
+            |requested: &[SSAChunkMeta<u64>]| -> ReadResult {
+                read.set(read.get() + requested.len() * 512 * 1024);
+                max_ahead.set(max_ahead.get().max(read.get() - written.get()));
+                Ok(requested
+                    .iter()
+                    .map(|meta| {
+                        let (start, len) = by_hash[&meta.hash];
+                        blob[start..start + len].to_vec()
+                    })
+                    .collect())
+            },
+            |data: &[u8]| -> Result<(), SpriteShrinkError> {
+                written.set(written.get() + data.len());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(
+            max_ahead.get() <= PIPELINE_BYTE_BUDGET,
+            "read {} bytes ahead of writing",
+            max_ahead.get()
         );
     }
 

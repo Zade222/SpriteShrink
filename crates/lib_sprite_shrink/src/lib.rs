@@ -1,7 +1,7 @@
 mod archive;
 pub use archive::{
     ArchiveBuilder, ChunkDecompressor, compress_chunks_with, decompress_chunk,
-    decompress_chunk_checked
+    decompress_chunk_checked, decompress_chunks_with
 };
 
 pub mod ffi;
