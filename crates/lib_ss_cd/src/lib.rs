@@ -1,3 +1,15 @@
+//! Builds and reads Sprite Shrink's SSMD archives of CD and GD-ROM disc
+//! images: it parses CUE sheets, sorts each sector into audio, data or an
+//! exception, stores audio as FLAC and data as deduplicated chunks, and
+//! rebuilds the original sectors on extraction.
+//!
+//! The library does no file I/O. The application opens, reads and writes
+//! files, and passes the library bytes, `Read + Seek` readers it opened
+//! (`MultiBinStream` joins those of a multi-file disc), size callbacks and
+//! read callbacks for stored data. Operating systems differ in how files
+//! are opened, locked and read, and a host such as an emulator may not read
+//! from files at all.
+
 mod analyze;
 pub use analyze::{
     FileSizeProvider, analyze_cue_sheets, resolve_file_sector_counts

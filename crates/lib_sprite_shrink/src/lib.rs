@@ -1,3 +1,13 @@
+//! Builds and reads Sprite Shrink's SSMC archives: files split into
+//! content-defined chunks, stored once each and compressed with Zstandard
+//! against a shared dictionary.
+//!
+//! The library does no file I/O. The application opens, reads and writes
+//! files, and passes the library bytes and callbacks: the read callbacks
+//! fetch chunk data, and the write callbacks take the output. Operating
+//! systems differ in how files are opened, locked and read, and a host such
+//! as an emulator may not read from files at all.
+
 mod archive;
 pub use archive::{
     ArchiveBuilder, ChunkDecompressor, compress_chunks_with, decompress_chunk,

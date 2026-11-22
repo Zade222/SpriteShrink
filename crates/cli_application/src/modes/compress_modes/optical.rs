@@ -794,7 +794,9 @@ where
     let mut source_stream: Box<dyn ReadSeekSend> = if bin_paths.len() == 1 {
         Box::new(File::open(&bin_paths[0])?)
     } else {
-        Box::new(MultiBinStream::new(bin_paths)?)
+        //The library joins the parts; opening them is the application's job.
+        let parts = bin_paths.iter().map(File::open).collect::<io::Result<_>>()?;
+        Box::new(MultiBinStream::<File>::new(parts)?)
     };
 
     let file_provider = AppFileSizeProvider {
