@@ -4,6 +4,7 @@ use std::{
     hash::Hash,
     marker::PhantomData,
     mem,
+    ops::Range,
     sync::atomic::{AtomicU16, AtomicU32, Ordering,}
 };
 
@@ -934,6 +935,38 @@ impl SectorType {
             SectorType::PregapMode1Exception => 296,
             SectorType::PregapMode2Exception => 296,
             _ => 0
+        }
+    }
+
+    /// Where a sector of this type keeps the bytes the data stream stores
+    /// for it, or `None` for audio, which is stored as FLAC blocks.
+    pub(crate) fn user_data_range(self) -> Option<Range<usize>> {
+        match self {
+            SectorType::Mode1 | SectorType::Mode1Exception
+            | SectorType::PregapMode1 | SectorType::PregapMode1Exception =>
+                Some(16..2064),
+            SectorType::Mode2Form1 | SectorType::Mode2Form1Exception
+            | SectorType::PregapMode2 | SectorType::PregapMode2Exception =>
+                Some(24..2072),
+            SectorType::Mode2Form2 | SectorType::Mode2Form2Exception =>
+                Some(24..2348),
+            SectorType::ZeroedMode1Data | SectorType::ZeroedMode2Data =>
+                Some(0..2352),
+            SectorType::Audio | SectorType::PregapAudio
+            | SectorType::ZeroedAudio | SectorType::None => None,
+        }
+    }
+
+    /// Where a data sector of this type keeps the 8 bytes stored in the
+    /// subheader table: the subheader for Mode 2, the reserved area
+    /// otherwise.
+    pub(crate) fn metadata_range(self) -> Range<usize> {
+        match self {
+            SectorType::Mode2Form1 | SectorType::Mode2Form1Exception
+            | SectorType::Mode2Form2 | SectorType::Mode2Form2Exception
+            | SectorType::PregapMode2 | SectorType::PregapMode2Exception =>
+                16..24,
+            _ => 2068..2076,
         }
     }
 

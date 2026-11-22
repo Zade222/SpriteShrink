@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 
 use crate::lib_structs::{
-    SectorMap, SectorType
+    SectorMap
 };
 
 /// The size of a raw CD sector in bytes.
@@ -436,20 +436,7 @@ impl<'a, R: Read + Seek> UserDataStream<'a, R> {
                 return Ok(false);
             };
 
-            let user_data_range = match sector_type {
-                SectorType::Mode1 | SectorType::Mode1Exception
-                | SectorType::PregapMode1 | SectorType::PregapMode1Exception =>
-                    Some(16..2064),
-                SectorType::Mode2Form1 | SectorType::Mode2Form1Exception
-                | SectorType::PregapMode2 | SectorType::PregapMode2Exception =>
-                    Some(24..2072),
-                SectorType::Mode2Form2 | SectorType::Mode2Form2Exception =>
-                    Some(24..2348),
-                SectorType::ZeroedMode1Data | SectorType::ZeroedMode2Data =>
-                    Some(0..2352),
-                SectorType::Audio | SectorType::PregapAudio
-                | SectorType::ZeroedAudio | SectorType::None => None,
-            };
+            let user_data_range = sector_type.user_data_range();
 
             let sector_idx = self.cur_sec_idx;
             self.cur_sec_idx += 1;
@@ -531,6 +518,7 @@ mod tests {
     use std::io::{Cursor, Write};
 
     use super::*;
+    use crate::lib_structs::SectorType;
 
     const SECTOR: usize = 2352;
 

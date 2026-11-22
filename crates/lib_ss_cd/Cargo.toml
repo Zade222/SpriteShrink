@@ -46,5 +46,9 @@ zstd = { version = "~0.13", default-features = false }
 name = "sector_rebuild"
 harness = false
 
+[[bench]]
+name = "sector_analysis"
+harness = false
+
 [lints]
 workspace = true

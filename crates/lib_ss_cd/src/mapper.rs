@@ -26,8 +26,6 @@ pub enum MapperError {
     FileCountMismatch(usize, usize),
     #[error("Failed to read from sector provider: {0}")]
     ProviderIo(#[from] io::Error),
-    #[error("Failed to analyze sector data: {0}")]
-    Analysis(#[from] crate::analyze::AnalysisError),
     #[error("More different exceptions were found than a u32 ID can number.")]
     TooManyExceptions,
     #[error("More than 65,536 different subheaders were found, more than a u16 ID can number.")]
@@ -113,61 +111,41 @@ pub fn analyze_and_map_disc(
     let mut current_offset: Option<u32> = None;
     let mut excep_index: Vec<(u32, u32)> = Vec::new();
 
-    for i in 0..total_sectors {
+    //`sectors` holds one type per sector, so this visits every sector.
+    for (i, sector_type) in (0..total_sectors).zip(sectors.iter_mut()) {
         let sector_data = provider.read_sector(i)?;
-        if sectors[i as usize] == SectorType::Mode1 ||
-            sectors[i as usize] == SectorType::Mode2Form1 ||
-            sectors[i as usize] == SectorType::PregapMode1 ||
-            sectors[i as usize] == SectorType::PregapMode2
-        {
-            let analysis_result = analyze_data_sector(
-                &sector_data,
-                sectors[i as usize]
-            )?;
-
-            let minute = from_bcd(sector_data[12]);
-            let second = from_bcd(sector_data[13]);
-            let frame = from_bcd(sector_data[14]);
-
-            let header_lba = (minute as u32 * 60 * 75) +
-                (second as u32 * 75) + frame as u32;
-
-            if header_lba >= i {
-                let detected_offset = header_lba - i;
-
-                if let Some(curr) = current_offset {
-                    if curr != detected_offset {
-                        //offset changed (likely GD-ROM gap)
-                        lba_map.push((i, detected_offset));
-                        current_offset = Some(detected_offset);
-                    }
-                } else {
-                    lba_map.push((i, detected_offset));
-                    current_offset = Some(detected_offset);
-                }
+        if matches!(
+            *sector_type,
+            SectorType::Mode1 | SectorType::Mode2Form1 |
+            SectorType::PregapMode1 | SectorType::PregapMode2
+        ) {
+            /*Extraction gives each sector the number its index plus the
+            LBA map's offset there. A header that holds a number at or past
+            its index sets the offset from here on; a header below its
+            index, or not a valid MSF time, can't, and its sector won't
+            rebuild plain.*/
+            if let Some(header_lba) = header_number(&sector_data)
+                && let Some(detected_offset) = header_lba.checked_sub(i)
+                && current_offset != Some(detected_offset)
+            {
+                //A first header, or the offset changed (likely a GD-ROM gap)
+                lba_map.push((i, detected_offset));
+                current_offset = Some(detected_offset);
             }
 
+            let analysis_result = analyze_data_sector(
+                &sector_data,
+                *sector_type,
+                current_offset.and_then(|offset| i.checked_add(offset)),
+            );
 
             // Mode 2 sectors keep their subheader at 16..24. Mode 1 sectors
             // have user data there, and their 8 bytes are the reserved area.
-            let subheader_val = if matches!(
-                analysis_result.sector_type,
-                SectorType::Mode2Form1 | SectorType::Mode2Form2 |
-                SectorType::Mode2Form1Exception |
-                SectorType::Mode2Form2Exception |
-                SectorType::PregapMode2 |
-                SectorType::PregapMode2Exception
-            ) {
-                let mut sh = [0u8; 8];
-                sh.copy_from_slice(&sector_data[16..24]);
-                Some(sh)
-            } else {
-                let mut sh = [0u8; 8];
-                sh.copy_from_slice(&sector_data[2068..2076]);
-                Some(sh)
-            };
+            let subheader_val = sector_data
+                .get(analysis_result.sector_type.metadata_range())
+                .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok());
 
-            sectors[i as usize] = analysis_result.sector_type;
+            *sector_type = analysis_result.sector_type;
 
             if let Some(val) = subheader_val {
                 let val_id = subheader_registry.get_or_register(val);
@@ -386,6 +364,20 @@ pub fn rle_encode_map(sector_map: &SectorMap) -> RleSectorMap {
     runs.push((current_count, current_type));
 
     RleSectorMap { runs }
+}
+
+/// The frame number a data sector's header holds (bytes 12..15, minutes,
+/// seconds and frames in BCD), or `None` if they aren't a valid MSF time.
+fn header_number(sector: &[u8; 2352]) -> Option<u32> {
+    let digits = |bcd: u8, below: u8| {
+        let value = from_bcd(bcd);
+        (bcd & 0x0F <= 9 && bcd >> 4 <= 9 && value < below)
+            .then_some(u32::from(value))
+    };
+    let minute = digits(sector[12], 100)?;
+    let second = digits(sector[13], 60)?;
+    let frame = digits(sector[14], 75)?;
+    Some((minute * 60 + second) * 75 + frame)
 }
 
 pub(crate) const fn from_bcd (bcd: u8) -> u8 {

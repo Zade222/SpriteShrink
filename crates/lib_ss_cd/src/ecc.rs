@@ -322,37 +322,6 @@ pub fn calc_ecc_bitwise(sector_data: &mut [u8]) {
 }
 
 
-pub fn sector_ecc_check_bitwise(
-    sector_data: &[u8],
-    p_parity: &[u8],
-    q_parity: &[u8],
-    sector_type: SectorType
-) -> bool {
-    let mut test_sector_data = [0u8; 2352];
-    test_sector_data.copy_from_slice(sector_data);
-    if sector_type == SectorType::Mode2Form1 {
-        test_sector_data[12..16].copy_from_slice(&[0u8; 4]);
-    }
-
-    let ecc_p = gen_all_p_par_bitwise(&test_sector_data);
-
-    let ecc_q = gen_all_q_par_bitwise(&test_sector_data);
-
-    ecc_p == *p_parity && ecc_q == *q_parity
-}
-
-
-pub fn sector_edc_check(
-    sector_data: &[u8],
-    crc_bytes: &[u8],
-    sector_type: SectorType
-) -> bool {
-    let checksum = calculate_edc(sector_data, sector_type);
-
-    *crc_bytes == checksum
-}
-
-
 #[inline(always)]
 fn gf_mul_scalar(feedback: u8) -> (u8, u8) {
     let mask = if (feedback & 0x80) != 0 { 0x1D } else { 0 };
@@ -534,23 +503,6 @@ mod tests {
         product
     }
 
-    /// A sector with a random body and valid P and Q parity.
-    fn sector_with_ecc(body: &[u8]) -> [u8; SECTOR_SIZE] {
-        let mut sector = [0_u8; SECTOR_SIZE];
-        sector.copy_from_slice(body);
-        calc_ecc_bitwise(&mut sector);
-        sector
-    }
-
-    fn ecc_check(sector: &[u8; SECTOR_SIZE], sector_type: SectorType) -> bool {
-        sector_ecc_check_bitwise(
-            sector,
-            &sector[2076..2248],
-            &sector[2248..],
-            sector_type,
-        )
-    }
-
     #[test]
     fn gf_mul_scalar_returns_times_2_and_times_3() {
         for feedback in 0..=u8::MAX {
@@ -579,25 +531,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_header_change_breaks_mode1_ecc_but_not_mode2_form1() {
-        // Mode 2 Form 1 parity is computed with the header zeroed, so a
-        // valid sector stays valid whatever its header says. Mode 1 parity
-        // covers the header.
-        let mut sector = sector_with_ecc(&test_sectors()[3]);
-        assert!(ecc_check(&sector, SectorType::Mode1));
-
-        let mut zero_header = sector;
-        zero_header[12..16].fill(0);
-        calc_ecc_bitwise(&mut zero_header);
-        sector[2076..].copy_from_slice(&zero_header[2076..]);
-        assert!(ecc_check(&sector, SectorType::Mode2Form1));
-
-        sector[12..16].copy_from_slice(&[0x00, 0x02, 0x16, 0x02]);
-        assert!(!ecc_check(&sector, SectorType::Mode1));
-        assert!(ecc_check(&sector, SectorType::Mode2Form1));
-    }
-
     proptest! {
         #[test]
         fn calculate_edc_matches_the_bitwise_crc(
@@ -614,37 +547,6 @@ mod tests {
                     "{:?}", sector_type
                 );
             }
-        }
-
-        #[test]
-        fn mode1_ecc_check_rejects_any_changed_byte_after_the_sync(
-            body in proptest::collection::vec(any::<u8>(), SECTOR_SIZE),
-            index in 12..SECTOR_SIZE,
-            flip in 1..=u8::MAX,
-        ) {
-            // The P and Q codewords cover every byte from the header to
-            // the end. A distance-3 Reed-Solomon code detects any single
-            // wrong symbol, so one changed byte must always fail.
-            let mut sector = sector_with_ecc(&body);
-            prop_assert!(ecc_check(&sector, SectorType::Mode1));
-
-            sector[index] ^= flip;
-            prop_assert!(!ecc_check(&sector, SectorType::Mode1));
-        }
-
-        #[test]
-        fn mode2_form1_ecc_check_rejects_any_changed_byte_after_the_header(
-            body in proptest::collection::vec(any::<u8>(), SECTOR_SIZE),
-            index in 16..SECTOR_SIZE,
-            flip in 1..=u8::MAX,
-        ) {
-            let mut body = body;
-            body[12..16].fill(0);
-            let mut sector = sector_with_ecc(&body);
-            prop_assert!(ecc_check(&sector, SectorType::Mode2Form1));
-
-            sector[index] ^= flip;
-            prop_assert!(!ecc_check(&sector, SectorType::Mode2Form1));
         }
     }
 }
