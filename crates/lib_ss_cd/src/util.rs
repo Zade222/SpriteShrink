@@ -13,10 +13,7 @@ use crate::{
 };
 
 use flume::Sender;
-use sprite_shrink::{
-    ChunkLocation, Hashable,
-    decompress_chunk
-};
+use sprite_shrink::{ChunkDecompressor, ChunkLocation, Hashable};
 use thiserror::Error;
 
 
@@ -295,18 +292,28 @@ where
             shared_state: shared_state.clone(),
         };
 
+        /*One decoder for every chunk: setting one up and loading the
+        dictionary takes longer than decoding a 2 KiB chunk. It's made with
+        the first chunk, so a failure goes the way every other error does.*/
+        let mut decompressor = None;
+
         for (hash, len) in chunks {
             let result = (|| -> Result<Vec<u8>, SpriteShrinkCDError> {
+                let external = |e| SpriteShrinkCDError::External(Box::new(e));
+
                 let chunk_loc = chunk_index.get(&hash)
                     .ok_or_else(|| UtilError::MissingHash(hash.to_string()))?;
 
                 let comp_data = read_stored_at(read_stored, *chunk_loc)?;
 
-                decompress_chunk(
-                    &comp_data,
-                    dictionary,
-                    len
-                ).map_err(|e| SpriteShrinkCDError::External(Box::new(e)))
+                let decompressor = match &mut decompressor {
+                    Some(decompressor) => decompressor,
+                    None => decompressor.insert(
+                        ChunkDecompressor::new(dictionary).map_err(external)?
+                    ),
+                };
+
+                decompressor.decompress(&comp_data, len).map_err(external)
             })();
 
 

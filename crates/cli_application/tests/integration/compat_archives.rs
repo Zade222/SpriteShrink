@@ -205,6 +205,12 @@ fn assert_truncated_copies_fail_cleanly(
              success\nstderr:\n{stderr}",
             bytes.len()
         );
+        // The CLI's own error, not the library's wrapper around its text.
+        assert!(
+            !stderr.contains("external callback"),
+            "{len} of {} bytes: error lost its type\nstderr:\n{stderr}",
+            bytes.len()
+        );
 
         for entry in fs::read_dir(&out_dir).unwrap() {
             let name = entry.unwrap().file_name().into_string().unwrap();
