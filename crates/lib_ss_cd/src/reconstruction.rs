@@ -1072,7 +1072,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        analyze::{AnalysisError, analyze_data_sector},
+        analyze::analyze_data_sector,
         lib_structs::{ContentBlock, DataChunkLayout},
         mapper::from_bcd,
     };
@@ -1205,37 +1205,61 @@ mod tests {
         sector[range].try_into().unwrap()
     }
 
-    /// Analyzes `raw`, checks the type and the exception data size, then
-    /// rebuilds it both ways and checks both give `raw` back.
+    /// Analyzes `raw` as the mapper would with `sector_num`, checks the
+    /// exception data size, then rebuilds it both ways from what an archive
+    /// stores and checks both give `raw` back. Returns the type it was
+    /// analyzed as.
+    fn assert_rebuilds_from_analysis(
+        raw: &[u8; SECTOR_SIZE],
+        hint: SectorType,
+        sector_num: Option<u32>,
+    ) -> SectorType {
+        let analysis = analyze_data_sector(raw, hint, sector_num);
+        let sector_type = analysis.sector_type;
+
+        let exception = analysis.exception_data.as_deref();
+        assert_eq!(
+            exception.map_or(0, <[u8]>::len),
+            sector_type.excep_size(),
+            "{sector_type:?} exception data size"
+        );
+
+        let user_data = user_data_of(raw, sector_type);
+        let metadata = metadata_of(raw, sector_type);
+        // Without a number, the sector is an exception, which keeps its
+        // own header and doesn't use one.
+        let number = sector_num.unwrap_or(0);
+
+        for (name, rebuild) in REBUILDERS {
+            let rebuilt = rebuild(
+                user_data, &metadata, sector_type, number, exception
+            ).unwrap();
+            assert!(
+                rebuilt == *raw,
+                "{sector_type:?} (hint {hint:?}): {name} rebuild differs"
+            );
+        }
+        sector_type
+    }
+
+    /// Like `assert_rebuilds_from_analysis`, and checks the type.
     fn assert_round_trip(
         raw: &[u8; SECTOR_SIZE],
         hint: SectorType,
         sector_num: u32,
         expected: SectorType,
     ) {
-        let analysis = analyze_data_sector(raw, hint).unwrap();
-        assert_eq!(analysis.sector_type, expected, "hint {hint:?}");
-
-        let exception = analysis.exception_data.as_deref();
-        assert_eq!(
-            exception.map_or(0, <[u8]>::len),
-            expected.excep_size(),
-            "{expected:?} exception data size"
-        );
-
-        let user_data = user_data_of(raw, expected);
-        let metadata = metadata_of(raw, expected);
-
-        let bitwise = rebuild_sector_bitwise(
-            user_data, &metadata, expected, sector_num, exception
-        ).unwrap();
-        assert!(bitwise == *raw, "{expected:?}: bitwise rebuild differs");
-
-        let simd = rebuild_sector_simd(
-            user_data, &metadata, expected, sector_num, exception
-        ).unwrap();
-        assert!(simd == *raw, "{expected:?}: SIMD rebuild differs");
+        let sector_type = assert_rebuilds_from_analysis(raw, hint, Some(sector_num));
+        assert_eq!(sector_type, expected, "hint {hint:?}");
     }
+
+    /// Every type the mapper analyzes a data sector as.
+    const HINTS: [SectorType; 4] = [
+        SectorType::Mode1,
+        SectorType::Mode2Form1,
+        SectorType::PregapMode1,
+        SectorType::PregapMode2,
+    ];
 
     fn sector_num() -> impl Strategy<Value = u32> {
         LEAD_IN_FRAMES..=MAX_FRAME
@@ -1341,16 +1365,63 @@ mod tests {
         }
 
         #[test]
-        fn a_mode_byte_of_3_or_more_is_unknown(
-            mode in 3..=u8::MAX,
-            data in user_data(Layout::Mode1),
+        fn a_sector_rebuilds_exactly_whatever_its_sync_header_or_number(
+            (layout, data) in layout_and_data(),
+            metadata in any::<[u8; 8]>(),
+            header in sector_num(),
+            position in 0..16_usize,
+            flip in any::<u8>(),
+            other_number in proptest::option::of(sector_num()),
+            use_header in any::<bool>(),
         ) {
-            let mut raw = valid_sector(Layout::Mode1, LEAD_IN_FRAMES, &data, [0; 8]);
+            // EDC and ECC don't cover a Mode 2 sector's sync and header,
+            // and nothing checks a header against the number extraction
+            // gives it. Changing the sync, the header digits or the mode
+            // byte, or numbering the sector differently, must still give
+            // back the same bytes.
+            let mut raw = valid_sector(layout, header, &data, metadata);
+            raw[position] ^= flip;
+            let number = if use_header { Some(header) } else { other_number };
+
+            for hint in HINTS {
+                assert_rebuilds_from_analysis(&raw, hint, number);
+            }
+        }
+
+        #[test]
+        fn a_sector_whose_header_isnt_its_number_is_an_exception(
+            (layout, data) in layout_and_data(),
+            metadata in any::<[u8; 8]>(),
+            header in sector_num(),
+            number in proptest::option::of(sector_num()),
+        ) {
+            // Extraction would write `number` into the header, so only an
+            // exception, which keeps the header, gives the sector back.
+            prop_assume!(number != Some(header));
+            let raw = valid_sector(layout, header, &data, metadata);
+            for &(hint, expected) in exception_cases(layout) {
+                let sector_type = assert_rebuilds_from_analysis(&raw, hint, number);
+                prop_assert_eq!(sector_type, expected, "hint {:?}", hint);
+            }
+        }
+
+        #[test]
+        fn a_sector_of_no_known_mode_is_a_mode1_exception(
+            mode in prop_oneof![Just(0_u8), 3..=u8::MAX],
+            data in user_data(Layout::Mode1),
+            sector_num in sector_num(),
+        ) {
+            // Mode 0 with anything but zeros, or a mode no disc defines.
+            let mut raw = valid_sector(Layout::Mode1, sector_num, &data, [0; 8]);
             raw[15] = mode;
-            let result = analyze_data_sector(&raw, SectorType::Mode1);
-            prop_assert!(
-                matches!(result, Err(AnalysisError::UnknownMode(m)) if m == mode)
-            );
+            for hint in HINTS {
+                let expected = if hint.is_pregap() {
+                    SectorType::PregapMode1Exception
+                } else {
+                    SectorType::Mode1Exception
+                };
+                assert_round_trip(&raw, hint, sector_num, expected);
+            }
         }
     }
 
@@ -1365,14 +1436,6 @@ mod tests {
         ] {
             assert_round_trip(&raw, hint, LEAD_IN_FRAMES, expected);
         }
-    }
-
-    #[test]
-    fn mode_byte_0_with_nonzero_data_is_unknown() {
-        let mut raw = [0_u8; SECTOR_SIZE];
-        raw[1000] = 1;
-        let result = analyze_data_sector(&raw, SectorType::Mode1);
-        assert!(matches!(result, Err(AnalysisError::UnknownMode(0))));
     }
 
     #[test]

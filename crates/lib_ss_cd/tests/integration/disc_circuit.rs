@@ -972,3 +972,70 @@ fn a_gdrom_keeps_its_areas_and_gaps() {
          \x20   INDEX 01 00:14:00\n"
     );
 }
+
+// Sectors that pass EDC and ECC but don't rebuild, and sectors of no mode
+
+const MODE1_ONE_TRACK_CUE: &str = r#"FILE "disc.bin" BINARY
+  TRACK 01 MODE1/2352
+    INDEX 01 00:00:00
+"#;
+
+/// A disc with one odd sector: what the case is called, its CUE sheet,
+/// the odd sector, and the type it must be stored as.
+type OddSectorCase = (&'static str, &'static str, fn(usize) -> [u8; SECTOR], SectorType);
+
+fn with_byte(mut sector: [u8; SECTOR], at: usize, value: u8) -> [u8; SECTOR] {
+    sector[at] = value;
+    sector
+}
+
+#[test]
+fn sectors_that_dont_rebuild_plain_are_stored_whole() {
+    // Mode 2 EDC starts after the header and Mode 2 ECC treats the header
+    // as zero, so the first four of these passed both checks, were stored
+    // plain, and failed the whole disc's verification. A header below its
+    // index couldn't give an offset, so its sector got the one before.
+    // The Mode 0 and mode 3 sectors stopped analysis.
+    let odd: [OddSectorCase; 7] = [
+        ("Form 1, changed sync", ONE_TRACK_MODE2_CUE,
+            |i| with_byte(form1(i), 3, 0xFE), SectorType::Mode2Form1Exception),
+        ("Form 2, changed sync", ONE_TRACK_MODE2_CUE,
+            |i| with_byte(form2(i), 3, 0xFE), SectorType::Mode2Form2Exception),
+        ("Form 1, non-BCD header", ONE_TRACK_MODE2_CUE,
+            |i| with_byte(form1(i), 13, 0x0A), SectorType::Mode2Form1Exception),
+        ("Form 1, header below its index", ONE_TRACK_MODE2_CUE,
+            |_| numbered_sector(3, SectorType::Mode2Form1, FORM1_SUBHEADER),
+            SectorType::Mode2Form1Exception),
+        ("Mode 1, header below its index", MODE1_ONE_TRACK_CUE,
+            |_| numbered_sector(3, SectorType::Mode1, [0; 8]),
+            SectorType::Mode1Exception),
+        ("Mode 0 with a header", ONE_TRACK_MODE2_CUE,
+            |i| {
+                let mut sector = with_byte(form1(i), 15, 0);
+                sector[16..].fill(0);
+                sector
+            },
+            SectorType::Mode1Exception),
+        ("mode 3", ONE_TRACK_MODE2_CUE,
+            |i| with_byte(form1(i), 15, 3), SectorType::Mode1Exception),
+    ];
+
+    for (case, cue, odd_sector, expected) in odd {
+        let plain = if cue == MODE1_ONE_TRACK_CUE {
+            |i| mode1(i, [0; 8])
+        } else {
+            form1
+        };
+        let bin = image(40, |i| if i == 10 { odd_sector(i) } else { plain(i) });
+        let disc = archive(bin, cue);
+
+        let types: Vec<SectorType> = disc.manifest.rle_sector_map.runs.iter()
+            .flat_map(|&(n, t)| std::iter::repeat_n(t, n as usize))
+            .collect();
+        assert_eq!(types[10], expected, "{case}");
+        assert_eq!(disc.manifest.disc_exception_index.len(), 1, "{case}");
+        // Only a valid header at or past its index moves the offset.
+        assert_eq!(disc.manifest.lba_map, [(0, LEAD_IN)], "{case}");
+        assert_reads_back(&disc);
+    }
+}

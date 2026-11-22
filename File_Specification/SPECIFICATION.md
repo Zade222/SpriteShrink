@@ -192,6 +192,7 @@ SSMD uses a complex manifest to reconstruct CD sectors.
 
 *   **Sector Types:**
     Common types include `Audio` (2352 bytes), `Mode1` (2048 bytes data), `Mode2Form1`, `Mode2Form2`.
+    A writer stores a data sector as a plain type only if a reader rebuilding it (sync, a header numbered from `lba_map`, the mode byte, EDC, and ECC except for Form 2) gets back every byte; any other data sector is stored as the matching exception type, which keeps those bytes in `exception_data`. A sector whose mode byte is neither 1 nor 2 (Mode 0 with data, or no defined mode) is stored as `Mode1Exception` (`PregapMode1Exception` in a pregap): an exception keeps every byte outside the user data and the reserved bytes, so any 2352 bytes rebuild exactly.
 
 *   **Streams vs Blocks:**
     *   **Data (Mode1/Mode2):** Stored as a deduplicated stream of chunks (`data_stream_layout`), reconstructed using the `chunk_index`.

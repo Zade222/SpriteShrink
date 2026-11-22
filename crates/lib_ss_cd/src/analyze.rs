@@ -5,9 +5,6 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    ecc::{
-        sector_ecc_check_bitwise, sector_edc_check
-    },
     lib_structs::{
         MAX_DISC_SECTORS,
         CueAnalysisResult, CueSheet, SectorAnalysis,
@@ -15,12 +12,11 @@ use crate::{
     },
     lib_error_handling::SpriteShrinkCDError,
     cue_parser::parse_cue,
+    reconstruction::rebuild_sector_simd,
 };
 
 #[derive(Error, Debug)]
 pub enum AnalysisError {
-    #[error("Unknown sector type {0} found.")]
-    UnknownMode(u8),
     #[error("Failed to convert slice to array for checksum: {0}")]
     SliceConversion(#[from] TryFromSliceError),
     #[error("Failed to get size for file '{0}': {1}")]
@@ -45,160 +41,112 @@ pub trait FileSizeProvider {
 }
 
 
+/// The Mode 2 subheader bit (submode, byte 18) that marks a Form 2 sector.
+const FORM2_BIT: u8 = 1 << 5;
+
+/// Decides how a data sector is stored.
+///
+/// A sector is stored plain (Mode 1, Mode 2 Form 1 or Form 2) only if
+/// rebuilding it as extraction does gives back all 2352 bytes: from its user
+/// data, its subheader or reserved bytes, and `sector_num`, the number
+/// extraction will put in its header. Anything else is stored as an
+/// exception. The EDC and ECC checks this replaces didn't cover a Mode 2
+/// sector's sync and header, so a sector could pass them and come back
+/// different.
+///
+/// An exception keeps every byte outside the user data and the subheader or
+/// reserved bytes, which are stored too, so it always rebuilds exactly.
+/// A sector of no mode a disc defines (Mode 0 with data, or a mode byte
+/// above 2) is stored as a Mode 1 exception for that reason.
+///
+/// # Arguments
+///
+/// * `sector`: The raw sector.
+/// * `sector_type`: The track's type at this sector, as the mapper gives
+///   it: `Mode1`, `Mode2Form1`, or a pregap type.
+/// * `sector_num`: The number extraction will give this sector's header,
+///   or `None` if no header so far has given one, in which case the sector
+///   is stored as an exception.
 pub fn analyze_data_sector(
     sector: &[u8; 2352],
-    sector_type: SectorType
-) -> Result<SectorAnalysis, AnalysisError> {
-    let mode = sector[15];
-
-    match mode {
-        // Mode 1: Standard data sectors.
-        // Likely a PC Engine CD, Sega CD or a Sega Saturn disc sector
-        1 => {
-            if sector_edc_check(
-                sector,
-                &sector[2064..2068],
-                SectorType::Mode1
-            ) && sector_ecc_check_bitwise(
-                sector,
-                &sector[2076..2248],
-                &sector[2248..],
-                SectorType::Mode1
-            ) {
-                if sector_type == SectorType::PregapMode1 {
-                    Ok(SectorAnalysis {
-                        sector_type: SectorType::PregapMode1,
-                        exception_data: None
-                    })
-                } else {
-                    Ok(SectorAnalysis {
-                        sector_type: SectorType::Mode1,
-                        exception_data: None
-                    })
-                }
-            } else {
-                let mut meta_data_vec = Vec::with_capacity(296);
-                //Store the following:
-                // Sync bytes (0..12),
-                // header bytes (12..16),
-                // the EDC bytes (2064..2068),
-                // ECC bytes (2076..)
-                meta_data_vec.extend_from_slice(&sector[..16]);
-                meta_data_vec.extend_from_slice(&sector[2064..2068]);
-                //skip reserve, stored elsewhere
-                meta_data_vec.extend_from_slice(&sector[2076..]);
-
-                if sector_type == SectorType::PregapMode1 {
-                    Ok(SectorAnalysis {
-                        sector_type: SectorType::PregapMode1Exception,
-                        exception_data: Some(meta_data_vec)
-                    })
-                } else {
-                    Ok(SectorAnalysis {
-                        sector_type: SectorType::Mode1Exception,
-                        exception_data: Some(meta_data_vec)
-                    })
-                }
-            }
-        },
-        // Mode 2: XA sectors.
-        2 => {
-            // All PS1 games and 'Blue Disc' PS2 games use Mode 2 disc
-            // sectors but the form differs based on content e.g.
-            // data (form1), audio or video (form2).
-            let is_form2 = (sector[18] & (1 << 5)) != 0;
-
-            if is_form2 {
-                if sector_edc_check(
-                    sector,
-                    &sector[2348..],
-                    SectorType::Mode2Form2
-                ) {
-                    Ok(SectorAnalysis {
-                        sector_type: SectorType::Mode2Form2,
-                        exception_data: None
-                    })
-                } else {
-                    let mut meta_data_vec = Vec::with_capacity(20);
-                    //Store the following:
-                    // Sync bytes (0..12),
-                    // header bytes (12..16),
-                    // the EDC bytes (2348..2352),
-                    meta_data_vec.extend_from_slice(&sector[..16]);
-                    meta_data_vec.extend_from_slice(&sector[2348..]);
-
-                    Ok(SectorAnalysis {
-                        sector_type: SectorType::Mode2Form2Exception,
-                        exception_data: Some(meta_data_vec)
-                    })
-                }
-            } else if sector_edc_check(
-                sector,
-                &sector[2072..2076],
-                SectorType::Mode2Form1
-            ) && sector_ecc_check_bitwise(
-                sector,
-                &sector[2076..2248],
-                &sector[2248..],
-                SectorType::Mode2Form1
-            ) {
-                if sector_type == SectorType::PregapMode2 {
-                    Ok(SectorAnalysis {
-                        sector_type: SectorType::PregapMode2,
-                        exception_data: None
-                    })
-                } else {
-                    Ok(SectorAnalysis {
-                        sector_type: SectorType::Mode2Form1,
-                        exception_data: None
-                    })
-                }
-            } else { //likely libcrypt but could be a bad rip
-                let mut meta_data_vec = Vec::with_capacity(296);
-                //Store the following:
-                // Sync bytes (0..12),
-                // header bytes (12..16),
-                // the EDC bytes (2072..2076),
-                // ECC bytes (2076..)
-                meta_data_vec.extend_from_slice(&sector[..16]);
-                meta_data_vec.extend_from_slice(&sector[2072..]);
-
-                if sector_type == SectorType::PregapMode2 {
-                    Ok(SectorAnalysis {
-                        sector_type: SectorType::PregapMode2Exception,
-                        exception_data: Some(meta_data_vec),
-                    })
-                } else {
-                    Ok(SectorAnalysis {
-                        sector_type: SectorType::Mode2Form1Exception,
-                        exception_data: Some(meta_data_vec),
-                    })
-                }
-            }
+    sector_type: SectorType,
+    sector_num: Option<u32>,
+) -> SectorAnalysis {
+    let (plain, exception) = match sector[15] {
+        0 if sector.iter().all(|&byte| byte == 0) => {
+            let zeroed = match sector_type {
+                SectorType::Mode2Form1 |
+                SectorType::Mode2Form2 |
+                SectorType::PregapMode2 => SectorType::ZeroedMode2Data,
+                _ => SectorType::ZeroedMode1Data,
+            };
+            return SectorAnalysis { sector_type: zeroed, exception_data: None };
         }
-        0 =>{
-            if *sector == [0u8; 2352] {
-                let zero_type = match sector_type {
-                    SectorType::Mode2Form1 |
-                    SectorType::Mode2Form2 |
-                    SectorType::PregapMode2 => SectorType::ZeroedMode2Data,
+        1 if sector_type == SectorType::PregapMode1 =>
+            (SectorType::PregapMode1, SectorType::PregapMode1Exception),
+        1 => (SectorType::Mode1, SectorType::Mode1Exception),
+        // Form 2 sectors hold audio or video, Form 1 sectors data.
+        2 if sector[18] & FORM2_BIT != 0 =>
+            (SectorType::Mode2Form2, SectorType::Mode2Form2Exception),
+        2 if sector_type == SectorType::PregapMode2 =>
+            (SectorType::PregapMode2, SectorType::PregapMode2Exception),
+        2 => (SectorType::Mode2Form1, SectorType::Mode2Form1Exception),
+        _ if sector_type.is_pregap() =>
+            return as_exception(sector, SectorType::PregapMode1Exception),
+        _ => return as_exception(sector, SectorType::Mode1Exception),
+    };
 
-                    _ => SectorType::ZeroedMode1Data,
-                };
-
-
-                Ok(SectorAnalysis {
-                    sector_type: zero_type,
-                    exception_data: None,
-                })
-            } else {
-                Err(AnalysisError::UnknownMode(0))
-            }
-        }
-        unknown_mode => {
-            Err(AnalysisError::UnknownMode(unknown_mode))
-        }
+    if sector_num.is_some_and(|number| rebuilds_exactly(sector, plain, number)) {
+        SectorAnalysis { sector_type: plain, exception_data: None }
+    } else {
+        as_exception(sector, exception)
     }
+}
+
+
+/// Whether rebuilding `sector` as a plain `sector_type` sector numbered
+/// `sector_num`, from the bytes the archive stores for it, gives it back.
+fn rebuilds_exactly(
+    sector: &[u8; 2352],
+    sector_type: SectorType,
+    sector_num: u32,
+) -> bool {
+    let Some(user_data) = sector_type.user_data_range()
+        .and_then(|range| sector.get(range))
+    else {
+        return false;
+    };
+    let Some(metadata) = sector.get(sector_type.metadata_range())
+        .and_then(|bytes| <&[u8; 8]>::try_from(bytes).ok())
+    else {
+        return false;
+    };
+
+    rebuild_sector_simd(user_data, metadata, sector_type, sector_num, None)
+        .is_ok_and(|rebuilt| rebuilt == *sector)
+}
+
+
+/// `sector` as an exception of type `exception`: the bytes outside its
+/// user data and subheader or reserved bytes, in the order the rebuild
+/// reads them.
+fn as_exception(sector: &[u8; 2352], exception: SectorType) -> SectorAnalysis {
+    let mut kept = Vec::with_capacity(exception.excep_size());
+    //Sync and header
+    kept.extend_from_slice(&sector[..16]);
+    match exception {
+        //EDC, then ECC after the reserved bytes
+        SectorType::Mode1Exception | SectorType::PregapMode1Exception => {
+            kept.extend_from_slice(&sector[2064..2068]);
+            kept.extend_from_slice(&sector[2076..]);
+        }
+        //EDC
+        SectorType::Mode2Form2Exception => kept.extend_from_slice(&sector[2348..]),
+        //EDC and ECC
+        _ => kept.extend_from_slice(&sector[2072..]),
+    }
+
+    SectorAnalysis { sector_type: exception, exception_data: Some(kept) }
 }
 
 
