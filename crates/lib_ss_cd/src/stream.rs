@@ -1,6 +1,4 @@
-use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::PathBuf;
 
 //use thiserror::Error;
 
@@ -19,60 +17,50 @@ pub enum StreamError {
     Io(#[from] io::Error),
 }*/
 
-/// A stream that provides a unified `Read` and `Seek` interface over multiple
-/// underlying `.bin` files.
+/// One `Read` and `Seek` stream over the parts of a disc image split
+/// across several BIN files (a multi-track CUE/BIN set), read as if they
+/// were joined end to end.
 ///
-/// This struct is designed to handle disc images that are split across several
-/// individual `.bin` files (e.g., in a multi-track CUE/BIN setup). It presents
-/// these multiple files as a single, contiguous virtual stream, abstracting
-/// away the complexity of managing file boundaries and seeking between them.
-///
-/// I/O operations (read, seek) are automatically delegated to the correct
-/// underlying `File` based on the current virtual position.
-pub struct MultiBinStream {
-    files: Vec<File>,
-    file_boundaries: Vec<u64>,
+/// The application opens the parts and passes them in, in the order the
+/// CUE sheet lists them; this type does no file I/O of its own. Each read
+/// and seek goes to the part that holds the stream's position.
+#[derive(Debug)]
+pub struct MultiBinStream<R> {
+    parts: Vec<R>,
+    /// Where each part ends in the joined stream.
+    part_ends: Vec<u64>,
     virtual_pos: u64,
     total_len: u64,
 }
 
-impl MultiBinStream {
-    /// Creates a new `MultiBinStream` from a list of paths to individual BIN
-    /// files.
+impl<R: Read + Seek> MultiBinStream<R> {
+    /// Joins `parts`, ordered from the first part of the disc to the last.
     ///
-    /// The provided paths are expected to be ordered correctly, representing
-    /// the sequential layout of the virtual disc image. Each file is opened,
-    /// and its length is used to calculate the virtual boundaries within the
-    /// combined stream.
+    /// Each part's length is found by seeking it to its end, so it can't
+    /// disagree with what the part holds.
     ///
-    /// # Arguments
+    /// # Errors
     ///
-    /// * `paths`: A `Vec<PathBuf>` containing the paths to the `.bin` files,
-    ///   ordered from the first part of the disc to the last.
-    ///
-    /// # Returns
-    ///
-    /// A `Result` which is:
-    /// - `Ok(Self)`: A new `MultiBinStream` instance ready for reading and
-    ///   seeking.
-    /// - `Err(io::Error)`: If any of the specified files cannot be opened or
-    ///   their metadata (specifically, their length) cannot be retrieved.
-    pub fn new(paths: Vec<PathBuf>) -> io::Result<Self> {
-        let mut files = Vec::with_capacity(paths.len());
-        let mut file_boundaries = Vec::with_capacity(paths.len());
+    /// Any error from seeking a part, or `InvalidInput` if the parts are
+    /// longer than `u64::MAX` bytes together.
+    pub fn new(mut parts: Vec<R>) -> io::Result<Self> {
+        let mut part_ends = Vec::with_capacity(parts.len());
         let mut total_len: u64 = 0;
 
-        for path in paths {
-            let file = File::open(path)?;
-            let file_len = file.metadata()?.len();
-            total_len += file_len;
-            files.push(file);
-            file_boundaries.push(total_len);
+        for part in &mut parts {
+            let part_len = part.seek(SeekFrom::End(0))?;
+            total_len = total_len.checked_add(part_len).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "the parts are longer than u64::MAX bytes together",
+                )
+            })?;
+            part_ends.push(total_len);
         }
 
         Ok(Self {
-            files,
-            file_boundaries,
+            parts,
+            part_ends,
             virtual_pos: 0,
             total_len,
         })
@@ -100,9 +88,9 @@ fn resolve_seek(pos: SeekFrom, current: u64, len: u64) -> io::Result<u64> {
     ))
 }
 
-impl Seek for MultiBinStream {
-    /// Moves the stream's position. The files aren't touched until the next
-    /// `read`, which seeks the file that holds the position.
+impl<R: Read + Seek> Seek for MultiBinStream<R> {
+    /// Moves the stream's position. The parts aren't touched until the next
+    /// `read`, which seeks the part that holds the position.
     ///
     /// Seeking past the end is allowed, and a `read` there returns 0.
     ///
@@ -116,46 +104,46 @@ impl Seek for MultiBinStream {
     }
 }
 
-impl Read for MultiBinStream {
-    /// Reads from the file that holds the current position. A read stops at
-    /// the end of that file, so it can return fewer bytes than `buf` holds
+impl<R: Read + Seek> Read for MultiBinStream<R> {
+    /// Reads from the part that holds the current position. A read stops at
+    /// the end of that part, so it can return fewer bytes than `buf` holds
     /// before the end of the stream; the next read continues in the next
-    /// file.
+    /// part.
     ///
     /// # Errors
     ///
-    /// Any error from seeking or reading the underlying file.
+    /// Any error from seeking or reading the part.
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.virtual_pos >= self.total_len {
             return Ok(0);
         }
 
-        // The first file that ends after the position holds it. Empty files
+        // The first part that ends after the position holds it. Empty parts
         // end where the one before them does, so they're never picked.
-        let Some(file_idx) = self
-            .file_boundaries
+        let Some(part_idx) = self
+            .part_ends
             .iter()
-            .position(|&boundary| self.virtual_pos < boundary)
+            .position(|&end| self.virtual_pos < end)
         else {
-            // The last boundary is `total_len`, and the position is before
-            // it, so some file holds it.
-            return Err(io::Error::other("no file holds the stream position"));
+            // The last end is `total_len`, and the position is before it,
+            // so some part holds it.
+            return Err(io::Error::other("no part holds the stream position"));
         };
 
-        let base_offset = file_idx
+        let base_offset = part_idx
             .checked_sub(1)
-            .and_then(|prev| self.file_boundaries.get(prev))
+            .and_then(|prev| self.part_ends.get(prev))
             .copied()
             .unwrap_or(0);
 
         let relative_offset = self.virtual_pos - base_offset;
-        let Some(file) = self.files.get_mut(file_idx) else {
-            // There's one boundary per file, so the index is in range.
-            return Err(io::Error::other("no file holds the stream position"));
+        let Some(part) = self.parts.get_mut(part_idx) else {
+            // There's one end per part, so the index is in range.
+            return Err(io::Error::other("no part holds the stream position"));
         };
-        file.seek(SeekFrom::Start(relative_offset))?;
+        part.seek(SeekFrom::Start(relative_offset))?;
 
-        let bytes_read = file.read(buf)?;
+        let bytes_read = part.read(buf)?;
         self.virtual_pos += bytes_read as u64;
 
         Ok(bytes_read)
@@ -515,7 +503,7 @@ impl<R: Read + Seek> Read for UserDataStream<'_, R> {
     reason = "the sizes and offsets in these tests are a few sectors"
 )]
 mod tests {
-    use std::io::{Cursor, Write};
+    use std::io::Cursor;
 
     use super::*;
     use crate::lib_structs::SectorType;
@@ -557,27 +545,22 @@ mod tests {
 
     // ---- MultiBinStream ----
 
-    /// Three files whose lengths aren't multiples of a sector, and the
-    /// bytes of all three joined.
+    /// Parts of the given lengths, which needn't be multiples of a
+    /// sector, and their bytes joined.
     struct Bins {
-        /// Keeps the files until the test ends.
-        dir: tempfile::TempDir,
-        paths: Vec<PathBuf>,
+        parts: Vec<Cursor<Vec<u8>>>,
         joined: Vec<u8>,
     }
 
     fn bins(lengths: &[usize]) -> Bins {
-        let dir = tempfile::tempdir().unwrap();
-        let mut paths = Vec::new();
+        let mut parts = Vec::new();
         let mut joined = Vec::new();
         for (i, &len) in lengths.iter().enumerate() {
             let bytes = pattern(len, i as u8 * 0x40);
-            let path = dir.path().join(format!("track{i}.bin"));
-            File::create(&path).unwrap().write_all(&bytes).unwrap();
-            paths.push(path);
             joined.extend_from_slice(&bytes);
+            parts.push(Cursor::new(bytes));
         }
-        Bins { dir, paths, joined }
+        Bins { parts, joined }
     }
 
     const LENGTHS: [usize; 3] = [3 * SECTOR + 100, SECTOR - 1, 2 * SECTOR + 7];
@@ -586,7 +569,7 @@ mod tests {
     fn multi_bin_reads_the_files_joined_together() {
         let bins = bins(&LENGTHS);
         for buf_size in BUFFER_SIZES {
-            let mut stream = MultiBinStream::new(bins.paths.clone()).unwrap();
+            let mut stream = MultiBinStream::new(bins.parts.clone()).unwrap();
             assert_eq!(
                 read_with(&mut stream, buf_size),
                 bins.joined,
@@ -598,13 +581,14 @@ mod tests {
     #[test]
     fn multi_bin_skips_an_empty_file() {
         let bins = bins(&[SECTOR + 5, 0, 300]);
-        let mut stream = MultiBinStream::new(bins.paths).unwrap();
+        let mut stream = MultiBinStream::new(bins.parts).unwrap();
         assert_eq!(read_with(&mut stream, 4096), bins.joined);
     }
 
     #[test]
     fn multi_bin_with_no_files_is_empty() {
-        let mut stream = MultiBinStream::new(Vec::new()).unwrap();
+        let mut stream = MultiBinStream::<Cursor<Vec<u8>>>::new(Vec::new())
+            .unwrap();
         assert_eq!(stream.seek(SeekFrom::End(0)).unwrap(), 0);
         assert_eq!(read_with(&mut stream, 16), b"");
     }
@@ -615,7 +599,7 @@ mod tests {
         let joined = &bins.joined;
         let first_end = LENGTHS[0] as u64;
         let second_end = first_end + LENGTHS[1] as u64;
-        let mut stream = MultiBinStream::new(bins.paths.clone()).unwrap();
+        let mut stream = MultiBinStream::new(bins.parts.clone()).unwrap();
 
         // From the start, ending in the second file.
         assert_eq!(stream.seek(SeekFrom::Start(first_end - 10)).unwrap(),
@@ -647,7 +631,7 @@ mod tests {
     fn multi_bin_reads_nothing_past_the_end() {
         let bins = bins(&LENGTHS);
         let len = bins.joined.len() as u64;
-        let mut stream = MultiBinStream::new(bins.paths.clone()).unwrap();
+        let mut stream = MultiBinStream::new(bins.parts.clone()).unwrap();
 
         assert_eq!(stream.seek(SeekFrom::End(0)).unwrap(), len);
         assert_eq!(stream.read(&mut [0; 8]).unwrap(), 0);
@@ -665,7 +649,7 @@ mod tests {
     #[test]
     fn multi_bin_rejects_a_seek_before_the_start() {
         let bins = bins(&LENGTHS);
-        let mut stream = MultiBinStream::new(bins.paths.clone()).unwrap();
+        let mut stream = MultiBinStream::new(bins.parts.clone()).unwrap();
         stream.seek(SeekFrom::Start(10)).unwrap();
 
         let err = stream.seek(SeekFrom::Current(-11)).unwrap_err();
@@ -682,7 +666,7 @@ mod tests {
     fn multi_bin_seeks_anywhere_up_to_u64_max() {
         let bins = bins(&LENGTHS);
         let len = bins.joined.len() as u64;
-        let mut stream = MultiBinStream::new(bins.paths.clone()).unwrap();
+        let mut stream = MultiBinStream::new(bins.parts.clone()).unwrap();
 
         assert_eq!(stream.seek(SeekFrom::End(i64::MAX)).unwrap(),
             len + i64::MAX as u64);
@@ -694,12 +678,25 @@ mod tests {
         assert_eq!(stream.stream_position().unwrap(), u64::MAX);
     }
 
+    /// A part whose length can't be found: every seek fails.
+    struct Unseekable;
+
+    impl Read for Unseekable {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    impl Seek for Unseekable {
+        fn seek(&mut self, _pos: SeekFrom) -> io::Result<u64> {
+            Err(io::Error::other("can't seek"))
+        }
+    }
+
     #[test]
-    fn multi_bin_fails_for_a_missing_file() {
-        let bins = bins(&LENGTHS);
-        let mut paths = bins.paths.clone();
-        paths.push(bins.dir.path().join("missing.bin"));
-        assert!(MultiBinStream::new(paths).is_err());
+    fn multi_bin_fails_for_a_part_it_cant_measure() {
+        let err = MultiBinStream::new(vec![Unseekable]).err().unwrap();
+        assert_eq!(err.to_string(), "can't seek");
     }
 
     // ---- SectorRegionStream ----
@@ -890,7 +887,7 @@ mod tests {
             sectors: vec![SectorType::Mode2Form1; 4],
         };
         let bins = bins(&[2 * SECTOR + 1000, 3 * SECTOR - 1000]);
-        let mut joined = MultiBinStream::new(bins.paths.clone()).unwrap();
+        let mut joined = MultiBinStream::new(bins.parts.clone()).unwrap();
         let mut region = SectorRegionStream::new(&mut joined, 1, 4);
         let raw_region = &bins.joined[SECTOR..5 * SECTOR];
         let expected = reference_user_data(raw_region, &map);
