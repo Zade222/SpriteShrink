@@ -161,11 +161,39 @@ fn chunk_compressor(
     Ok(compressor)
 }
 
-/// Below this many queued chunks, the coordinator reads another batch.
-const PREFETCH_LOW_THRESHOLD: usize = 100;
-
-/// The most chunks read per batch, and the capacity of the workers' queue.
+/// The most chunks read per batch.
 const PREFETCH_HIGH_THRESHOLD: usize = 500;
+
+/// The most chunks handed to a decompression worker in one message. A
+/// worker that has run out of work sleeps, and waking it costs a few
+/// microseconds, about what decoding a 2 KiB chunk takes; a run of chunks
+/// is one wake-up for all of them. Compression hands chunks over one at a
+/// time: compressing one takes far longer than a wake-up, and single chunks
+/// spread the work more evenly.
+const DECODE_RUN_LEN: usize = 64;
+
+/// A run ends once its data reaches this many bytes, so large items (as
+/// compression with a large window has) still spread across the workers.
+const RUN_BYTE_TARGET: usize = 128 * 1024;
+
+/// A run of consecutive items for a worker: the first one's position in
+/// `items`, and each one's data. A worker returns its results the same way.
+type Run = (usize, Vec<Vec<u8>>);
+
+/// How the coordinator splits a batch into runs for the workers.
+#[derive(Clone, Copy)]
+struct RunSplit {
+    workers: usize,
+    max_len: usize,
+}
+
+impl RunSplit {
+    /// The most items per run for a batch of `batch` items: at most
+    /// `max_len`, short enough that every worker gets one, and at least 1.
+    fn len(self, batch: usize) -> usize {
+        batch.div_ceil(self.workers).min(self.max_len).max(1)
+    }
+}
 
 /// The most chunks the coordinator holds at once, from the next one to
 /// write to the last one read: queued, being worked on, or done and
@@ -404,6 +432,7 @@ where
     //Compression doesn't know a chunk's size until it has read it.
     run_pipeline(
         worker_count,
+        1,
         sorted_hashes,
         |_: &H| None,
         new_worker,
@@ -500,6 +529,7 @@ where
     counted too once they're read.*/
     run_pipeline(
         worker_count,
+        DECODE_RUN_LEN,
         chunks,
         |chunk: &SSAChunkMeta<H>| Some(chunk.length as usize),
         new_worker,
@@ -550,6 +580,8 @@ fn into_archive_error(e: SpriteShrinkError) -> ArchiveError {
 /// * `worker_count`: The number of worker threads. `0` uses the available
 ///   parallelism. The calling thread coordinates besides these, and
 ///   mostly waits.
+/// * `max_run_len`: The most items handed to a worker at once (at least 1).
+///   Runs are also kept short enough that each batch reaches every worker.
 /// * `items`: The items, in the order to write them.
 /// * `item_size`: See `S`.
 /// * `new_worker`: Makes each worker's transform. The first one is made on
@@ -570,6 +602,7 @@ fn into_archive_error(e: SpriteShrinkError) -> ArchiveError {
 /// - Any error from `new_worker`, a transform, or `write`.
 fn run_pipeline<C, ERead, F, R, S, T, W>(
     worker_count: usize,
+    max_run_len: usize,
     items: &[T],
     item_size: S,
     new_worker: F,
@@ -590,15 +623,14 @@ where
         worker_count
     };
 
-    /*Jobs are (position, data), where the position is the item's index in
-    items. The queue is bounded so that reading can't run far ahead of the
-    workers.*/
-    let (to_workers_tx, to_workers_rx) =
-        flume::bounded::<(usize, Vec<u8>)>(PREFETCH_HIGH_THRESHOLD);
+    /*Jobs are runs of items. The coordinator's window already limits how
+    far reading runs ahead, and every run holds at least one item, so the
+    queue never fills.*/
+    let (to_workers_tx, to_workers_rx) = flume::bounded::<Run>(REORDER_WINDOW);
 
-    //Results are (position, result data), or the error a worker hit.
+    //Results are runs of result data, or the error a worker hit.
     let (from_workers_tx, from_workers_rx) =
-        flume::unbounded::<Result<(usize, Vec<u8>), ArchiveError>>();
+        flume::unbounded::<Result<Run, ArchiveError>>();
 
     /*Make one transform before reading anything or starting any threads,
     so a bad configuration (e.g. a dictionary zstd rejects) fails first.
@@ -634,14 +666,30 @@ where
 
                     /*Workers loop until the queue is empty and the
                     coordinator has dropped its sender.*/
-                    while let Ok((position, data)) = to_workers_rx.recv() {
-                        let result = transform(position, &data)
-                            .map(|output| (position, output));
-                        let failed = result.is_err();
+                    while let Ok((first, run)) = to_workers_rx.recv() {
+                        let mut outputs = Vec::with_capacity(run.len());
+                        let mut failure = None;
+                        for (position, data) in (first..).zip(&run) {
+                            match transform(position, data) {
+                                Ok(output) => outputs.push(output),
+                                Err(e) => {
+                                    failure = Some(e);
+                                    break;
+                                }
+                            }
+                        }
 
-                        /*A failed send means the coordinator has stopped,
-                        and after an error there's nothing more to do.*/
-                        if from_workers_tx.send(result).is_err() || failed {
+                        /*Results before a failed item go first, so they're
+                        written as they would be one item at a time. A
+                        failed send means the coordinator has stopped, and
+                        after an error there's nothing more to do.*/
+                        if !outputs.is_empty() &&
+                            from_workers_tx.send(Ok((first, outputs))).is_err()
+                        {
+                            break;
+                        }
+                        if let Some(e) = failure {
+                            let _ignored = from_workers_tx.send(Err(e));
                             break;
                         }
                     }
@@ -658,6 +706,7 @@ where
             &item_size,
             &read,
             write,
+            RunSplit { workers: num_workers, max_len: max_run_len },
             &to_workers_tx,
             &from_workers_rx,
         );
@@ -726,14 +775,15 @@ fn batch_len<T>(
 }
 
 /// Runs the calling thread's side of `run_pipeline`: reads items' data and
-/// queues it for the workers, and writes the results in order.
+/// queues it for the workers in runs, and writes the results in order.
 fn coordinate_chunks<ERead, R, S, T, W>(
     items: &[T],
     item_size: &S,
     read: &R,
     mut write: W,
-    to_workers_tx: &flume::Sender<(usize, Vec<u8>)>,
-    from_workers_rx: &flume::Receiver<Result<(usize, Vec<u8>), ArchiveError>>,
+    split: RunSplit,
+    to_workers_tx: &flume::Sender<Run>,
+    from_workers_rx: &flume::Receiver<Result<Run, ArchiveError>>,
 ) -> Result<(), ArchiveError>
 where
     ERead: std::error::Error + IsCancelled,
@@ -761,14 +811,27 @@ where
     //The largest data or result seen, to size items whose size is unknown.
     let mut largest_seen = 0usize;
 
+    /*The send fails only once every worker has stopped, and a worker stops
+    early only after sending its error, so report that error rather than
+    the send's.*/
+    let send_run = |run: Run| {
+        to_workers_tx.send(run).map_err(|_disconnected| {
+            from_workers_rx
+                .try_iter()
+                .find_map(Result::err)
+                .unwrap_or_else(|| ArchiveError::WorkerError(
+                    "Worker pool terminated unexpectedly.".to_string()
+                ))
+        })
+    };
+
     while write_cursor < total_items {
-        /*Read another batch when the workers' queue runs low and the window
-        has room for a whole one. While a slow item holds up writing and
-        the window is full, the coordinator waits for results instead.*/
+        /*Read another batch when the window has room for a whole one. While
+        a slow item holds up writing and the window is full, the coordinator
+        waits for results instead.*/
         let upcoming = items.get(read_cursor..).unwrap_or_default();
-        if to_workers_tx.len() < PREFETCH_LOW_THRESHOLD &&
-            window.len() + upcoming.len().min(PREFETCH_HIGH_THRESHOLD)
-                <= REORDER_WINDOW
+        if window.len() + upcoming.len().min(PREFETCH_HIGH_THRESHOLD)
+            <= REORDER_WINDOW
         {
             let count = batch_len(
                 upcoming,
@@ -792,25 +855,33 @@ where
                     )));
                 }
 
+                //Queue the batch as runs.
+                let run_len = split.len(to_read.len());
+                let mut run_start = read_cursor;
+                let mut run = Vec::with_capacity(run_len);
+                let mut run_bytes = 0usize;
+
                 for (item, data) in to_read.iter().zip(data) {
                     let counted = data.len().max(item_size(item).unwrap_or(0));
                     largest_seen = largest_seen.max(data.len());
                     held = held.saturating_add(counted);
                     window.push_back(Slot::Pending(counted));
-
-                    /*The send fails only once every worker has stopped,
-                    and a worker stops early only after sending its error,
-                    so report that error rather than the send's.*/
-                    if to_workers_tx.send((read_cursor, data)).is_err() {
-                        return Err(from_workers_rx
-                            .try_iter()
-                            .find_map(Result::err)
-                            .unwrap_or_else(|| ArchiveError::WorkerError(
-                                "Worker pool terminated unexpectedly."
-                                .to_string()
-                            )));
-                    }
                     read_cursor += 1;
+
+                    run_bytes = run_bytes.saturating_add(data.len());
+                    run.push(data);
+                    if run.len() == run_len || run_bytes >= RUN_BYTE_TARGET {
+                        let full = std::mem::replace(
+                            &mut run,
+                            Vec::with_capacity(run_len)
+                        );
+                        send_run((run_start, full))?;
+                        run_start = read_cursor;
+                        run_bytes = 0;
+                    }
+                }
+                if !run.is_empty() {
+                    send_run((run_start, run))?;
                 }
             }
         }
@@ -818,27 +889,29 @@ where
         /*Every queued item is either still with a worker or already in the
         window, so the channel only disconnects if every worker has
         stopped.*/
-        let (position, output) = from_workers_rx.recv()
+        let (first, outputs) = from_workers_rx.recv()
             .map_err(|_disconnected| ArchiveError::WorkerError(
                 "Worker pool finished but not all chunks were processed."
                 .to_string()
             ))??;
 
-        /*The front slot is write_cursor's. Workers only return positions
-        the coordinator queued, which are all in the window.*/
-        let slot = position.checked_sub(write_cursor)
-            .and_then(|index| window.get_mut(index))
-            .filter(|slot| matches!(slot, Slot::Pending(_)))
-            .ok_or_else(|| ArchiveError::WorkerError(format!(
-                "a worker returned chunk {position}, which wasn't waiting \
-                for a worker"
-            )))?;
-        if let Slot::Pending(counted) = *slot {
-            held = held.saturating_sub(counted);
+        for (position, output) in (first..).zip(outputs) {
+            /*The front slot is write_cursor's. Workers only return
+            positions the coordinator queued, which are all in the window.*/
+            let slot = position.checked_sub(write_cursor)
+                .and_then(|index| window.get_mut(index))
+                .filter(|slot| matches!(slot, Slot::Pending(_)))
+                .ok_or_else(|| ArchiveError::WorkerError(format!(
+                    "a worker returned chunk {position}, which wasn't \
+                    waiting for a worker"
+                )))?;
+            if let Slot::Pending(counted) = *slot {
+                held = held.saturating_sub(counted);
+            }
+            held = held.saturating_add(output.len());
+            largest_seen = largest_seen.max(output.len());
+            *slot = Slot::Done(output);
         }
-        held = held.saturating_add(output.len());
-        largest_seen = largest_seen.max(output.len());
-        *slot = Slot::Done(output);
 
         //Write every item that is now next in order.
         while matches!(window.front(), Some(Slot::Done(_))) {
@@ -2087,12 +2160,12 @@ mod tests {
         let (hashes, chunks) = chunk_store(1200);
         let result = within_timeout(move || {
             let (to_compress_tx, to_compress_rx) =
-                flume::bounded(PREFETCH_HIGH_THRESHOLD);
+                flume::bounded(REORDER_WINDOW);
             let (from_compress_tx, from_compress_rx) = flume::unbounded();
 
             let workers: Vec<_> = (0..4)
                 .map(|_| {
-                    let to_compress_rx: flume::Receiver<(usize, Vec<u8>)> =
+                    let to_compress_rx: flume::Receiver<Run> =
                         to_compress_rx.clone();
                     let from_compress_tx = from_compress_tx.clone();
                     std::thread::spawn(move || {
@@ -2113,6 +2186,7 @@ mod tests {
                 |_: &[u8]| -> Result<(), ArchiveError> {
                     panic!("nothing should be written")
                 },
+                RunSplit { workers: 4, max_len: 1 },
                 &to_compress_tx,
                 &from_compress_rx,
             );
