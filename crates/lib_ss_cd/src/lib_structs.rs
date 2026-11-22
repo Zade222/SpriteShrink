@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     fmt::{self, Display, Formatter},
     hash::Hash,
     marker::PhantomData,
@@ -27,7 +26,7 @@ use bytemuck::{Pod, Zeroable};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
 use sprite_shrink::{
-    ChunkLocation, FileHeader, FileRegion, Hashable,
+    ChunkLocation, ChunkMap, FileHeader, FileRegion, Hashable,
     decompress_chunk_checked
 };
 use zerocopy::{Immutable, IntoBytes, FromBytes};
@@ -1115,8 +1114,8 @@ impl SSMDFormatData {
 
 #[derive(Debug)]
 pub struct SSMDIndices<H> {
-    pub chunk_index: HashMap<H, ChunkLocation>,
-    pub audio_block_index: HashMap<H, ChunkLocation>,
+    pub chunk_index: ChunkMap<H, ChunkLocation>,
+    pub audio_block_index: ChunkMap<H, ChunkLocation>,
     pub exception_index: Vec<u64>,
 }
 

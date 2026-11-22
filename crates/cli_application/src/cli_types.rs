@@ -5,7 +5,6 @@
 //! between threads and manage database interactions.
 
 use std::{
-    collections::HashMap,
     hash::Hash,
     path::PathBuf,
     sync::Arc,
@@ -15,7 +14,7 @@ use dashmap::DashMap;
 use serde::{Serialize, Deserialize};
 
 use sprite_shrink::{
-    FileManifestParent, Hashable, SSAChunkMeta
+    ChunkHasher, ChunkMap, FileManifestParent, Hashable, SSAChunkMeta
 };
 use sprite_shrink_cd::{
     ContentBlock, DataChunkLayout, DiscFile, RleSectorMap, SubHeaderEntry
@@ -24,12 +23,12 @@ use sprite_shrink_cd::{
 
 pub enum CacheBackend<H: Hash + Eq> {
     InMemory{
-        map: Arc<DashMap<H, Vec<u8>>>,
+        map: Arc<DashMap<H, Vec<u8>, ChunkHasher>>,
         data_size: u64,
     },
     OnDisk {
         file_path: PathBuf,
-        location_map: HashMap<H, LocationData>,
+        location_map: ChunkMap<H, LocationData>,
         current_offset: u64,
     },
 }

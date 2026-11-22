@@ -7,7 +7,8 @@
 //! compression and extraction operations.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
+    hash::{BuildHasher, Hasher},
     mem
 };
 use bitcode::{
@@ -90,6 +91,92 @@ impl TryFrom<u8> for HashType {
             .into_iter()
             .find(|hash_type| hash_type.id() == id)
             .ok_or_else(|| ParsingError::UnsupportedHashType(id).into())
+    }
+}
+
+/// A map keyed by chunk hash, using [`ChunkHasher`].
+pub type ChunkMap<K, V> = HashMap<K, V, ChunkHasher>;
+
+/// A set of chunk hashes, using [`ChunkHasher`].
+pub type ChunkSet<K> = HashSet<K, ChunkHasher>;
+
+/// The hasher for maps and sets keyed by chunk hash ([`ChunkMap`],
+/// [`ChunkSet`]).
+///
+/// Chunk hashes are already xxh3 output, so the standard library's `SipHash`
+/// does far more work than they need. This uses foldhash, which mixes a
+/// 64- or 128-bit key with secret seeds in one multiply.
+///
+/// The keys of an index read from an archive are chosen by whoever made
+/// it, so passing them through unhashed would let a crafted archive put
+/// every key in one bucket and make parsing take quadratic time. The seeds
+/// are random per process (from address space layout, the time and an
+/// allocator address) and differ per map, so an archive can't be built to
+/// collide. Iteration order differs from run to run, as with the standard
+/// library's hasher; lookups don't.
+#[derive(Clone, Debug, Default)]
+pub struct ChunkHasher(foldhash::fast::RandomState);
+
+impl BuildHasher for ChunkHasher {
+    type Hasher = ChunkHashState;
+
+    #[inline]
+    fn build_hasher(&self) -> ChunkHashState {
+        ChunkHashState(self.0.build_hasher())
+    }
+}
+
+/// The state [`ChunkHasher`] hashes one key with. Every `write` method
+/// passes through, so a `u64` or `u128` key takes foldhash's one-multiply
+/// path.
+#[derive(Clone)]
+pub struct ChunkHashState(foldhash::fast::FoldHasher<'static>);
+
+impl Hasher for ChunkHashState {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0.finish()
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.write(bytes);
+    }
+
+    #[inline]
+    fn write_u8(&mut self, i: u8) {
+        self.0.write_u8(i);
+    }
+
+    #[inline]
+    fn write_u16(&mut self, i: u16) {
+        self.0.write_u16(i);
+    }
+
+    #[inline]
+    fn write_u32(&mut self, i: u32) {
+        self.0.write_u32(i);
+    }
+
+    #[inline]
+    fn write_u64(&mut self, i: u64) {
+        self.0.write_u64(i);
+    }
+
+    #[inline]
+    fn write_u128(&mut self, i: u128) {
+        self.0.write_u128(i);
+    }
+
+    #[inline]
+    fn write_usize(&mut self, i: usize) {
+        self.0.write_usize(i);
+    }
+}
+
+impl std::fmt::Debug for ChunkHashState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChunkHashState").finish_non_exhaustive()
     }
 }
 
@@ -397,7 +484,7 @@ pub struct ParsedSSMC<H> {
     /// Where each chunk is stored. Unlike the encoded index, each `offset`
     /// is a position in the archive file, so a host can seek straight to
     /// it.
-    pub chunk_index: HashMap<H, ChunkLocation>,
+    pub chunk_index: ChunkMap<H, ChunkLocation>,
 }
 
 /// Holds the results of the initial file processing stage.

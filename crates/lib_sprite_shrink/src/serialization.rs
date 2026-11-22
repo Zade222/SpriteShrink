@@ -6,10 +6,7 @@
 //! chunk index, and the compressed data store, ensuring all components
 //! are correctly ordered and formatted.
 
-use std::{
-    cmp::Reverse,
-    collections::{HashMap, HashSet},
-};
+use std::cmp::Reverse;
 
 use bitcode::{Encode, encode};
 use dashmap::DashMap;
@@ -19,8 +16,8 @@ use crate::lib_error_handling::SpriteShrinkError;
 use crate::parsing::check_entry_name;
 use crate::lib_structs::{
     ALGORITHM_ZSTD, SSMC_UID,
-    CompressionResult, FileHeader, FileManifestParent,
-    SerializedData, SSMCFormatData, SSMCTocEntry
+    ChunkHasher, ChunkMap, ChunkSet, CompressionResult, FileHeader,
+    FileManifestParent, SerializedData, SSMCFormatData, SSMCTocEntry
 };
 
 #[derive(Error, Debug)]
@@ -142,7 +139,7 @@ where
         manifests.push(manifest);
     }
 
-    let mut chunk_freq = HashMap::new();
+    let mut chunk_freq = ChunkMap::default();
     for fmp in &manifests {
         for chunk in &fmp.chunk_metadata{
             *chunk_freq.entry(chunk.hash).or_insert(0) += 1;
@@ -166,7 +163,10 @@ where
 
     //chunk_freq has one entry per hash the files use.
     let mut sorted_hashes = Vec::with_capacity(chunk_freq.len());
-    let mut seen_hashes = HashSet::with_capacity(chunk_freq.len());
+    let mut seen_hashes = ChunkSet::with_capacity_and_hasher(
+        chunk_freq.len(),
+        ChunkHasher::default()
+    );
 
     /*Store the order of the chunks in order of the file with the most shared
     chunks to the least.*/
@@ -266,6 +266,8 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::lib_structs::SSAChunkMeta;
 

@@ -16,7 +16,7 @@ use std::{
 };
 
 use sha2::{Digest, Sha512};
-use sprite_shrink::{ChunkLocation, Hashable, IsCancelled};
+use sprite_shrink::{ChunkLocation, ChunkMap, Hashable, IsCancelled};
 use sprite_shrink_cd::{
     ContentBlock, CueSheet, DataChunkLayout, DiscManifest, DiscReconstructor,
     ExceptionRegistry, ExceptionTable, FileSizeProvider, SSMDIndices,
@@ -235,8 +235,8 @@ fn archive_files(bins: Vec<(&str, Vec<u8>)>, cue: &str) -> Archived {
     let mut stored = Vec::new();
     let mut source = Cursor::new(bin.clone());
     let mut indices = SSMDIndices {
-        chunk_index: HashMap::new(),
-        audio_block_index: HashMap::new(),
+        chunk_index: ChunkMap::default(),
+        audio_block_index: ChunkMap::default(),
         exception_index: Vec::new(),
     };
     let mut data_chunks = HashMap::new();
@@ -450,7 +450,7 @@ fn the_disc_reads_back_byte_for_byte() {
 
 /// Points the two lowest hashes in `index` at each other's stored data,
 /// which still decodes, but to the wrong bytes for its hash.
-fn swap_first_two(index: &mut HashMap<u64, ChunkLocation>) {
+fn swap_first_two(index: &mut ChunkMap<u64, ChunkLocation>) {
     let mut hashes: Vec<u64> = index.keys().copied().collect();
     hashes.sort_unstable();
     let (a, b) = (hashes[0], hashes[1]);
