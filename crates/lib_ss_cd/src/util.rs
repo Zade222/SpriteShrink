@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::VecDeque,
     error::Error as StdError,
     fmt::Display,
     thread,
@@ -13,7 +13,7 @@ use crate::{
 };
 
 use flume::Sender;
-use sprite_shrink::{ChunkDecompressor, ChunkLocation, Hashable};
+use sprite_shrink::{ChunkDecompressor, ChunkLocation, ChunkMap, Hashable};
 use thiserror::Error;
 
 
@@ -225,7 +225,7 @@ where
 pub fn spawn_audio_decomp_worker<'scope, 'env, H, R, E>(
     scope: &'scope Scope<'scope, 'env>,
     blocks: Vec<(H, usize)>,
-    audio_index: &'env HashMap<H, ChunkLocation>,
+    audio_index: &'env ChunkMap<H, ChunkLocation>,
     read_stored: &'env R,
     shared_state: SharedBuffer,
     max_buffer_size: usize,
@@ -275,7 +275,7 @@ where
 pub fn spawn_chunk_decomp_worker<'scope, 'env, H, R, E>(
     scope: &'scope thread::Scope<'scope, 'env>,
     chunks: Vec<(H, usize)>,
-    chunk_index: &'env HashMap<H, ChunkLocation>,
+    chunk_index: &'env ChunkMap<H, ChunkLocation>,
     dictionary: &'env [u8],
     read_stored: &'env R,
     shared_state: SharedBuffer,

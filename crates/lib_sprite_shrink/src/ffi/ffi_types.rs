@@ -12,7 +12,6 @@
 //!   allocating it before calling Rust and freeing it after Rust returns it.
 //! - Ensuring that all C-strings (`c_char*`) are null-terminated.
 
-use std::collections::HashMap;
 use std::{
     os::raw::c_void,
     slice,
@@ -29,8 +28,8 @@ use crate::lib_error_handling::{
 };
 
 use crate::lib_structs::{
-    ChunkLocation, FileHeader, FileManifestParent, SeekMetadata, SSAChunkMeta,
-    SSMCFormatData
+    ChunkLocation, ChunkMap, FileHeader, FileManifestParent, SeekMetadata,
+    SSAChunkMeta, SSMCFormatData
 };
 
 use crate::processing::Hashable;
@@ -283,7 +282,7 @@ pub type CallbackWriteData = Box<dyn FnMut(&[u8]) -> Result<(),
     SpriteShrinkError> + Send + Sync + 'static>;
 
 
-pub type ChunkIndexMap<H> = HashMap<H, ChunkLocation>;
+pub type ChunkIndexMap<H> = ChunkMap<H, ChunkLocation>;
 
 /// Arguments used by the `create_file_manifest_and_chunks_u64`
 /// and `create_file_manifest_and_chunks_u128`FFI functions.

@@ -6,7 +6,6 @@
 //! index. It also defines critical constants, such as the magic number
 //! and supported version, to ensure file integrity and compatibility.
 
-use std::collections::HashMap;
 
 use bitcode::{
     Decode, decode
@@ -19,8 +18,8 @@ use crate::processing::MAX_CHUNK_LEN;
 use crate::lib_structs::{
     SSMC_UID,
     HashType,
-    ChunkLocation, FileHeader, FileManifestParent, FileRegion, ParsedSSMC,
-    SSMCTocEntry, SSMCFormatData
+    ChunkLocation, ChunkMap, FileHeader, FileManifestParent, FileRegion,
+    ParsedSSMC, SSMCTocEntry, SSMCFormatData
 };
 
 #[derive(Error, Debug)]
@@ -277,7 +276,7 @@ where
 ///
 /// This function parses the binary data representing the chunk index,
 /// which maps each unique chunk hash to its `ChunkLocation`. It uses
-/// `bitcode` to decode the data into a `HashMap` for efficient lookups
+/// `bitcode` to decode the data into a [`ChunkMap`] for efficient lookups
 /// during file extraction.
 ///
 /// Offsets are returned as stored, relative to the format data's
@@ -290,18 +289,18 @@ where
 /// # Returns
 ///
 /// A `Result` which is:
-/// - `Ok(HashMap<u64, ChunkLocation>)` containing the parsed index.
+/// - `Ok(ChunkMap<H, ChunkLocation>)` containing the parsed index.
 /// - `Err(SpriteShrinkError)` if the byte slice cannot be decoded.
 pub fn parse_file_chunk_index<H>(
     chunk_index_data: &[u8]
-) -> Result<HashMap<H, ChunkLocation>, SpriteShrinkError>
+) -> Result<ChunkMap<H, ChunkLocation>, SpriteShrinkError>
 where
     for<'de> H: Eq + std::hash::Hash + Deserialize<'de> + Decode<'de>,
 {
     let bin_chunk_index: Vec<(H, ChunkLocation)> = decode(chunk_index_data)
         .map_err(|e| ParsingError::IndexDecodeError(e.to_string()))?;
 
-    let chunk_index: HashMap<H, ChunkLocation> = bin_chunk_index
+    let chunk_index: ChunkMap<H, ChunkLocation> = bin_chunk_index
         .into_iter()
         .collect();
 
@@ -483,7 +482,7 @@ where
         .bytes_in(prefix, "dictionary")?
         .to_vec();
 
-    let mut chunk_index: HashMap<H, ChunkLocation> = parse_file_chunk_index(
+    let mut chunk_index: ChunkMap<H, ChunkLocation> = parse_file_chunk_index(
         format_data.enc_chunk_index.bytes_in(prefix, "chunk index")?
     )?;
 

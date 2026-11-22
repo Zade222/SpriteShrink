@@ -1,13 +1,10 @@
-use std::{
-    collections::HashMap,
-    hash::Hash
-};
+use std::hash::Hash;
 use bitcode::{
     Decode, decode
 };
 use sprite_shrink::{
     MAX_CHUNK_LEN,
-    ChunkLocation, FileHeader, FileRegion, SpriteShrinkError,
+    ChunkLocation, ChunkMap, FileHeader, FileRegion, SpriteShrinkError,
     check_entry_name, parse_file_header
 };
 use thiserror::Error;
@@ -337,12 +334,12 @@ fn decode_location_index<H>(
     bytes: &[u8],
     base: u64,
     data: &str
-) -> Result<HashMap<H, ChunkLocation>, DecodeError>
+) -> Result<ChunkMap<H, ChunkLocation>, DecodeError>
 where
     for<'de> H: Eq + Decode<'de> + Hash
 {
     if bytes.is_empty() {
-        return Ok(HashMap::new());
+        return Ok(ChunkMap::default());
     }
 
     let stored: Vec<(H, ChunkLocation)> = decode_section(bytes, data)?;

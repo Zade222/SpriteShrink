@@ -1510,7 +1510,10 @@ mod tests {
         for dict in [dictionary(), &[]] {
             let compressed = compress(&[], dict, 3).unwrap();
             assert!(!compressed.is_empty(), "no zstd frame was written");
-            assert_eq!(decompress_chunk(&compressed, dict, 0).unwrap(), []);
+            assert_eq!(
+                decompress_chunk(&compressed, dict, 0).unwrap(),
+                Vec::<u8>::new()
+            );
         }
     }
 

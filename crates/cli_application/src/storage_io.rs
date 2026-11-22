@@ -7,7 +7,7 @@
 //! designed to be robust and provide clear error handling.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::BTreeMap,
     fmt::Display,
     fs::{self, File, OpenOptions, metadata, read_dir, remove_file},
     hash::Hash,
@@ -19,6 +19,7 @@ use std::{
 };
 
 use dashmap::DashMap;
+use sprite_shrink::ChunkMap;
 use directories::ProjectDirs;
 use tempfile::{Builder, NamedTempFile};
 use tracing::{
@@ -749,14 +750,14 @@ impl<H: Copy + Display + Eq + Hash + Ord + Send + Sync + 'static> TempCache<H> {
         let backend = if use_in_memory {
 
             CacheBackend::InMemory{
-                map: Arc::new(DashMap::new()),
+                map: Arc::new(DashMap::default()),
                 data_size: 0
             }
         } else {
             File::create(&file_path)?;
             CacheBackend::OnDisk {
                 file_path,
-                location_map: HashMap::new(),
+                location_map: ChunkMap::default(),
                 current_offset: 0,
             }
         };
