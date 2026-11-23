@@ -19,6 +19,8 @@ use fastcdc::v2020::{Chunk};
 use serde::{Deserialize, Serialize};
 use zerocopy::{Immutable, IntoBytes, FromBytes};
 
+use crate::parsing::CheckedManifest;
+
 use crate::{
     MAGIC_NUMBER, SUPPORTED_VERSION,
     lib_error_handling::SpriteShrinkError,
@@ -479,7 +481,9 @@ pub struct ParsedSSMC<H> {
     pub header:      FileHeader,
     pub format_data: SSMCFormatData,
     pub toc:         Vec<SSMCTocEntry>,
-    pub manifests:   Vec<FileManifestParent<H>>,
+    /// One per file, in table of contents order, each checked to describe
+    /// its file.
+    pub manifests:   Vec<CheckedManifest<H>>,
     pub dictionary:  Vec<u8>,
     /// Where each chunk is stored. Unlike the encoded index, each `offset`
     /// is a position in the archive file, so a host can seek straight to
@@ -546,9 +550,10 @@ pub enum Progress {
 
 /// Metadata describing a single chunk that must be read for a seek request.
 ///
-/// `SeekMetadata` is produced by [`get_seek_chunks`]. It contains the hash of
-/// the required chunk together with the byte range (relative to the start of
-/// that chunk) that should be copied after the chunk has been decompressed.
+/// `SeekMetadata` is produced by [`CheckedManifest::seek_chunks`]. It
+/// contains the hash of the required chunk together with the byte range
+/// (relative to the start of that chunk) that should be copied after the
+/// chunk has been decompressed.
 ///
 /// The `start_offset` is inclusive and the `end_offset` is exclusive,
 /// mirroring the semantics used throughout the library for slice ranges.

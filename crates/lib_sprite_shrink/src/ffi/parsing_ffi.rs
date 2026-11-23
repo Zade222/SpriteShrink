@@ -18,7 +18,9 @@ use crate::ffi::ffi_types::{
     U128Bytes,
 };
 use crate::lib_structs::{FileHeader, SSMCFormatData};
-use crate::parsing::{parse_file_header, parse_format_data, parse_ssmc_prefix};
+use crate::parsing::{
+    CheckedManifest, parse_file_header, parse_format_data, parse_ssmc_prefix
+};
 
 /// Parses a file header from a byte slice.
 ///
@@ -165,7 +167,11 @@ where
     /*The only fallible step comes first, so nothing has been handed out
     yet if it fails.*/
     let toc = toc_into_ffi(&parsed.toc)?;
-    let manifests = manifests_into_ffi::<H, F>(parsed.manifests);
+    let manifests = manifests_into_ffi::<H, F>(
+        parsed.manifests.into_iter()
+            .map(CheckedManifest::into_manifest)
+            .collect()
+    );
 
     let (toc_ptr, toc_len, toc_cap) = vec_into_raw_parts(toc);
     let (manifests_ptr, manifests_len, manifests_cap) =

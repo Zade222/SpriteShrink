@@ -94,6 +94,42 @@ pub struct ArchiveBuilderU64 { _private: [u8; 0] }
 #[repr(C)]
 pub struct ArchiveBuilderU128 { _private: [u8; 0] }
 
+/// An opaque handle to a file manifest with `u64` hashes that has been
+/// checked once, for planning seeks in it.
+///
+/// Made by [`checked_manifest_new_u64`], used by
+/// [`checked_manifest_seek_chunks_u64`], and freed by
+/// [`checked_manifest_free_u64`] exactly once. It holds its own copy of the
+/// manifest, so the host's manifest can be freed once it's made. Seeking
+/// only reads it, so several threads may seek with one handle at once.
+///
+/// [`checked_manifest_new_u64`]: crate::ffi::processing_ffi::checked_manifest_new_u64
+/// [`checked_manifest_seek_chunks_u64`]: crate::ffi::processing_ffi::checked_manifest_seek_chunks_u64
+/// [`checked_manifest_free_u64`]: crate::ffi::processing_ffi::checked_manifest_free_u64
+#[repr(C)]
+#[derive(Debug)]
+pub struct CheckedManifestU64 { _private: [u8; 0] }
+
+/// [`CheckedManifestU64`] for `u128` hashes, with the `_u128` functions.
+#[repr(C)]
+#[derive(Debug)]
+pub struct CheckedManifestU128 { _private: [u8; 0] }
+
+/// An opaque handle to a chunk decompressor: a Zstandard decoder with an
+/// archive's dictionary loaded, reused for every chunk it decodes.
+///
+/// Made by [`chunk_decompressor_new_c`], used by the
+/// `chunk_decompressor_decompress_*` functions, and freed by
+/// [`chunk_decompressor_free_c`] exactly once. Decoding changes its state,
+/// so a handle must not be used by two threads at once; give each thread
+/// its own.
+///
+/// [`chunk_decompressor_new_c`]: crate::ffi::archive_ffi::chunk_decompressor_new_c
+/// [`chunk_decompressor_free_c`]: crate::ffi::archive_ffi::chunk_decompressor_free_c
+#[repr(C)]
+#[derive(Debug)]
+pub struct FFIChunkDecompressor { _private: [u8; 0] }
+
 /// Bundles all parameters for creating a new `ArchiveBuilder` with `u64`
 /// hashes.
 ///
@@ -894,14 +930,14 @@ pub struct FFISeekChunkInfo<H> {
 /// An `FFISeekChunkInfo` specialized for `u64` hashes.
 ///
 /// This type is used in the `FFISeekInfoArrayU64` struct that is returned by
-/// [`get_seek_chunks_ffi_u64`], identifying a required chunk with a 64-bit
+/// `checked_manifest_seek_chunks_u64`, identifying a required chunk with a 64-bit
 /// hash.
 pub type FFISeekChunkInfoU64 = FFISeekChunkInfo<u64>;
 
 /// An `FFISeekChunkInfo` specialized for `u128` hashes.
 ///
 /// This type is used in the `FFISeekInfoArrayU64` struct that is returned by
-/// [`get_seek_chunks_ffi_u128`], identifying a required chunk with a 128-bit
+/// `checked_manifest_seek_chunks_u128`, identifying a required chunk with a 128-bit
 /// hash, represented on the FFI boundary as a [u8; 16] byte array in a
 /// U128Bytes struct.
 pub type FFISeekChunkInfoU128 = FFISeekChunkInfo<U128Bytes>;
@@ -921,7 +957,7 @@ impl<H: Hashable> From<SeekMetadata<H>> for FFISeekChunkInfo<H> {
 /// Holds the result of a file seek calculation, specifying which chunks are
 /// needed to reconstruct a requested byte range.
 ///
-/// This struct is returned by the `get_seek_chunks_ffi_*` functions. It
+/// This struct is returned by the `checked_manifest_seek_chunks_*` functions. It
 /// contains a complete list of all the chunks that must be read and
 /// decompressed to satisfy a seek request, along with the specific byte
 /// ranges to copy from each one.
@@ -954,7 +990,7 @@ pub struct FFISeekInfoArray<H> {
 
 /// An `FFISeekInfoArray` specialized for `u64` hashes.
 ///
-/// This type is returned by [`get_seek_chunks_ffi_u64`] and is the
+/// This type is returned by `checked_manifest_seek_chunks_u64` and is the
 /// expected input for [`free_seek_chunks_ffi_u64`]. It provides a complete
 /// list of all chunks and byte ranges required to fulfill a seek request where
 /// chunks are identified by 64-bit hashes.
@@ -962,7 +998,7 @@ pub type FFISeekInfoArrayU64 = FFISeekInfoArray<u64>;
 
 /// An `FFISeekInfoArray` specialized for `u128` hashes.
 ///
-/// This type is returned by [`get_seek_chunks_ffi_u128`] and is the
+/// This type is returned by `checked_manifest_seek_chunks_u128` and is the
 /// expected input for [`free_seek_chunks_ffi_u128`]. It provides a complete
 /// list of all chunks and byte ranges required to fulfill a seek request where
 /// chunks are identified by 128-bit hashes, represented on the FFI boundary

@@ -12,7 +12,7 @@ use std::{
 use bitcode::Encode;
 
 use crate::archive::{
-    ArchiveBuilder, ArchiveError,
+    ArchiveBuilder, ArchiveError, ChunkDecompressor,
     check_chunk_hash, decompress_chunk
 };
 use crate::ffi::ffi_error_handling::{
@@ -22,7 +22,7 @@ use crate::ffi::ffi_ownership::copy_host_chunks;
 use crate::ffi::ffi_types::{
     ArchiveBuilderU64, ArchiveBuilderU128,
     ArchiveBuilderArgsU64, ArchiveBuilderArgsU128,
-    FFIChunkDataArray, FFICompData,
+    FFIChunkDataArray, FFIChunkDecompressor, FFICompData,
     FFIProgress
 };
 use crate::lib_error_handling::{
@@ -95,13 +95,12 @@ where
     }
 }
 
-/// The buffers a host passes to the `decompress_chunk_*` functions.
+/// The input and output buffers a host passes to the chunk decompression
+/// functions.
 #[derive(Clone, Copy)]
 struct HostBuffers {
     comp: *const u8,
     comp_len: usize,
-    dict: *const u8,
-    dict_len: usize,
     out: *mut u8,
     out_len: usize,
 }
@@ -399,6 +398,22 @@ pub unsafe extern "C" fn archive_builder_new_u128(
     FFIResult::StatusOk
 }
 
+/// The `len` bytes at `ptr`, or `None` if `ptr` is null.
+///
+/// # Safety
+///
+/// A non-null `ptr` must point to `len` readable bytes that stay valid and
+/// unchanged for `'a`.
+unsafe fn host_bytes<'a>(ptr: *const u8, len: usize) -> Option<&'a [u8]> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: `ptr` is non-null (checked above), and the caller guarantees
+    // it points to `len` readable bytes valid for `'a`. `u8` has alignment
+    // 1, so any non-null pointer is aligned.
+    Some(unsafe { slice::from_raw_parts(ptr, len) })
+}
+
 /// Decompresses the chunk in `buffers` with `decompress` and copies the
 /// result into the host's output buffer. `decompress` gets the output
 /// buffer's length as its limit, so it never decodes more than fits.
@@ -407,16 +422,14 @@ pub unsafe extern "C" fn archive_builder_new_u128(
 /// # Safety
 ///
 /// Each non-null pointer in `buffers` must point to at least its length in
-/// bytes, readable for `comp` and `dict` and writable for `out`, for the
-/// whole call. `out` must not overlap `comp` or `dict`.
+/// bytes, readable for `comp` and writable for `out`, for the whole call.
+/// `out` must not overlap `comp`, or anything `decompress` reads.
 unsafe fn decompress_into(
     buffers: HostBuffers,
-    decompress: impl FnOnce(&[u8], &[u8], usize)
-        -> Result<Vec<u8>, SpriteShrinkError>,
+    decompress: impl FnOnce(&[u8], usize) -> Result<Vec<u8>, SpriteShrinkError>,
     on_error: impl FnOnce(SpriteShrinkError) -> FFIResult,
 ) -> FFIResult {
-    if buffers.comp.is_null() || buffers.dict.is_null() || buffers.out.is_null()
-    {
+    if buffers.comp.is_null() || buffers.out.is_null() {
         return FFIResult::NullArgument;
     }
 
@@ -424,19 +437,16 @@ unsafe fn decompress_into(
     // it points to `comp_len` readable bytes for the whole call. `u8` has
     // alignment 1, so any non-null pointer is aligned.
     let comp = unsafe { slice::from_raw_parts(buffers.comp, buffers.comp_len) };
-    // SAFETY: `dict` is non-null (checked above), and the caller guarantees
-    // it points to `dict_len` readable bytes for the whole call. `u8` has
-    // alignment 1, so any non-null pointer is aligned.
-    let dict = unsafe { slice::from_raw_parts(buffers.dict, buffers.dict_len) };
 
-    let data = match decompress(comp, dict, buffers.out_len) {
+    let data = match decompress(comp, buffers.out_len) {
         Ok(data) => data,
         Err(err) => return on_error(err),
     };
 
     // SAFETY: `out` is non-null (checked above), and the caller guarantees
     // it points to `out_len` writable bytes that don't overlap `comp` or
-    // `dict`, so this is the only reference to them. `u8` has alignment 1.
+    // anything `decompress` read, so this is the only reference to them.
+    // `u8` has alignment 1.
     let out = unsafe { slice::from_raw_parts_mut(buffers.out, buffers.out_len) };
     let Some(target) = out.get_mut(..data.len()) else {
         return FFIResult::BufferTooSmall;
@@ -522,11 +532,15 @@ pub unsafe extern "C" fn decompress_chunk_c(
     data_out_ptr: *mut u8,
     data_out_len: usize
 ) -> FFIResult {
+    // SAFETY: the caller guarantees a non-null `dictionary_ptr` points to
+    // `dictionary_len` readable bytes for the whole call.
+    let Some(dict) = (unsafe { host_bytes(dictionary_ptr, dictionary_len) })
+    else {
+        return FFIResult::NullArgument;
+    };
     let buffers = HostBuffers {
         comp: comp_chunk_data_ptr,
         comp_len: comp_chunk_data_len,
-        dict: dictionary_ptr,
-        dict_len: dictionary_len,
         out: data_out_ptr,
         out_len: data_out_len,
     };
@@ -535,12 +549,23 @@ pub unsafe extern "C" fn decompress_chunk_c(
     // output doesn't overlap the inputs, which is what `decompress_into`
     // needs. It checks for null itself.
     unsafe {
-        decompress_into(buffers, decompress_chunk, |err| match err {
-            SpriteShrinkError::Archive(ArchiveError::ChunkTooLong { .. }) => {
-                FFIResult::BufferTooSmall
-            }
-            _ => FFIResult::InternalError,
-        })
+        decompress_into(
+            buffers,
+            |comp, max_len| decompress_chunk(comp, dict, max_len),
+            |err| unchecked_status(&err),
+        )
+    }
+}
+
+/// The status for an error from decompressing a chunk without checking
+/// its hash: one too long for the output buffer is `BufferTooSmall`, any
+/// other `InternalError`.
+fn unchecked_status(err: &SpriteShrinkError) -> FFIResult {
+    match err {
+        SpriteShrinkError::Archive(ArchiveError::ChunkTooLong { .. }) => {
+            FFIResult::BufferTooSmall
+        }
+        _ => FFIResult::InternalError,
     }
 }
 
@@ -577,11 +602,15 @@ pub unsafe extern "C" fn decompress_chunk_checked_c_u64(
     data_out_ptr: *mut u8,
     data_out_len: usize
 ) -> FFIResult {
+    // SAFETY: the caller guarantees a non-null `dictionary_ptr` points to
+    // `dictionary_len` readable bytes for the whole call.
+    let Some(dict) = (unsafe { host_bytes(dictionary_ptr, dictionary_len) })
+    else {
+        return FFIResult::NullArgument;
+    };
     let buffers = HostBuffers {
         comp: comp_chunk_data_ptr,
         comp_len: comp_chunk_data_len,
-        dict: dictionary_ptr,
-        dict_len: dictionary_len,
         out: data_out_ptr,
         out_len: data_out_len,
     };
@@ -592,7 +621,7 @@ pub unsafe extern "C" fn decompress_chunk_checked_c_u64(
     unsafe {
         decompress_into(
             buffers,
-            |comp, dict, max_len| {
+            |comp, max_len| {
                 let data = decompress_chunk(comp, dict, max_len)?;
                 check_chunk_hash(&data, expected_hash)?;
                 Ok(data)
@@ -641,11 +670,15 @@ pub unsafe extern "C" fn decompress_chunk_checked_c_u128(
     // caller guarantees it points to 16 readable bytes.
     let expected_hash = unsafe { read_u128_hash(expected_hash_ptr) };
 
+    // SAFETY: the caller guarantees a non-null `dictionary_ptr` points to
+    // `dictionary_len` readable bytes for the whole call.
+    let Some(dict) = (unsafe { host_bytes(dictionary_ptr, dictionary_len) })
+    else {
+        return FFIResult::NullArgument;
+    };
     let buffers = HostBuffers {
         comp: comp_chunk_data_ptr,
         comp_len: comp_chunk_data_len,
-        dict: dictionary_ptr,
-        dict_len: dictionary_len,
         out: data_out_ptr,
         out_len: data_out_len,
     };
@@ -656,7 +689,7 @@ pub unsafe extern "C" fn decompress_chunk_checked_c_u128(
     unsafe {
         decompress_into(
             buffers,
-            |comp, dict, max_len| {
+            |comp, max_len| {
                 let data = decompress_chunk(comp, dict, max_len)?;
                 check_chunk_hash(&data, expected_hash)?;
                 Ok(data)
@@ -664,6 +697,272 @@ pub unsafe extern "C" fn decompress_chunk_checked_c_u128(
             FFIResult::from,
         )
     }
+}
+
+/// Makes a chunk decompressor: a Zstandard decoder with `dictionary`
+/// loaded, for decoding many chunks without setting one up for each (see
+/// `ChunkDecompressor`). The dictionary is copied, so the host may free it
+/// once this returns.
+///
+/// # Returns
+///
+/// * `FFIResult::StatusOk`, with the handle written to `out_handle`.
+/// * `FFIResult::NullArgument` if `dictionary_ptr` or `out_handle` is null.
+///   An archive without a dictionary passes a non-null pointer and a
+///   length of 0.
+/// * The status for the error if zstd can't load the dictionary (such as
+///   `FFIResult::IoError`).
+///
+/// # Safety
+///
+/// - A non-null `dictionary_ptr` must point to `dictionary_len` readable
+///   bytes for the whole call.
+/// - `out_handle` must point to writable memory for one pointer.
+/// - The handle written to `out_handle` is owned by the caller and must be
+///   passed to `chunk_decompressor_free_c` exactly once. One thread at a
+///   time may use it.
+#[unsafe(no_mangle)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks a function SPRITE_SHRINK_MUST_USE in the C \
+              header only if it has #[must_use]"
+)]
+#[must_use]
+pub unsafe extern "C" fn chunk_decompressor_new_c(
+    dictionary_ptr: *const u8,
+    dictionary_len: usize,
+    out_handle: *mut *mut FFIChunkDecompressor,
+) -> FFIResult {
+    if out_handle.is_null() {
+        return FFIResult::NullArgument;
+    }
+    // SAFETY: the caller guarantees a non-null `dictionary_ptr` points to
+    // `dictionary_len` readable bytes for the whole call.
+    let Some(dict) = (unsafe { host_bytes(dictionary_ptr, dictionary_len) })
+    else {
+        return FFIResult::NullArgument;
+    };
+
+    let decompressor = match ChunkDecompressor::new(dict) {
+        Ok(decompressor) => decompressor,
+        Err(e) => return e.into(),
+    };
+    let handle = Box::into_raw(Box::new(decompressor))
+        .cast::<FFIChunkDecompressor>();
+    // SAFETY: `out_handle` is non-null (checked above), and the caller
+    // guarantees it points to writable memory for one pointer.
+    unsafe { out_handle.write(handle) };
+    FFIResult::StatusOk
+}
+
+/// The decompressor behind `handle`, or `None` if it's null.
+///
+/// # Safety
+///
+/// A non-null `handle` must come from `chunk_decompressor_new_c`, not be
+/// freed, and not be in use anywhere else for `'a`.
+unsafe fn decompressor_from<'a>(
+    handle: *mut FFIChunkDecompressor
+) -> Option<&'a mut ChunkDecompressor> {
+    if handle.is_null() {
+        return None;
+    }
+    // SAFETY: `handle` is non-null (checked above), and the caller
+    // guarantees it points to the live `ChunkDecompressor` that
+    // `chunk_decompressor_new_c` boxed, with no other reference to it for
+    // `'a`, so a unique reference is sound.
+    Some(unsafe { &mut *handle.cast::<ChunkDecompressor>() })
+}
+
+/// Decompresses a chunk like `decompress_chunk_c`, with the handle's
+/// dictionary and decoder.
+///
+/// # Safety
+///
+/// The same as `decompress_chunk_c` for the chunk and output buffers, and
+/// `handle` must come from `chunk_decompressor_new_c`, not have been freed,
+/// and not be in use on another thread.
+///
+/// # Return Value
+///
+/// The statuses of `decompress_chunk_c`; a null `handle` returns
+/// `FFIResult::NullArgument`.
+#[unsafe(no_mangle)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks a function SPRITE_SHRINK_MUST_USE in the C \
+              header only if it has #[must_use]"
+)]
+#[must_use]
+pub unsafe extern "C" fn chunk_decompressor_decompress_c(
+    handle: *mut FFIChunkDecompressor,
+    comp_chunk_data_ptr: *const u8,
+    comp_chunk_data_len: usize,
+    data_out_ptr: *mut u8,
+    data_out_len: usize
+) -> FFIResult {
+    // SAFETY: the caller guarantees a non-null `handle` came from
+    // `chunk_decompressor_new_c`, isn't freed, and isn't in use on another
+    // thread during this call.
+    let Some(decompressor) = (unsafe { decompressor_from(handle) }) else {
+        return FFIResult::NullArgument;
+    };
+    let buffers = HostBuffers {
+        comp: comp_chunk_data_ptr,
+        comp_len: comp_chunk_data_len,
+        out: data_out_ptr,
+        out_len: data_out_len,
+    };
+    // SAFETY: the caller guarantees each non-null pointer points to its
+    // length in bytes (readable, or writable for the output) and that the
+    // output doesn't overlap the input, which is what `decompress_into`
+    // needs. It checks for null itself.
+    unsafe {
+        decompress_into(
+            buffers,
+            |comp, max_len| decompressor.decompress(comp, max_len),
+            |err| unchecked_status(&err),
+        )
+    }
+}
+
+/// Decompresses a chunk like `decompress_chunk_checked_c_u64`, with the
+/// handle's dictionary and decoder.
+///
+/// # Safety
+///
+/// The same as `chunk_decompressor_decompress_c`.
+///
+/// # Return Value
+///
+/// The statuses of `decompress_chunk_checked_c_u64`; a null `handle`
+/// returns `FFIResult::NullArgument`.
+#[unsafe(no_mangle)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks a function SPRITE_SHRINK_MUST_USE in the C \
+              header only if it has #[must_use]"
+)]
+#[must_use]
+pub unsafe extern "C" fn chunk_decompressor_decompress_checked_c_u64(
+    handle: *mut FFIChunkDecompressor,
+    comp_chunk_data_ptr: *const u8,
+    comp_chunk_data_len: usize,
+    expected_hash: u64,
+    data_out_ptr: *mut u8,
+    data_out_len: usize
+) -> FFIResult {
+    // SAFETY: the caller guarantees a non-null `handle` came from
+    // `chunk_decompressor_new_c`, isn't freed, and isn't in use on another
+    // thread during this call.
+    let Some(decompressor) = (unsafe { decompressor_from(handle) }) else {
+        return FFIResult::NullArgument;
+    };
+    let buffers = HostBuffers {
+        comp: comp_chunk_data_ptr,
+        comp_len: comp_chunk_data_len,
+        out: data_out_ptr,
+        out_len: data_out_len,
+    };
+    // SAFETY: the caller guarantees each non-null pointer points to its
+    // length in bytes (readable, or writable for the output) and that the
+    // output doesn't overlap the input, which is what `decompress_into`
+    // needs. It checks for null itself.
+    unsafe {
+        decompress_into(
+            buffers,
+            |comp, max_len| {
+                let data = decompressor.decompress(comp, max_len)?;
+                check_chunk_hash(&data, expected_hash)?;
+                Ok(data)
+            },
+            FFIResult::from,
+        )
+    }
+}
+
+/// Decompresses a chunk like `decompress_chunk_checked_c_u128`, with the
+/// handle's dictionary and decoder.
+///
+/// # Safety
+///
+/// The same as `chunk_decompressor_decompress_c`, and `expected_hash_ptr`
+/// must point to 16 readable bytes.
+///
+/// # Return Value
+///
+/// The statuses of `decompress_chunk_checked_c_u128`; a null `handle`
+/// returns `FFIResult::NullArgument`.
+#[unsafe(no_mangle)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks a function SPRITE_SHRINK_MUST_USE in the C \
+              header only if it has #[must_use]"
+)]
+#[must_use]
+pub unsafe extern "C" fn chunk_decompressor_decompress_checked_c_u128(
+    handle: *mut FFIChunkDecompressor,
+    comp_chunk_data_ptr: *const u8,
+    comp_chunk_data_len: usize,
+    expected_hash_ptr: *const u8,
+    data_out_ptr: *mut u8,
+    data_out_len: usize
+) -> FFIResult {
+    if expected_hash_ptr.is_null() {
+        return FFIResult::NullArgument;
+    }
+    // SAFETY: `expected_hash_ptr` is non-null (checked above), and the
+    // caller guarantees it points to 16 readable bytes.
+    let expected_hash = unsafe { read_u128_hash(expected_hash_ptr) };
+
+    // SAFETY: the caller guarantees a non-null `handle` came from
+    // `chunk_decompressor_new_c`, isn't freed, and isn't in use on another
+    // thread during this call.
+    let Some(decompressor) = (unsafe { decompressor_from(handle) }) else {
+        return FFIResult::NullArgument;
+    };
+    let buffers = HostBuffers {
+        comp: comp_chunk_data_ptr,
+        comp_len: comp_chunk_data_len,
+        out: data_out_ptr,
+        out_len: data_out_len,
+    };
+    // SAFETY: the caller guarantees each non-null pointer points to its
+    // length in bytes (readable, or writable for the output) and that the
+    // output doesn't overlap the input, which is what `decompress_into`
+    // needs. It checks for null itself.
+    unsafe {
+        decompress_into(
+            buffers,
+            |comp, max_len| {
+                let data = decompressor.decompress(comp, max_len)?;
+                check_chunk_hash(&data, expected_hash)?;
+                Ok(data)
+            },
+            FFIResult::from,
+        )
+    }
+}
+
+/// Frees a handle from `chunk_decompressor_new_c`. A null handle is
+/// ignored.
+///
+/// # Safety
+///
+/// A non-null `handle` must come from `chunk_decompressor_new_c`, not have
+/// been freed already, and not be in use. It must not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn chunk_decompressor_free_c(
+    handle: *mut FFIChunkDecompressor
+) {
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: `handle` is non-null (checked above), and the caller
+    // guarantees it came from `Box::into_raw` of a `ChunkDecompressor` in
+    // `chunk_decompressor_new_c` that hasn't been freed and isn't in use,
+    // so taking the box back is sound and frees it once.
+    drop(unsafe { Box::from_raw(handle.cast::<ChunkDecompressor>()) });
 }
 
 /// A generic helper to safely update the internal state of an
@@ -1252,31 +1551,25 @@ mod tests {
 
     use super::*;
 
-    /// Buffers over `comp`, `dict` and `out`.
-    fn buffers(comp: &[u8], dict: &[u8], out: &mut [u8]) -> HostBuffers {
+    /// Buffers over `comp` and `out`.
+    fn buffers(comp: &[u8], out: &mut [u8]) -> HostBuffers {
         HostBuffers {
             comp: comp.as_ptr(),
             comp_len: comp.len(),
-            dict: dict.as_ptr(),
-            dict_len: dict.len(),
             out: out.as_mut_ptr(),
             out_len: out.len(),
         }
     }
 
     /// A stand-in for zstd, which Miri can't run: returns the compressed
-    /// bytes followed by the dictionary.
+    /// bytes followed by `d`.
     #[expect(
         clippy::unnecessary_wraps,
         reason = "it stands in for a decompress function, which returns a \
                   Result"
     )]
-    fn concat(
-        comp: &[u8],
-        dict: &[u8],
-        _max_len: usize,
-    ) -> Result<Vec<u8>, SpriteShrinkError> {
-        Ok([comp, dict].concat())
+    fn concat(comp: &[u8], _max_len: usize) -> Result<Vec<u8>, SpriteShrinkError> {
+        Ok([comp, b"d"].concat())
     }
 
     #[test]
@@ -1286,7 +1579,7 @@ mod tests {
         // length, and `out` is a separate array.
         let status = unsafe {
             decompress_into(
-                buffers(b"abc", b"d", &mut out),
+                buffers(b"abc", &mut out),
                 concat,
                 |_err| FFIResult::InternalError,
             )
@@ -1302,8 +1595,8 @@ mod tests {
         // length, and `out` is a separate array.
         let status = unsafe {
             decompress_into(
-                buffers(b"abc", b"d", &mut out),
-                |_comp, _dict, max_len| {
+                buffers(b"abc", &mut out),
+                |_comp, max_len| {
                     assert_eq!(max_len, 5);
                     Ok(Vec::new())
                 },
@@ -1320,7 +1613,7 @@ mod tests {
         // length, and `out` is a separate array.
         let status = unsafe {
             decompress_into(
-                buffers(b"abc", b"d", &mut out),
+                buffers(b"abc", &mut out),
                 concat,
                 |_err| FFIResult::InternalError,
             )
@@ -1336,8 +1629,8 @@ mod tests {
         // length, and `out` is a separate array.
         let status = unsafe {
             decompress_into(
-                buffers(b"abc", b"d", &mut out),
-                |_comp, _dict, _max_len| Err(SpriteShrinkError::Cancelled),
+                buffers(b"abc", &mut out),
+                |_comp, _max_len| Err(SpriteShrinkError::Cancelled),
                 FFIResult::from,
             )
         };
@@ -1347,26 +1640,40 @@ mod tests {
 
     #[test]
     fn empty_buffers_are_read_as_empty_slices() {
-        // An archive without a dictionary has an empty one, and an empty
-        // chunk decompresses to nothing.
+        // An empty chunk decompresses to nothing.
         let mut out = [0xEE_u8; 0];
-        // SAFETY: every pointer comes from a live local slice; all three
-        // are empty, so no bytes are read or written.
+        // SAFETY: both pointers come from live local slices; both are
+        // empty, so no bytes are read or written.
         let status = unsafe {
-            decompress_into(buffers(b"", b"", &mut out), concat, |_err| {
-                FFIResult::InternalError
-            })
+            decompress_into(
+                buffers(b"", &mut out),
+                |_comp, _max_len| Ok(Vec::new()),
+                |_err| FFIResult::InternalError,
+            )
         };
         assert!(matches!(status, FFIResult::StatusOk));
     }
 
     #[test]
+    fn host_bytes_reads_a_buffer_and_rejects_null() {
+        // SAFETY: a static of 4 readable bytes.
+        let dict = unsafe { host_bytes(b"dict".as_ptr(), 4) };
+        assert_eq!(dict, Some(&b"dict"[..]));
+        // An archive without a dictionary passes an empty one.
+        // SAFETY: a non-null pointer to an empty static; no bytes are read.
+        let empty = unsafe { host_bytes(b"".as_ptr(), 0) };
+        assert_eq!(empty, Some(&b""[..]));
+        // SAFETY: null, which `host_bytes` checks before reading.
+        let null = unsafe { host_bytes(ptr::null(), 4) };
+        assert_eq!(null, None);
+    }
+
+    #[test]
     fn each_null_buffer_is_rejected_before_decompressing() {
         let mut out = [0_u8; 4];
-        let valid = buffers(b"abc", b"d", &mut out);
+        let valid = buffers(b"abc", &mut out);
         let nulled = [
             HostBuffers { comp: ptr::null(), ..valid },
-            HostBuffers { dict: ptr::null(), ..valid },
             HostBuffers { out: ptr::null_mut(), ..valid },
         ];
         for buffers in nulled {
@@ -1375,7 +1682,7 @@ mod tests {
             let status = unsafe {
                 decompress_into(
                     buffers,
-                    |_comp, _dict, _max_len| {
+                    |_comp, _max_len| {
                         panic!("decompressed with a null buffer")
                     },
                     |_err| FFIResult::InternalError,

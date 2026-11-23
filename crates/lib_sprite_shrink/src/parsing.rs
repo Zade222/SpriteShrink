@@ -308,26 +308,57 @@ where
 }
 
 
-/// Checks that a file manifest's chunks describe one file, in order: the
-/// manifest holds `chunk_count` chunks, the first starts at byte 0, and
-/// each later one starts where the one before it ends. Returns the file's
-/// size.
+/// A file manifest whose chunks have been checked to describe one file, in
+/// order, with the size they add up to.
 ///
-/// Readers pick chunks by their offsets, so a gap, an overlap or an offset
-/// out of order would make them return the wrong bytes.
+/// The check: the manifest holds `chunk_count` chunks, the first starts at
+/// byte 0, and each later one starts where the one before it ends. Readers
+/// pick chunks by their offsets, so a gap, an overlap or an offset out of
+/// order would make them return the wrong bytes. Seek planning
+/// ([`CheckedManifest::seek_chunks`]) takes this type, so the check runs
+/// once, when it's made, rather than on every seek.
 ///
-/// # Errors
-///
-/// Returns `ParsingError::InvalidManifest` saying which rule the manifest
-/// breaks.
-pub(crate) fn check_manifest<H>(
-    manifest: &FileManifestParent<H>
-) -> Result<u64, ParsingError> {
-    manifest_size(manifest).map_err(ParsingError::InvalidManifest)
+/// [`parse_ssmc_prefix`] returns its manifests already checked.
+#[derive(Clone, Debug)]
+pub struct CheckedManifest<H> {
+    manifest: FileManifestParent<H>,
+    size: u64,
 }
 
-/// [`check_manifest`], with the problem as text, so a caller can add which
-/// file it's in.
+impl<H> CheckedManifest<H> {
+    /// Checks `manifest` and keeps it with its size.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ParsingError::InvalidManifest` saying which rule the
+    /// manifest breaks.
+    pub fn new(manifest: FileManifestParent<H>) -> Result<Self, SpriteShrinkError> {
+        let size = manifest_size(&manifest)
+            .map_err(ParsingError::InvalidManifest)?;
+        Ok(Self { manifest, size })
+    }
+
+    /// The manifest.
+    #[must_use]
+    pub fn manifest(&self) -> &FileManifestParent<H> {
+        &self.manifest
+    }
+
+    /// The size of the file the manifest describes, in bytes.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// The manifest, giving up the proof that it was checked.
+    #[must_use]
+    pub fn into_manifest(self) -> FileManifestParent<H> {
+        self.manifest
+    }
+}
+
+/// Checks a manifest as [`CheckedManifest::new`] does and returns its
+/// size, or the problem as text, so a caller can add which file it's in.
 fn manifest_size<H>(manifest: &FileManifestParent<H>) -> Result<u64, String> {
     let listed = manifest.chunk_metadata.len();
     if usize::try_from(manifest.chunk_count) != Ok(listed) {
@@ -406,7 +437,8 @@ pub fn parse_format_data(
 /// Returns a `ParsingError` if the header is invalid or isn't for an SSMC
 /// archive, a section lies outside `prefix`, a section fails to decode, a
 /// file manifest lists a chunk longer than `MAX_CHUNK_LEN`, a manifest
-/// fails [`check_manifest`] or disagrees with its table of contents entry
+/// fails the check [`CheckedManifest::new`] makes or disagrees with its
+/// table of contents entry
 /// (`InvalidManifest`), or a chunk's absolute offset doesn't fit in a
 /// `u64`.
 pub fn parse_ssmc_prefix<H>(
@@ -455,7 +487,8 @@ where
             toc.len()
         )).into());
     }
-    for (index, (manifest, entry)) in manifests.iter().zip(&toc).enumerate() {
+    let mut checked = Vec::with_capacity(manifests.len());
+    for (index, (manifest, entry)) in manifests.into_iter().zip(&toc).enumerate() {
         let file = index + 1;
         /*Readers size their chunk buffers from these lengths, so a damaged
         manifest could otherwise ask for gigabytes.*/
@@ -466,7 +499,7 @@ where
             return Err(ParsingError::ChunkTooLong { file, length }.into());
         }
 
-        let size = manifest_size(manifest).map_err(|problem| {
+        let size = manifest_size(&manifest).map_err(|problem| {
             ParsingError::InvalidManifest(format!("file {file}: {problem}"))
         })?;
         if size != entry.uncompressed_size {
@@ -476,6 +509,7 @@ where
                 entry.uncompressed_size
             )).into());
         }
+        checked.push(CheckedManifest { manifest, size });
     }
 
     let dictionary = format_data.data_dictionary
@@ -500,7 +534,7 @@ where
         header,
         format_data,
         toc,
-        manifests,
+        manifests: checked,
         dictionary,
         chunk_index,
     })

@@ -24,16 +24,18 @@ use sprite_shrink_test_support::assert_bytes_eq;
 use sprite_shrink::{
     ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, MAX_WINDOW_SIZE,
     MIN_WINDOW_SIZE, SSMC_UID, SUPPORTED_VERSION,
-    ArchiveBuilder, ChunkLocation, CompressionResult, FileData, FileHeader,
-    FileManifestParent, Hashable, ParsedSSMC, SSAChunkMeta, SSMCFormatData,
-    SSMCTocEntry, SerializedData, SpriteShrinkError, build_ssmc_prefix,
-    create_file_manifest_and_chunks, get_seek_chunks, parse_file_header,
+    ArchiveBuilder, CheckedManifest, ChunkLocation, CompressionResult,
+    FileData, FileHeader, FileManifestParent, Hashable, ParsedSSMC,
+    SSAChunkMeta, SSMCFormatData, SSMCTocEntry, SerializedData, SpriteShrinkError,
+    build_ssmc_prefix, create_file_manifest_and_chunks, parse_file_header,
     parse_ssmc_prefix, process_file_in_memory, serialize_uncompressed_data,
     test_compression,
     ffi::{
         ArchiveBuilderArgsU64, ArchiveBuilderArgsU128, ArchiveBuilderU64,
-        ArchiveBuilderU128, CreateFileManifestAndChunksArgs,
-        FFICallbackStatus, FFIChunkDataArray, FFIChunkLocation, FFICompData,
+        ArchiveBuilderU128, CheckedManifestU64, CheckedManifestU128,
+        CreateFileManifestAndChunksArgs,
+        FFICallbackStatus, FFIChunkDataArray, FFIChunkDecompressor,
+        FFIChunkLocation, FFICompData,
         FFIFileData, FFIFileManifestChunks,
         FFIFileManifestParent, FFIParsedSSMC, FFIProgress, FFIProgressType,
         FFISSAChunkMeta, FFISeekInfoArray,
@@ -54,6 +56,13 @@ use sprite_shrink::{
         archive_builder_set_optimize_dictionary_u128,
         archive_builder_set_worker_count_u64,
         archive_builder_set_worker_count_u128, archive_data_free,
+        checked_manifest_free_u64, checked_manifest_free_u128,
+        checked_manifest_new_u64, checked_manifest_new_u128,
+        checked_manifest_seek_chunks_u64, checked_manifest_seek_chunks_u128,
+        chunk_decompressor_decompress_c,
+        chunk_decompressor_decompress_checked_c_u64,
+        chunk_decompressor_decompress_checked_c_u128,
+        chunk_decompressor_free_c, chunk_decompressor_new_c,
         build_ssmc_prefix_u64, build_ssmc_prefix_u128,
         create_file_manifest_and_chunks_u64,
         create_file_manifest_and_chunks_u128, decompress_chunk_c,
@@ -64,7 +73,7 @@ use sprite_shrink::{
         free_parsed_ssmc_u64, free_parsed_ssmc_u128,
         free_seek_chunks_u64, free_seek_chunks_u128,
         free_serialized_output_u64, free_serialized_output_u128,
-        free_ssmc_prefix, get_seek_chunks_u64, get_seek_chunks_u128,
+        free_ssmc_prefix,
         lookup_chunk_location_u64,
         lookup_chunk_location_u128, parse_file_header_ffi,
         parse_format_data_ffi, parse_ssmc_prefix_u64, parse_ssmc_prefix_u128,
@@ -865,7 +874,10 @@ unsafe fn assert_parsed_matches_rust<F, H>(
     let manifests: Vec<FileManifestParent<H>> = unsafe {
         read_manifests(parsed.manifests_ptr, parsed.manifests_len)
     };
-    assert_eq!(encode(&manifests), encode(&rust.manifests));
+    let rust_manifests: Vec<FileManifestParent<H>> = rust.manifests.iter()
+        .map(|checked| checked.manifest().clone())
+        .collect();
+    assert_eq!(encode(&manifests), encode(&rust_manifests));
     // SAFETY: the library wrote `dictionary_len` bytes at `dictionary_ptr`,
     // and `parsed` hasn't been freed.
     let dictionary = unsafe {
@@ -2074,6 +2086,94 @@ fn decompressing_into_a_buffer_one_byte_short_writes_nothing() {
     assert!(out.iter().all(|&byte| byte == 0xEE));
 }
 
+/// Makes a chunk decompressor handle with no dictionary, which must
+/// succeed.
+fn new_decompressor() -> *mut FFIChunkDecompressor {
+    let mut handle = ptr::null_mut();
+    // SAFETY: an empty, non-null dictionary, and `handle` is a local.
+    let status = unsafe { chunk_decompressor_new_c(b"".as_ptr(), 0, &raw mut handle) };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+    handle
+}
+
+/// One handle decodes chunk after chunk with each decompress export, and
+/// keeps working after a chunk fails.
+#[test]
+#[cfg_attr(miri, ignore = "zstd is C code, which Miri can't run")]
+fn one_chunk_decompressor_handle_decodes_chunk_after_chunk() {
+    let first = vec![1_u8; 3000];
+    let second: Vec<u8> = (0..5000_u32).map(|n| (n * 7 % 251) as u8).collect();
+    let (comp_first, comp_second) = (
+        zstd::bulk::compress(&first, 3).unwrap(),
+        zstd::bulk::compress(&second, 3).unwrap(),
+    );
+    let handle = new_decompressor();
+
+    let unchecked = |comp: &[u8], out: &mut [u8]| {
+        // SAFETY: `handle` is live and used by this thread only; each
+        // pointer covers its slice, and `out` is a separate buffer.
+        unsafe {
+            chunk_decompressor_decompress_c(
+                handle, comp.as_ptr(), comp.len(), out.as_mut_ptr(), out.len()
+            )
+        }
+    };
+    let checked_u64 = |comp: &[u8], hash: u64, out: &mut [u8]| {
+        // SAFETY: as above.
+        unsafe {
+            chunk_decompressor_decompress_checked_c_u64(
+                handle, comp.as_ptr(), comp.len(), hash, out.as_mut_ptr(), out.len()
+            )
+        }
+    };
+    let checked_u128 = |comp: &[u8], hash: u128, out: &mut [u8]| {
+        let key = hash.to_le_bytes();
+        // SAFETY: as above, and `key` is 16 readable bytes.
+        unsafe {
+            chunk_decompressor_decompress_checked_c_u128(
+                handle, comp.as_ptr(), comp.len(), key.as_ptr(),
+                out.as_mut_ptr(), out.len()
+            )
+        }
+    };
+    let ok = status_code(FFIStatus::StatusOk);
+
+    let mut out = vec![0_u8; first.len()];
+    assert_eq!(status_code(unchecked(&comp_first, &mut out)), ok);
+    assert_eq!(out, first);
+
+    let mut out = vec![0_u8; second.len()];
+    let second_u64 = u64::from_bytes_with_seed(&second);
+    assert_eq!(status_code(checked_u64(&comp_second, second_u64, &mut out)), ok);
+    assert_eq!(out, second);
+
+    // The wrong hash, then bytes that aren't a zstd frame: both fail and
+    // write nothing.
+    let mut out = vec![0xEE_u8; first.len()];
+    assert_eq!(
+        status_code(checked_u64(&comp_first, second_u64, &mut out)),
+        status_code(FFIStatus::VerificationHashMismatch)
+    );
+    assert_ne!(status_code(checked_u64(&[0xFF; 16], 0, &mut out)), ok);
+    assert!(out.iter().all(|&byte| byte == 0xEE));
+
+    // The handle still decodes after those failures.
+    let mut out = vec![0_u8; second.len()];
+    let second_u128 = u128::from_bytes_with_seed(&second);
+    assert_eq!(status_code(checked_u128(&comp_second, second_u128, &mut out)), ok);
+    assert_eq!(out, second);
+
+    let mut short = vec![0xEE_u8; second.len() - 1];
+    assert_eq!(
+        status_code(unchecked(&comp_second, &mut short)),
+        status_code(FFIStatus::BufferTooSmall)
+    );
+    assert!(short.iter().all(|&byte| byte == 0xEE));
+
+    // SAFETY: `handle` came from `new_decompressor` and is freed once.
+    unsafe { chunk_decompressor_free_c(handle) };
+}
+
 #[test]
 fn checked_decompress_rejects_each_null_pointer() {
     let compressed = [0_u8; 4];
@@ -2127,40 +2227,80 @@ fn ffi_round_trip_u128_extracts_original_files() {
 const SEEK_HASHES_U64: [u64; 3] = [1, u64::MAX, 7];
 const SEEK_HASHES_U128: [u128; 3] = [1, u128::MAX, 7];
 
-/// `get_seek_chunks` as a C host calls it.
-type GetSeek<F> = unsafe extern "C" fn(
-    *const FFIFileManifestParent<F>,
-    u64,
-    u64,
-    *mut *mut FFISeekInfoArray<F>,
-) -> FFIStatus;
+/// The seek exports for one hash width, as a C host calls them.
+struct SeekApi<F, Handle> {
+    new: unsafe extern "C" fn(
+        *const FFIFileManifestParent<F>,
+        *mut *mut Handle,
+    ) -> FFIStatus,
+    seek: unsafe extern "C" fn(
+        *const Handle,
+        u64,
+        u64,
+        *mut *mut FFISeekInfoArray<F>,
+    ) -> FFIStatus,
+    free_array: unsafe extern "C" fn(*mut FFISeekInfoArray<F>),
+    free_handle: unsafe extern "C" fn(*mut Handle),
+}
+
+const SEEK_API_U64: SeekApi<u64, CheckedManifestU64> = SeekApi {
+    new: checked_manifest_new_u64,
+    seek: checked_manifest_seek_chunks_u64,
+    free_array: free_seek_chunks_u64,
+    free_handle: checked_manifest_free_u64,
+};
+
+const SEEK_API_U128: SeekApi<U128Bytes, CheckedManifestU128> = SeekApi {
+    new: checked_manifest_new_u128,
+    seek: checked_manifest_seek_chunks_u128,
+    free_array: free_seek_chunks_u128,
+    free_handle: checked_manifest_free_u128,
+};
+
+/// Makes a checked-manifest handle from `manifest`, which must succeed.
+///
+/// # Safety
+///
+/// `manifest.chunk_metadata` must point to `chunk_metadata_len` chunk
+/// records for the whole call.
+unsafe fn new_handle<F, Handle>(
+    api: &SeekApi<F, Handle>,
+    manifest: &FFIFileManifestParent<F>,
+) -> *mut Handle {
+    let mut handle = ptr::null_mut();
+    // SAFETY: `manifest` is a live reference whose chunk records the
+    // caller guarantees, and `handle` is a local.
+    let status = unsafe { (api.new)(manifest, &raw mut handle) };
+    assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
+    assert!(!handle.is_null());
+    handle
+}
 
 /// The first entry of `FILES` is a 4-byte chunk then a 3-byte chunk.
-fn assert_seek_matches_rust<F, H>(
-    hashes: [H; 3],
-    get_seek: GetSeek<F>,
-    free: unsafe extern "C" fn(*mut FFISeekInfoArray<F>),
-)
+fn assert_seek_matches_rust<F, H, Handle>(hashes: [H; 3], api: &SeekApi<F, Handle>)
 where
     F: Copy + From<H>,
     H: Copy + Debug + Eq + Hash + From<F>,
 {
     let input = host_input::<H, F>(hashes);
     let chunk_metadata = chunk_metadata(hashes, FILES[0].1);
-    let manifest = FileManifestParent {
+    let checked = CheckedManifest::new(FileManifestParent {
         chunk_count: chunk_metadata.len() as u64,
         chunk_metadata,
-    };
+    })
+    .unwrap();
+
+    // SAFETY: `input` owns the manifest's chunk records for the call.
+    let handle = unsafe { new_handle(api, &input.manifests[0]) };
+    // The handle keeps its own copy, so the host may free its manifest.
+    drop(input);
 
     // Whole file, inside a chunk, across chunks, the last chunk, empty
     // reads at the start and at the end.
     for (offset, length) in [(0, 7), (1, 2), (3, 2), (4, 3), (0, 0), (7, 0)] {
         let mut out = ptr::null_mut();
-        // SAFETY: `input` owns the manifest for the whole call and `out` is
-        // a local.
-        let status = unsafe {
-            get_seek(&raw const input.manifests[0], offset, length, &raw mut out)
-        };
+        // SAFETY: `handle` is live and `out` is a local.
+        let status = unsafe { (api.seek)(handle, offset, length, &raw mut out) };
         assert_eq!(status_code(status), status_code(FFIStatus::StatusOk));
 
         // SAFETY: `out` came from the successful call above.
@@ -2172,62 +2312,54 @@ where
             .iter()
             .map(|c| (H::from(c.hash), c.read_start, c.read_end))
             .collect();
-        let rust: Vec<(H, u64, u64)> =
-            get_seek_chunks(&manifest, offset, length)
-                .unwrap()
-                .into_iter()
-                .map(|c| (c.hash, c.start_offset, c.end_offset))
-                .collect();
+        let rust: Vec<(H, u64, u64)> = checked
+            .seek_chunks(offset, length)
+            .unwrap()
+            .into_iter()
+            .map(|c| (c.hash, c.start_offset, c.end_offset))
+            .collect();
         assert_eq!(ffi, rust, "{length} bytes at {offset}");
 
         // SAFETY: `out` came from the call above and is freed once.
-        unsafe { free(out) };
+        unsafe { (api.free_array)(out) };
     }
+    // SAFETY: `handle` came from `new_handle` and is freed once.
+    unsafe { (api.free_handle)(handle) };
 }
 
 #[test]
-fn get_seek_chunks_u64_matches_rust_api() {
-    assert_seek_matches_rust::<u64, u64>(
-        SEEK_HASHES_U64,
-        get_seek_chunks_u64,
-        free_seek_chunks_u64,
-    );
+fn seek_chunks_u64_matches_rust_api() {
+    assert_seek_matches_rust::<u64, u64, _>(SEEK_HASHES_U64, &SEEK_API_U64);
 }
 
 #[test]
-fn get_seek_chunks_u128_matches_rust_api() {
-    assert_seek_matches_rust::<U128Bytes, u128>(
-        SEEK_HASHES_U128,
-        get_seek_chunks_u128,
-        free_seek_chunks_u128,
-    );
+fn seek_chunks_u128_matches_rust_api() {
+    assert_seek_matches_rust::<U128Bytes, u128, _>(SEEK_HASHES_U128, &SEEK_API_U128);
 }
 
 #[test]
-fn get_seek_chunks_rejects_a_read_past_the_end() {
+fn seek_chunks_rejects_a_read_past_the_end() {
     let input = host_input::<u64, u64>(SEEK_HASHES_U64);
+    // SAFETY: `input` owns the manifest's chunk records for the call.
+    let handle = unsafe { new_handle(&SEEK_API_U64, &input.manifests[0]) };
 
     for (offset, length) in [(5, 3), (8, 0), (u64::MAX, 2)] {
         let mut out = ptr::null_mut();
-        // SAFETY: `input` owns the manifest for the whole call and `out` is
-        // a local.
+        // SAFETY: `handle` is live and `out` is a local.
         let status = unsafe {
-            get_seek_chunks_u64(
-                &raw const input.manifests[0],
-                offset,
-                length,
-                &raw mut out,
-            )
+            checked_manifest_seek_chunks_u64(handle, offset, length, &raw mut out)
         };
         assert_eq!(status_code(status), status_code(FFIStatus::SeekOutOfBounds));
         assert!(out.is_null(), "nothing to free after {offset}+{length}");
     }
+    // SAFETY: `handle` came from `new_handle` and is freed once.
+    unsafe { checked_manifest_free_u64(handle) };
 }
 
-/// A manifest the C host built with a gap between its chunks is refused,
-/// not read as if the gap weren't there.
+/// A manifest the C host built with a gap between its chunks is refused
+/// when the handle is made, not read as if the gap weren't there.
 #[test]
-fn get_seek_chunks_rejects_chunks_that_do_not_lie_end_to_end() {
+fn a_manifest_whose_chunks_do_not_lie_end_to_end_gets_no_handle() {
     let chunks = [
         FFISSAChunkMeta { hash: 1_u64, offset: 0, length: 4 },
         FFISSAChunkMeta { hash: 2_u64, offset: 5, length: 4 },
@@ -2237,19 +2369,17 @@ fn get_seek_chunks_rejects_chunks_that_do_not_lie_end_to_end() {
         chunk_metadata_len: chunks.len(),
         chunk_metadata_cap: chunks.len(),
     };
-    let mut out = ptr::null_mut();
+    let mut handle = ptr::null_mut();
 
     // SAFETY: `manifest` points at `chunks`, which outlive the call, and
-    // `out` is a local.
-    let status = unsafe {
-        get_seek_chunks_u64(&raw const manifest, 0, 8, &raw mut out)
-    };
+    // `handle` is a local.
+    let status = unsafe { checked_manifest_new_u64(&raw const manifest, &raw mut handle) };
 
     assert_eq!(
         status_code(status),
         status_code(FFIStatus::ManifestDecodeError)
     );
-    assert!(out.is_null());
+    assert!(handle.is_null());
 }
 
 // Hashes passed to callbacks
@@ -3147,42 +3277,53 @@ fn test_compression_rejects_each_null_pointer() {
     );
 }
 
-fn assert_get_seek_rejects_null<F>(
-    get_seek: GetSeek<F>,
-    input: &HostInput<F>,
-) {
-    let mut out_slot = ptr::null_mut();
-    let out = &raw mut out_slot;
+fn assert_seek_rejects_null<F, Handle>(api: &SeekApi<F, Handle>, input: &HostInput<F>) {
     let manifest = &raw const input.manifests[0];
+    let mut handle_slot = ptr::null_mut();
 
     let calls = [
-        ("manifest", ptr::null(), out),
-        ("out_ptr", manifest, ptr::null_mut()),
+        ("manifest", ptr::null(), &raw mut handle_slot),
+        ("out_handle", manifest, ptr::null_mut()),
     ];
     for (what, manifest, out) in calls {
         // SAFETY: one pointer is null, which the function checks before
         // using either; the other points into `input` or a local.
-        assert_null_argument(what, unsafe { get_seek(manifest, 0, 1, out) });
+        assert_null_argument(what, unsafe { (api.new)(manifest, out) });
     }
-
     for len in NULL_METADATA_LENGTHS {
         let manifest = manifest_without_metadata::<F>(len);
-        // SAFETY: `manifest` and `out` are locals. The function rejects the
-        // null `chunk_metadata` before reading through it.
-        let status = unsafe { get_seek(&raw const manifest, 0, 1, out) };
+        // SAFETY: `manifest` and `handle_slot` are locals. The function
+        // rejects the null `chunk_metadata` before reading through it.
+        let status = unsafe { (api.new)(&raw const manifest, &raw mut handle_slot) };
         assert_null_argument("chunk metadata", status);
     }
+    assert!(handle_slot.is_null());
+
+    // SAFETY: `input` owns the manifest's chunk records for the call.
+    let handle = unsafe { new_handle(api, &input.manifests[0]) };
+    let mut out_slot = ptr::null_mut();
+    let calls = [
+        ("handle", ptr::null(), &raw mut out_slot),
+        ("out_ptr", handle.cast_const(), ptr::null_mut()),
+    ];
+    for (what, handle, out) in calls {
+        // SAFETY: one pointer is null, which the function checks before
+        // using either; the other is a live handle or a local.
+        assert_null_argument(what, unsafe { (api.seek)(handle, 0, 1, out) });
+    }
     assert!(out_slot.is_null());
+
+    // SAFETY: `handle` came from `new_handle` and is freed once.
+    unsafe { (api.free_handle)(handle) };
+    // SAFETY: freeing null does nothing.
+    unsafe { (api.free_handle)(ptr::null_mut()) };
 }
 
 #[test]
-fn get_seek_chunks_rejects_each_null_pointer() {
-    assert_get_seek_rejects_null(
-        get_seek_chunks_u64,
-        &host_input::<u64, u64>(SEEK_HASHES_U64),
-    );
-    assert_get_seek_rejects_null(
-        get_seek_chunks_u128,
+fn seek_chunks_rejects_each_null_pointer() {
+    assert_seek_rejects_null(&SEEK_API_U64, &host_input::<u64, u64>(SEEK_HASHES_U64));
+    assert_seek_rejects_null(
+        &SEEK_API_U128,
         &host_input::<u128, U128Bytes>(SEEK_HASHES_U128),
     );
 }
@@ -3211,6 +3352,56 @@ fn lookup_chunk_location_rejects_each_null_pointer() {
         };
         assert_null_argument(what, status);
     }
+}
+
+#[test]
+fn chunk_decompressor_rejects_each_null_pointer() {
+    let mut handle = ptr::null_mut();
+    let dict = b"dict".as_ptr();
+    let calls = [
+        ("dictionary", ptr::null(), &raw mut handle),
+        ("out_handle", dict, ptr::null_mut()),
+    ];
+    for (what, dict, out) in calls {
+        // SAFETY: one pointer is null, which the function checks before
+        // using either; the other points to a live local or static.
+        assert_null_argument(what, unsafe { chunk_decompressor_new_c(dict, 4, out) });
+    }
+    assert!(handle.is_null());
+
+    // A null handle is refused before anything else is read; so is a null
+    // hash for the u128 export.
+    let compressed = [0_u8; 4];
+    let key = [0_u8; 16];
+    let mut decompressed = [0_u8; 4];
+    let (comp, out) = (compressed.as_ptr(), decompressed.as_mut_ptr());
+    // SAFETY: the handle is null, which the function checks before
+    // touching the other pointers, which point to live locals.
+    let status = unsafe {
+        chunk_decompressor_decompress_c(ptr::null_mut(), comp, 4, out, 4)
+    };
+    assert_null_argument("handle", status);
+    // SAFETY: as above.
+    let status = unsafe {
+        chunk_decompressor_decompress_checked_c_u64(ptr::null_mut(), comp, 4, 0, out, 4)
+    };
+    assert_null_argument("handle", status);
+    // SAFETY: as above, and `key` is 16 readable bytes.
+    let status = unsafe {
+        chunk_decompressor_decompress_checked_c_u128(
+            ptr::null_mut(), comp, 4, key.as_ptr(), out, 4
+        )
+    };
+    assert_null_argument("handle", status);
+    // SAFETY: the hash pointer is null, which the function checks first.
+    let status = unsafe {
+        chunk_decompressor_decompress_checked_c_u128(
+            ptr::null_mut(), comp, 4, ptr::null(), out, 4
+        )
+    };
+    assert_null_argument("hash", status);
+    // SAFETY: freeing null does nothing.
+    unsafe { chunk_decompressor_free_c(ptr::null_mut()) };
 }
 
 #[test]

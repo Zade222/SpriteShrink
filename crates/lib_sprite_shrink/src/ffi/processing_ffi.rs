@@ -17,6 +17,7 @@ use crate::ffi::ffi_error_handling::{
 };
 use crate::ffi::ffi_ownership::copy_host_chunks;
 use crate::ffi::ffi_types::{
+    CheckedManifestU64, CheckedManifestU128,
     CreateFileManifestAndChunksArgs, FFIChunk, FFIChunkDataArray,
     ChunkIndexMap, FFIChunkLocation,
     FFIFileManifestChunks,
@@ -35,8 +36,9 @@ use crate::ffi::ffi_types::{
 use crate::lib_error_handling::{
     SpriteShrinkError
 };
+use crate::parsing::CheckedManifest;
 use crate::processing::{
-    create_file_manifest_and_chunks, get_seek_chunks, process_file_in_memory,
+    create_file_manifest_and_chunks, process_file_in_memory,
     verify_single_file, test_compression};
 use crate::lib_structs::{
     FileData, FileManifestParent
@@ -998,163 +1000,279 @@ pub unsafe extern "C" fn test_compression_u128(
     }
 }
 
-/// Calculates which chunks are needed for a seek operation via an
-/// FFI-safe interface.
+/// Checks a host's manifest once and returns a handle to a copy of it (see
+/// [`CheckedManifest`]).
 ///
-/// On failure, returns `FFIResult::ManifestDecodeError` if the manifest's
-/// chunks don't lie end to end from offset 0 (see `get_seek_chunks`), or
-/// `FFIResult::SeekOutOfBounds` if the range ends past the end of the
-/// file.
+/// # Returns
+///
+/// * `FFIResult::StatusOk`, with the handle written to `out_handle`.
+/// * `FFIResult::NullArgument` if `manifest` or `out_handle` is null, or
+///   the manifest's chunk pointer is null with a nonzero length.
+/// * `FFIResult::ManifestDecodeError` if the manifest's chunks don't lie
+///   end to end from offset 0, or its `chunk_count` is wrong.
 ///
 /// # Safety
-/// - `file_manifest_parent` must be a valid, non-null pointer.
-/// - `out_ptr` must be a valid pointer to a
-///   `*mut FFISeekInfoArray...`.
-/// - On success, the pointer written to `out_ptr` is owned by the C
-///   caller and MUST be freed by passing it to the
-///   `free_seek_chunks_u64` function.
+///
+/// - `manifest` must point to a valid manifest whose `chunk_metadata`
+///   points to `chunk_metadata_len` chunk records.
+/// - `out_handle` must point to writable memory for one pointer.
+/// - The handle written to `out_handle` is owned by the caller and must be
+///   passed to `checked_manifest_free_u64` exactly once.
 #[unsafe(no_mangle)]
-#[allow(clippy::double_must_use)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks a function SPRITE_SHRINK_MUST_USE in the C \
+              header only if it has #[must_use]"
+)]
 #[must_use]
-pub unsafe extern "C" fn get_seek_chunks_u64(
-    file_manifest_parent: *const FFIFileManifestParentU64,
+pub unsafe extern "C" fn checked_manifest_new_u64(
+    manifest: *const FFIFileManifestParentU64,
+    out_handle: *mut *mut CheckedManifestU64,
+) -> FFIResult {
+    // SAFETY: the caller guarantees both pointers are valid when non-null,
+    // which is what `checked_manifest_new_internal` needs. It checks for
+    // null itself.
+    unsafe { checked_manifest_new_internal::<u64, u64, _>(manifest, out_handle) }
+}
+
+/// [`checked_manifest_new_u64`] for `u128` hashes.
+///
+/// # Safety
+///
+/// The same as `checked_manifest_new_u64`; the handle must be passed to
+/// `checked_manifest_free_u128` exactly once.
+#[unsafe(no_mangle)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks a function SPRITE_SHRINK_MUST_USE in the C \
+              header only if it has #[must_use]"
+)]
+#[must_use]
+pub unsafe extern "C" fn checked_manifest_new_u128(
+    manifest: *const FFIFileManifestParentU128,
+    out_handle: *mut *mut CheckedManifestU128,
+) -> FFIResult {
+    // SAFETY: the caller guarantees both pointers are valid when non-null,
+    // which is what `checked_manifest_new_internal` needs. It checks for
+    // null itself.
+    unsafe {
+        checked_manifest_new_internal::<u128, U128Bytes, _>(manifest, out_handle)
+    }
+}
+
+/// Copies and checks the host's manifest and writes a handle to it.
+///
+/// # Safety
+///
+/// Each non-null pointer must be valid: `manifest` for reading a manifest
+/// and its chunk records, `out_handle` for writing one pointer.
+unsafe fn checked_manifest_new_internal<H, F, Handle>(
+    manifest: *const FFIFileManifestParent<F>,
+    out_handle: *mut *mut Handle,
+) -> FFIResult
+where
+    for<'a> FileManifestParent<H>: TryFrom<&'a FFIFileManifestParent<F>, Error = FFIResult>,
+{
+    if manifest.is_null() || out_handle.is_null() {
+        return FFIResult::NullArgument;
+    }
+
+    // SAFETY: `manifest` is non-null (checked above), and the caller
+    // guarantees it points to a valid, initialized manifest for the whole
+    // call.
+    let ffi_manifest = unsafe { &*manifest };
+    let manifest = match FileManifestParent::<H>::try_from(ffi_manifest) {
+        Ok(manifest) => manifest,
+        Err(status) => return status,
+    };
+    let checked = match CheckedManifest::new(manifest) {
+        Ok(checked) => checked,
+        Err(e) => return e.into(),
+    };
+
+    let handle = Box::into_raw(Box::new(checked)).cast::<Handle>();
+    // SAFETY: `out_handle` is non-null (checked above), and the caller
+    // guarantees it points to writable memory for one pointer.
+    unsafe { out_handle.write(handle) };
+    FFIResult::StatusOk
+}
+
+/// Works out which chunks, and which bytes of each, a read of
+/// `seek_length` bytes from `seek_offset` needs (see
+/// `CheckedManifest::seek_chunks`).
+///
+/// # Returns
+///
+/// * `FFIResult::StatusOk`, with the chunk list written to `out_ptr`.
+/// * `FFIResult::NullArgument` if `handle` or `out_ptr` is null.
+/// * `FFIResult::SeekOutOfBounds` if the range ends past the end of the
+///   file.
+///
+/// # Safety
+///
+/// - `handle` must come from `checked_manifest_new_u64` and not have been
+///   freed.
+/// - `out_ptr` must point to writable memory for one pointer.
+/// - The array written to `out_ptr` is owned by the caller and must be
+///   freed with `free_seek_chunks_u64`.
+#[unsafe(no_mangle)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks a function SPRITE_SHRINK_MUST_USE in the C \
+              header only if it has #[must_use]"
+)]
+#[must_use]
+pub unsafe extern "C" fn checked_manifest_seek_chunks_u64(
+    handle: *const CheckedManifestU64,
     seek_offset: u64,
     seek_length: u64,
     out_ptr: *mut *mut FFISeekInfoArrayU64,
 ) -> FFIResult {
-    if file_manifest_parent.is_null() || out_ptr.is_null() {
-        return FFIResult::NullArgument;
-    };
-
-    // SAFETY: `file_manifest_parent` was checked for null above, and the
-    // caller guarantees it points to a valid manifest.
-    let ffi_fmp = unsafe { &*file_manifest_parent };
-    let fmp = match FileManifestParent::<u64>::try_from(ffi_fmp) {
-        Ok(fmp) => fmp,
-        Err(status) => return status,
-    };
-
-    match get_seek_chunks::<u64>(
-        &fmp,
-        seek_offset,
-        seek_length
-    ){
-        Ok(seek_info_vec) => {
-            let mut ffi_chunks: Vec<FFISeekChunkInfo<u64>> =
-                seek_info_vec
-                    .into_iter()
-                    .map(|metadata| {
-                        FFISeekChunkInfo::from(metadata)
-                    })
-                    .collect();
-
-            let chunks_ptr = ffi_chunks.as_mut_ptr();
-            let chunks_len = ffi_chunks.len();
-            let chunks_cap = ffi_chunks.capacity();
-            // Give up ownership so memory isn't freed here
-            std::mem::forget(ffi_chunks);
-
-            /*Create the final struct that holds the array pointer
-            and length*/
-            let output = Box::new({
-                FFISeekInfoArray::from((
-                    chunks_ptr,
-                    chunks_len,
-                    chunks_cap,
-                ))
-            });
-
-            unsafe {
-                *out_ptr = Box::into_raw(output);
-            }
-
-            FFIResult::StatusOk
-        }
-        Err(e) => e.into()
+    // SAFETY: the caller guarantees `handle` came from
+    // `checked_manifest_new_u64`, which boxed a `CheckedManifest<u64>`, and
+    // that `out_ptr` is valid when non-null, which is what
+    // `seek_chunks_internal` needs. It checks for null itself.
+    unsafe {
+        seek_chunks_internal::<u64, u64, _>(handle, seek_offset, seek_length, out_ptr)
     }
 }
 
-/// Calculates which chunks are needed for a seek operation via an
-/// FFI-safe interface.
-///
-/// On failure, returns `FFIResult::ManifestDecodeError` if the manifest's
-/// chunks don't lie end to end from offset 0 (see `get_seek_chunks`), or
-/// `FFIResult::SeekOutOfBounds` if the range ends past the end of the
-/// file.
+/// [`checked_manifest_seek_chunks_u64`] for `u128` hashes.
 ///
 /// # Safety
-/// - `file_manifest_parent` must be a valid, non-null pointer.
-/// - `out_ptr` must be a valid pointer to a
-///   `*mut FFISeekInfoArray...`.
-/// - On success, the pointer written to `out_ptr` is owned by the C
-///   caller and MUST be freed by passing it to the
-///   `free_seek_chunks_u128` function.
+///
+/// The same as `checked_manifest_seek_chunks_u64`, with a handle from
+/// `checked_manifest_new_u128`; the array must be freed with
+/// `free_seek_chunks_u128`.
 #[unsafe(no_mangle)]
-#[allow(clippy::double_must_use)]
+#[expect(
+    clippy::double_must_use,
+    reason = "cbindgen marks a function SPRITE_SHRINK_MUST_USE in the C \
+              header only if it has #[must_use]"
+)]
 #[must_use]
-pub unsafe extern "C" fn get_seek_chunks_u128(
-    file_manifest_parent: *const FFIFileManifestParentU128,
+pub unsafe extern "C" fn checked_manifest_seek_chunks_u128(
+    handle: *const CheckedManifestU128,
     seek_offset: u64,
     seek_length: u64,
     out_ptr: *mut *mut FFISeekInfoArrayU128,
 ) -> FFIResult {
-    if file_manifest_parent.is_null() || out_ptr.is_null() {
-        return FFIResult::NullArgument;
-    };
-
-    // SAFETY: `file_manifest_parent` was checked for null above, and the
-    // caller guarantees it points to a valid manifest.
-    let ffi_fmp = unsafe { &*file_manifest_parent };
-    let fmp = match FileManifestParent::<u128>::try_from(ffi_fmp) {
-        Ok(fmp) => fmp,
-        Err(status) => return status,
-    };
-
-    match get_seek_chunks::<u128>(
-        &fmp,
-        seek_offset,
-        seek_length
-    ){
-        Ok(seek_info_vec) => {
-            let mut ffi_chunks: Vec<FFISeekChunkInfo<U128Bytes>> =
-                seek_info_vec
-                    .into_iter()
-                    .map(|metadata| {
-                        FFISeekChunkInfo {
-                            hash: metadata.hash.into(),
-                            read_start: metadata.start_offset,
-                            read_end: metadata.end_offset,
-                        }
-                    })
-                    .collect();
-
-            let chunks_ptr = ffi_chunks.as_mut_ptr();
-            let chunks_len = ffi_chunks.len();
-            let chunks_cap = ffi_chunks.capacity();
-            std::mem::forget(ffi_chunks); // Give up ownership
-
-            let output = Box::new({
-                FFISeekInfoArray::from((
-                    chunks_ptr,
-                    chunks_len,
-                    chunks_cap,
-                ))
-            });
-
-            unsafe {
-                *out_ptr = Box::into_raw(output);
-            }
-
-            FFIResult::StatusOk
-        }
-        Err(e) => e.into()
+    // SAFETY: the caller guarantees `handle` came from
+    // `checked_manifest_new_u128`, which boxed a `CheckedManifest<u128>`,
+    // and that `out_ptr` is valid when non-null, which is what
+    // `seek_chunks_internal` needs. It checks for null itself.
+    unsafe {
+        seek_chunks_internal::<u128, U128Bytes, _>(
+            handle, seek_offset, seek_length, out_ptr
+        )
     }
+}
+
+/// Plans a seek with the `CheckedManifest<H>` behind `handle` and writes
+/// the chunk list, its hashes converted to `F`, to `out_ptr`.
+///
+/// # Safety
+///
+/// A non-null `handle` must point to a live `CheckedManifest<H>` (a handle
+/// from the matching `checked_manifest_new_*`), and a non-null `out_ptr`
+/// to writable memory for one pointer.
+unsafe fn seek_chunks_internal<H, F, Handle>(
+    handle: *const Handle,
+    seek_offset: u64,
+    seek_length: u64,
+    out_ptr: *mut *mut FFISeekInfoArray<F>,
+) -> FFIResult
+where
+    H: Copy,
+    F: From<H>,
+{
+    if handle.is_null() || out_ptr.is_null() {
+        return FFIResult::NullArgument;
+    }
+
+    // SAFETY: `handle` is non-null (checked above), and the caller
+    // guarantees it points to a live `CheckedManifest<H>`, boxed by
+    // `checked_manifest_new_internal` and not yet freed. Seeking only reads
+    // it, so a shared reference is enough.
+    let checked = unsafe { &*handle.cast::<CheckedManifest<H>>() };
+    let seek_info = match checked.seek_chunks(seek_offset, seek_length) {
+        Ok(seek_info) => seek_info,
+        Err(e) => return e.into(),
+    };
+
+    let ffi_chunks: Vec<FFISeekChunkInfo<F>> = seek_info
+        .into_iter()
+        .map(|metadata| FFISeekChunkInfo {
+            hash: metadata.hash.into(),
+            read_start: metadata.start_offset,
+            read_end: metadata.end_offset,
+        })
+        .collect();
+    let mut ffi_chunks = std::mem::ManuallyDrop::new(ffi_chunks);
+    let output = Box::new(FFISeekInfoArray {
+        chunks: ffi_chunks.as_mut_ptr(),
+        chunks_len: ffi_chunks.len(),
+        chunks_cap: ffi_chunks.capacity(),
+    });
+
+    // SAFETY: `out_ptr` is non-null (checked above), and the caller
+    // guarantees it points to writable memory for one pointer.
+    unsafe { out_ptr.write(Box::into_raw(output)) };
+    FFIResult::StatusOk
+}
+
+/// Frees a handle from `checked_manifest_new_u64`. A null handle is
+/// ignored.
+///
+/// # Safety
+///
+/// A non-null `handle` must come from `checked_manifest_new_u64` and not
+/// have been freed already. It must not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn checked_manifest_free_u64(handle: *mut CheckedManifestU64) {
+    // SAFETY: the caller guarantees a non-null `handle` came from
+    // `checked_manifest_new_u64`, which boxed a `CheckedManifest<u64>`, and
+    // isn't used again.
+    unsafe { checked_manifest_free_internal::<u64, _>(handle) }
+}
+
+/// Frees a handle from `checked_manifest_new_u128`. A null handle is
+/// ignored.
+///
+/// # Safety
+///
+/// A non-null `handle` must come from `checked_manifest_new_u128` and not
+/// have been freed already. It must not be used afterwards.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn checked_manifest_free_u128(handle: *mut CheckedManifestU128) {
+    // SAFETY: the caller guarantees a non-null `handle` came from
+    // `checked_manifest_new_u128`, which boxed a `CheckedManifest<u128>`,
+    // and isn't used again.
+    unsafe { checked_manifest_free_internal::<u128, _>(handle) }
+}
+
+/// Drops the `CheckedManifest<H>` behind `handle`.
+///
+/// # Safety
+///
+/// A non-null `handle` must be a pointer `checked_manifest_new_internal`
+/// made from a boxed `CheckedManifest<H>`, not yet freed and not used
+/// afterwards.
+unsafe fn checked_manifest_free_internal<H, Handle>(handle: *mut Handle) {
+    if handle.is_null() {
+        return;
+    }
+    // SAFETY: `handle` is non-null (checked above), and the caller
+    // guarantees it came from `Box::into_raw` of a `CheckedManifest<H>`
+    // that hasn't been freed, so taking the box back is sound and frees it
+    // once.
+    drop(unsafe { Box::from_raw(handle.cast::<CheckedManifest<H>>()) });
 }
 
 /// A generic helper to deallocate an `FFISeekInfoArray` from an FFI handle.
 ///
 /// This internal function provides the core logic for safely freeing the
-/// memory that was allocated by `get_seek_chunks_internal` and passed to a
+/// memory that was allocated by `seek_chunks_internal` and passed to a
 /// C caller. It takes the raw pointer, reconstructs the `Box` for the outer
 /// struct, and then reconstructs the `Vec` for the inner array of
 /// `FFISeekChunkInfo` entries. This allows Rust's memory manager to properly
@@ -1173,7 +1291,7 @@ pub unsafe extern "C" fn get_seek_chunks_u128(
 ///
 /// The public FFI function that calls this helper must guarantee that:
 /// - The `ptr` is a valid, non-null pointer that was originally returned from
-///   a successful call to a `get_seek_chunks_*` function.
+///   a successful call to a `checked_manifest_seek_chunks_*` function.
 /// - The pointer has not already been freed.
 /// - The pointer will not be used again after this function is called.
 ///
@@ -1195,11 +1313,11 @@ fn free_seek_chunks_internal<H>(
         }
 }
 
-/// Frees the memory allocated by the `get_seek_chunks_u64` function.
+/// Frees a chunk list from `checked_manifest_seek_chunks_u64`.
 ///
 /// # Safety
 /// The `ptr` must be a non-null pointer returned from a successful
-/// call to the `get_seek_chunks_u64` function.
+/// call to the `checked_manifest_seek_chunks_u64` function.
 /// Calling this with a null pointer or a pointer that has already
 /// been freed will lead to undefined behavior.
 #[unsafe(no_mangle)]
@@ -1213,11 +1331,11 @@ pub unsafe extern "C" fn free_seek_chunks_u64(
     free_seek_chunks_internal::<u64>(ptr);
 }
 
-/// Frees the memory allocated by a `get_seek_chunks_u128` function.
+/// Frees a chunk list from `checked_manifest_seek_chunks_u128`.
 ///
 /// # Safety
 /// The `ptr` must be a non-null pointer returned from a successful
-/// call to the `get_seek_chunks_u128` function.
+/// call to the `checked_manifest_seek_chunks_u128` function.
 /// Calling this with a null pointer or a pointer that has already
 /// been freed will lead to undefined behavior.
 #[unsafe(no_mangle)]
