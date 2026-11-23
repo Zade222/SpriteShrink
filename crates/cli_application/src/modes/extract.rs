@@ -27,8 +27,8 @@ use tracing::{
 use sprite_shrink::{
     SSMC_UID,
     HashType,
-    ChunkLocation, FileHeader, FileManifestParent, Hashable, ParsedSSMC,
-    IsCancelled, SSAChunkMeta, SSMCTocEntry, SpriteShrinkError,
+    CheckedManifest, ChunkLocation, FileHeader, FileManifestParent, Hashable,
+    ParsedSSMC, IsCancelled, SSAChunkMeta, SSMCTocEntry, SpriteShrinkError,
     check_entry_name, decompress_chunks_with
 };
 
@@ -292,16 +292,17 @@ where
 /// Returns `CliError::InvalidRomIndex` if the archive has no entry
 /// `index`.
 fn ssmc_entry<'a, H>(
-    manifests: &'a [FileManifestParent<H>],
+    manifests: &'a [CheckedManifest<H>],
     toc: &'a [SSMCTocEntry],
     index: usize,
 ) -> Result<(&'a FileManifestParent<H>, &'a SSMCTocEntry), CliError> {
-    manifests.get(index).zip(toc.get(index)).ok_or_else(|| {
-        CliError::InvalidRomIndex(format!(
+    manifests.get(index)
+        .map(CheckedManifest::manifest)
+        .zip(toc.get(index))
+        .ok_or_else(|| CliError::InvalidRomIndex(format!(
             "ROM index {} is out of bounds.",
             index + 1
-        ))
-    })
+        )))
 }
 
 /// Generic implementation of the file extraction process.

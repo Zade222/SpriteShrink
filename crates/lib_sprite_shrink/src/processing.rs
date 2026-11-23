@@ -28,7 +28,7 @@ use crate::lib_error_handling::{
 use crate::lib_structs::{
     FileData, FileManifestParent, ProcessedFileData, SeekMetadata, SSAChunkMeta
 };
-use crate::parsing::{SS_SEED, check_manifest};
+use crate::parsing::{CheckedManifest, SS_SEED};
 
 #[derive(Error, Debug)]
 pub enum ProcessingError {
@@ -787,111 +787,104 @@ where
     Ok(dictionary.len() + compressed_size)
 }
 
-/// Calculates which chunks and what parts of them are needed to satisfy a
-/// seek request.
-///
-/// # Arguments
-/// * `manifest`: The `FileManifestParent` for the specific file being read.
-/// * `seek_offset`: The starting byte offset within the original,
-///   uncompressed file.
-/// * `seek_length`: The number of bytes to read from the `seek_offset`.
-///
-/// # Returns
-/// A `Result` containing a `Vec` where each entry is a SeekMetadata which
-/// contains the following:
-/// - The `hash` of a required chunk.
-/// - The `start` and `end` byte range to copy from that chunk *after* it has
-///   been decompressed.
-///
-/// A `seek_length` of 0 returns an empty `Vec`.
-///
-/// The manifest is checked with [`check_manifest`] first, whether it came
-/// from an archive or was built by the caller, since chunks are picked by
-/// their offsets.
-///
-/// # Errors
-///
-/// Returns `ParsingError::InvalidManifest` if the manifest's chunks don't
-/// lie end to end from byte 0 or its `chunk_count` is wrong, or
-/// `ProcessingError::SeekOutOfBounds` if the requested range ends past the
-/// end of the file, including when `seek_offset + seek_length` overflows a
-/// `u64`.
-pub fn get_seek_chunks<H: Copy + Eq + Hash>(
-    manifest: &FileManifestParent<H>,
-    seek_offset: u64,
-    seek_length: u64,
-) -> Result<Vec<SeekMetadata<H>>, SpriteShrinkError> {
-    /*The chunks must lie end to end, or picking them by offset below
-    returns the wrong bytes. Once they do, no offset + length can overflow:
-    each is at most the file size.*/
-    let original_file_size = check_manifest(manifest)?;
+impl<H: Copy> CheckedManifest<H> {
+    /// Calculates which chunks, and which bytes of each, a read of
+    /// `seek_length` bytes from `seek_offset` in the original file needs.
+    ///
+    /// # Returns
+    ///
+    /// One `SeekMetadata` per chunk, in file order: the chunk's `hash`, and
+    /// the `start` and `end` of the range to copy from it once it's
+    /// decompressed. A `seek_length` of 0 returns an empty `Vec`.
+    ///
+    /// The manifest was checked when this was made, so the chunks lie end to
+    /// end and the first one needed is found by binary search: planning a
+    /// read costs about the number of chunks it touches, not the file's
+    /// size.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ProcessingError::SeekOutOfBounds` if the requested range ends
+    /// past the end of the file, including when `seek_offset + seek_length`
+    /// overflows a `u64`.
+    pub fn seek_chunks(
+        &self,
+        seek_offset: u64,
+        seek_length: u64,
+    ) -> Result<Vec<SeekMetadata<H>>, SpriteShrinkError> {
+        /*The chunks lie end to end, or picking them by offset below would
+        return the wrong bytes. So no offset + length can overflow: each is
+        at most the file size.*/
+        let original_file_size = self.size();
+        let chunk_metadata = &self.manifest().chunk_metadata;
 
-    /*Using the calculated file size, if the seek request is beyond the file
-    size fail early. A request whose end doesn't fit in a u64 is beyond it
-    too.*/
-    let seek_end = seek_offset
-        .checked_add(seek_length)
-        .filter(|&end| end <= original_file_size)
-        .ok_or_else(|| ProcessingError::SeekOutOfBounds(format!(
-            "{seek_length} bytes at offset {seek_offset} in a \
-             {original_file_size}-byte file"
-        )))?;
+        /*Using the calculated file size, if the seek request is beyond the file
+        size fail early. A request whose end doesn't fit in a u64 is beyond it
+        too.*/
+        let seek_end = seek_offset
+            .checked_add(seek_length)
+            .filter(|&end| end <= original_file_size)
+            .ok_or_else(|| ProcessingError::SeekOutOfBounds(format!(
+                "{seek_length} bytes at offset {seek_offset} in a \
+                 {original_file_size}-byte file"
+            )))?;
 
-    /*A zero-length read needs no chunks. Without this, a request inside a
-    chunk would return that chunk with an empty range.*/
-    if seek_length == 0 {
-        return Ok(Vec::new());
-    }
-
-    //Prepare the return vector
-    let mut required_chunks: Vec<SeekMetadata<H>> = Vec::new();
-
-    /*The chunks lie end to end, so their ends never decrease, and the
-    chunks that end at or before seek_offset are a prefix of the list.
-    Binary search finds where that prefix stops, so a read near the end of
-    a large file doesn't walk every chunk before it.*/
-    let first = manifest.chunk_metadata.partition_point(|chunk| {
-        chunk.offset + u64::from(chunk.length) <= seek_offset
-    });
-
-    for chunk_meta in manifest.chunk_metadata.iter().skip(first) {
-        //Calculate start offset of the chunk within the virtual file.
-        let chunk_start_offset = chunk_meta.offset;
-        //Calculate end offset of the chunk within the virtual file.
-        let chunk_end_offset = chunk_meta.offset + chunk_meta.length as u64;
-
-        //Check if a chunk is found within the desired range.
-        if (chunk_start_offset < seek_end) && (chunk_end_offset > seek_offset){
-            /*Calculate and record the start offset within the chunk of the
-            desired data.
-            If the seek offset is before the chunk offset it will be 0.*/
-            let read_start_in_chunk = seek_offset
-                .saturating_sub(chunk_start_offset);
-
-            /*Calculate and record the end offset within the chunk of the
-            desired data.
-            If the seek offset is after the end of the chunk, it will be the
-            data length of the chunk.*/
-            let read_end_in_chunk = (seek_end - chunk_start_offset)
-                .min(chunk_meta.length
-                    .into()
-                );
-
-            /*Add the gathered data to the return vector. */
-            required_chunks.push(SeekMetadata::new(
-                chunk_meta.hash,
-                read_start_in_chunk,
-                read_end_in_chunk
-            ))
+        /*A zero-length read needs no chunks. Without this, a request inside a
+        chunk would return that chunk with an empty range.*/
+        if seek_length == 0 {
+            return Ok(Vec::new());
         }
-        /*If a chunk is found beyond the end of the seek request, end the
-        loop.*/
-        else if chunk_start_offset >= seek_end {
-            break;
-        }
-    }
 
-    Ok(required_chunks)
+        //Prepare the return vector
+        let mut required_chunks: Vec<SeekMetadata<H>> = Vec::new();
+
+        /*The chunks lie end to end, so their ends never decrease, and the
+        chunks that end at or before seek_offset are a prefix of the list.
+        Binary search finds where that prefix stops, so a read near the end of
+        a large file doesn't walk every chunk before it.*/
+        let first = chunk_metadata.partition_point(|chunk| {
+            chunk.offset + u64::from(chunk.length) <= seek_offset
+        });
+
+        for chunk_meta in chunk_metadata.iter().skip(first) {
+            //Calculate start offset of the chunk within the virtual file.
+            let chunk_start_offset = chunk_meta.offset;
+            //Calculate end offset of the chunk within the virtual file.
+            let chunk_end_offset = chunk_meta.offset + chunk_meta.length as u64;
+
+            //Check if a chunk is found within the desired range.
+            if (chunk_start_offset < seek_end) && (chunk_end_offset > seek_offset){
+                /*Calculate and record the start offset within the chunk of the
+                desired data.
+                If the seek offset is before the chunk offset it will be 0.*/
+                let read_start_in_chunk = seek_offset
+                    .saturating_sub(chunk_start_offset);
+
+                /*Calculate and record the end offset within the chunk of the
+                desired data.
+                If the seek offset is after the end of the chunk, it will be the
+                data length of the chunk.*/
+                let read_end_in_chunk = (seek_end - chunk_start_offset)
+                    .min(chunk_meta.length
+                        .into()
+                    );
+
+                /*Add the gathered data to the return vector. */
+                required_chunks.push(SeekMetadata::new(
+                    chunk_meta.hash,
+                    read_start_in_chunk,
+                    read_end_in_chunk
+                ))
+            }
+            /*If a chunk is found beyond the end of the seek request, end the
+            loop.*/
+            else if chunk_start_offset >= seek_end {
+                break;
+            }
+        }
+
+        Ok(required_chunks)
+    }
 }
 
 
@@ -1352,6 +1345,15 @@ mod tests {
 
     /// A manifest of contiguous chunks with the given lengths, each hashed
     /// as its index.
+    /// Checks `manifest` and plans a seek in it, as a host does.
+    fn get_seek_chunks(
+        manifest: &FileManifestParent<u64>,
+        seek_offset: u64,
+        seek_length: u64,
+    ) -> Result<Vec<SeekMetadata<u64>>, SpriteShrinkError> {
+        CheckedManifest::new(manifest.clone())?.seek_chunks(seek_offset, seek_length)
+    }
+
     fn manifest_of(lengths: &[u32]) -> FileManifestParent<u64> {
         let mut offset = 0;
         let chunk_metadata: Vec<SSAChunkMeta<u64>> = lengths

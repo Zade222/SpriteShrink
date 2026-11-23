@@ -18,7 +18,7 @@ use sprite_shrink::{
     ArchiveBuilder, FileData, FileHeader, Hashable, ParsedSSMC, SSMCFormatData,
     SpriteShrinkError,
     build_ssmc_prefix, create_file_manifest_and_chunks, decompress_chunk,
-    get_seek_chunks, parse_file_header, parse_format_data, parse_ssmc_prefix,
+    parse_file_header, parse_format_data, parse_ssmc_prefix,
     process_file_in_memory, serialize_uncompressed_data, verify_single_file,
 };
 use proptest::{prelude::*, sample::Index};
@@ -197,8 +197,8 @@ fn assert_archive_lists_files<H: TestHash>(
             entry.filename
         );
         assert_eq!(
-            usize::try_from(manifest.chunk_count).unwrap(),
-            manifest.chunk_metadata.len(),
+            usize::try_from(manifest.manifest().chunk_count).unwrap(),
+            manifest.manifest().chunk_metadata.len(),
             "{}",
             entry.filename
         );
@@ -211,7 +211,7 @@ fn assert_files_extract<H: TestHash>(files: &[FileData], reader: &Reader<H>) {
     let parsed = &reader.parsed;
     for (entry, manifest) in parsed.toc.iter().zip(&parsed.manifests) {
         let mut rebuilt = Vec::new();
-        for meta in &manifest.chunk_metadata {
+        for meta in &manifest.manifest().chunk_metadata {
             let chunk = reader.chunk(&meta.hash);
             assert_eq!(
                 chunk.len(),
@@ -250,7 +250,7 @@ fn verify<H: TestHash>(
     };
     verify_single_file(
         reader.parsed.toc[index].filename.clone(),
-        &reader.parsed.manifests[index],
+        reader.parsed.manifests[index].manifest(),
         veri_hash,
         get_chunks,
         |_| {},
@@ -282,7 +282,7 @@ fn seek_ranges(len: u64, boundaries: &[u64], seed: u64) -> Vec<(u64, u64)> {
     ranges
 }
 
-/// Checks that seeking into each file through `get_seek_chunks` reads the
+/// Checks that seeking into each file through `seek_chunks` reads the
 /// original bytes. `seed` must not be zero.
 fn assert_seeks_match<H: TestHash>(
     files: &[FileData],
@@ -296,6 +296,7 @@ fn assert_seeks_match<H: TestHash>(
     for (entry, manifest) in parsed.toc.iter().zip(&parsed.manifests) {
         let data = original(files, &entry.filename);
         let boundaries: Vec<u64> = manifest
+            .manifest()
             .chunk_metadata
             .iter()
             .skip(1)
@@ -306,7 +307,7 @@ fn assert_seeks_match<H: TestHash>(
             seek_ranges(data.len() as u64, &boundaries, seeds.next_u64());
         for (offset, length) in ranges {
             let mut read = Vec::new();
-            for seek in get_seek_chunks(manifest, offset, length).unwrap() {
+            for seek in manifest.seek_chunks(offset, length).unwrap() {
                 let chunk = reader.chunk(&seek.hash);
                 let start = usize::try_from(seek.start_offset).unwrap();
                 let end = usize::try_from(seek.end_offset).unwrap();

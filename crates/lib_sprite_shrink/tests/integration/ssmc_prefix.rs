@@ -10,13 +10,19 @@ use bitcode::{Encode, encode};
 use sprite_shrink::{
     ALGORITHM_ZSTD, HASH_TYPE_XXH3_64, HASH_TYPE_XXH3_128, MAX_CHUNK_LEN,
     SSMC_UID,
-    ChunkLocation, CompressionResult, FileHeader, FileManifestParent,
+    CheckedManifest, ChunkLocation, CompressionResult, FileHeader,
+    FileManifestParent,
     SSAChunkMeta, SSMCFormatData, SSMCTocEntry, SpriteShrinkError,
     build_ssmc_prefix, parse_file_chunk_index,
     parse_file_header, parse_file_metadata, parse_file_toc, parse_format_data,
     parse_ssmc_prefix,
 };
 use sprite_shrink_test_support::{UNSAFE_NAMES, stand_in_for, with_name};
+
+/// The manifests inside `checked`, for comparing with what was written.
+fn unchecked<H: Clone>(checked: &[CheckedManifest<H>]) -> Vec<FileManifestParent<H>> {
+    checked.iter().map(|checked| checked.manifest().clone()).collect()
+}
 
 fn sample_toc() -> Vec<SSMCTocEntry> {
     vec![
@@ -291,7 +297,7 @@ where
     assert_eq!(parsed.header, header);
     assert_eq!(parsed.format_data, format_data);
     assert_eq!(parsed.toc, toc);
-    assert_eq!(encode(&parsed.manifests), encode(&manifests));
+    assert_eq!(encode(&unchecked(&parsed.manifests)), encode(&manifests));
     assert_eq!(parsed.dictionary, comp.dictionary);
 
     // sample_comp stores the chunks at offsets 0, 900 and 940.
@@ -346,8 +352,8 @@ fn parse_ssmc_prefix_ignores_bytes_past_the_prefix() {
     assert_eq!(from_archive.toc, from_prefix.toc);
     assert_eq!(from_archive.dictionary, from_prefix.dictionary);
     assert_eq!(
-        encode(&from_archive.manifests),
-        encode(&from_prefix.manifests)
+        encode(&unchecked(&from_archive.manifests)),
+        encode(&unchecked(&from_prefix.manifests))
     );
     assert_eq!(from_archive.chunk_index.len(), from_prefix.chunk_index.len());
 }

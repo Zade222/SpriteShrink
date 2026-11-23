@@ -5,7 +5,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use sprite_shrink::{decompress_chunk_checked, get_seek_chunks, parse_ssmc_prefix};
+use sprite_shrink::{decompress_chunk_checked, parse_ssmc_prefix};
 
 /// Chunks decompressed per input, so one input can't run for minutes.
 const MAX_CHUNKS: usize = 256;
@@ -16,16 +16,13 @@ fuzz_target!(|data: &[u8]| {
     };
 
     let mut chunks_left = MAX_CHUNKS;
-    for manifest in &parsed.manifests {
-        let size = manifest
-            .chunk_metadata
-            .iter()
-            .fold(0_u64, |total, chunk| total.saturating_add(chunk.length.into()));
+    for checked in &parsed.manifests {
+        let size = checked.size();
         // Only a panic is a failure, so the results are dropped.
-        drop(get_seek_chunks(manifest, 0, size));
-        drop(get_seek_chunks(manifest, size / 3, size / 3));
+        drop(checked.seek_chunks(0, size));
+        drop(checked.seek_chunks(size / 3, size / 3));
 
-        for chunk in &manifest.chunk_metadata {
+        for chunk in &checked.manifest().chunk_metadata {
             if chunks_left == 0 {
                 return;
             }
