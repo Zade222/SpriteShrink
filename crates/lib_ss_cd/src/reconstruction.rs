@@ -3,23 +3,24 @@ use std::{
     fmt::Display,
     hash::Hasher,
     io::{BufWriter, Write},
-    sync::{Arc, Condvar, Mutex},
+    num::NonZeroUsize,
+    sync::Arc,
     thread::scope
 };
 
 use crate::{
     analyze::SYNC_PATTERN,
     ecc::{calc_ecc_simd_inplace, calc_ecc_bitwise, calculate_edc},
-    flac::{AUDIO_SECTOR_LEN, MAX_AUDIO_BLOCK_LEN, audio_block_len},
+    flac::{audio_block_len, decompress_flac_block},
     lib_error_handling::SpriteShrinkCDError,
     lib_structs::{
         DecodedSectorInfo, DiscManifest, MsfTime, RleSectorMap,
         SectorType, SSMDIndices, SubHeaderEntry
     },
     util::{
-        BufferState, ConsumerGuard, SharedBuffer,
-        pull_data, spawn_audio_decomp_worker, spawn_chunk_decomp_worker,
-        spawn_data_fetcher
+        AUDIO_READ_AHEAD, AUDIO_RUN_ITEMS, DATA_READ_AHEAD, DATA_RUN_ITEMS,
+        UtilError,
+        read_stored_at, spawn_data_fetcher, spawn_ordered_decoders
     },
 };
 
@@ -28,8 +29,7 @@ use flume::{
 };
 use sha2::{Digest,Sha512};
 use sprite_shrink::{
-    MAX_CHUNK_LEN,
-    ChunkLocation, Hashable, SpriteShrinkError,
+    ChunkDecompressor, ChunkLocation, Hashable, SpriteShrinkError,
 };
 use thiserror::Error;
 use xxhash_rust::xxh3::Xxh3;
@@ -815,25 +815,6 @@ const fn to_bcd(v: u8) -> u8 {
     ((v / 10) << 4) | (v % 10)
 }
 
-
-
-/// The most decoded bytes `write_disc` buffers per stream: 25 MiB.
-const MAX_BUFFER_SIZE: usize = 25 * 1024 * 1024;
-/*A worker waits for an empty buffer before adding an item that doesn't
-fit, and the sector loop waits until a whole sector, at most
-AUDIO_SECTOR_LEN bytes, is buffered. If the buffer held part of a
-sector and the next item didn't fit beside it, both would wait forever.
-Decoding caps every item at these lengths, whatever the manifest
-records, so each must fit beside a partial sector.*/
-const _: () = assert!(
-    MAX_CHUNK_LEN + AUDIO_SECTOR_LEN <= MAX_BUFFER_SIZE,
-    "a chunk must fit in the buffer beside a partial sector"
-);
-const _: () = assert!(
-    MAX_AUDIO_BLOCK_LEN + AUDIO_SECTOR_LEN <= MAX_BUFFER_SIZE,
-    "an audio block must fit in the buffer beside a partial sector"
-);
-
 /// Rebuilds the disc `manifest` describes from the archive and writes its
 /// raw image to `writer`, checking it against the manifest's integrity hash.
 ///
@@ -841,7 +822,13 @@ const _: () = assert!(
 /// location in the archive, such as an entry of `indices`. The host does
 /// the reading, and should check the location against the archive's
 /// length before allocating, since the location comes from the archive.
-/// It's called from two worker threads at once.
+/// It's called from several worker threads at once.
+///
+/// `worker_count` is how many threads to use, or 0 for one per core. The
+/// calling thread rebuilds and writes the sectors; data chunks and audio
+/// blocks are each decoded by `worker_count - 1` threads (at least one).
+/// A disc keeps its data and audio in separate regions, so the two rarely
+/// need the CPU at once, and a worker with nothing to decode waits.
 ///
 /// `is_cancelled` is called before each sector. Once it returns `true`,
 /// writing stops and the error is a `SpriteShrinkError::Cancelled`, for which
@@ -867,6 +854,7 @@ pub fn write_disc<H, W, C, R, E>(
     exception_blob: &[u8],
     subheader_table: &[[u8; 8]],
     writer: &mut BufWriter<W>,
+    worker_count: usize,
     is_cancelled: C,
     //mut progress_cb: P
 ) -> Result<(), SpriteShrinkCDError>
@@ -877,9 +865,6 @@ where
     R: Fn(ChunkLocation) -> Result<Vec<u8>, E> + Sync,
     E: std::error::Error + Send + Sync + 'static,
 {
-    let (data_tx, data_rx) = bounded(4);
-    let (audio_tx, audio_rx) = bounded(4);
-
     let chunks: Vec<(H, usize)> = manifest.data_stream_layout.iter()
         .map(|data| (data.hash, data.uncomp_len as usize))
         .collect();
@@ -904,45 +889,53 @@ where
 
     let mut msf_offsets = MsfOffsets::new(&manifest.lba_map);
 
-    let shared_data_buffer: SharedBuffer = Arc::new((
-        Mutex::new(BufferState::with_capacity(MAX_BUFFER_SIZE)),
-        Condvar::new(),
-    ));
+    let decoders = match worker_count {
+        0 => std::thread::available_parallelism().map_or(1, NonZeroUsize::get),
+        count => count,
+    }.saturating_sub(1).max(1);
 
-    let shared_audio_buffer: SharedBuffer = Arc::new((
-        Mutex::new(BufferState::with_capacity(MAX_BUFFER_SIZE)),
-        Condvar::new(),
-    ));
+    let external = |e: SpriteShrinkError| SpriteShrinkCDError::External(Box::new(e));
 
-    let cloned_data_buffer =  shared_data_buffer.clone();
-    let cloned_audio_buffer =  shared_audio_buffer.clone();
+    /*One chunk decoder per worker: setting one up and loading the
+    dictionary takes longer than decoding a 2 KiB chunk.*/
+    let new_decompressor = || ChunkDecompressor::new(dictionary).map_err(external);
+    let decode_chunk = |decompressor: &mut ChunkDecompressor, hash: &H, len: usize| {
+        let location = indices.chunk_index.get(hash)
+            .ok_or_else(|| UtilError::MissingHash(hash.to_string()))?;
+        let stored = read_stored_at(&read_stored, *location)?;
+        decompressor.decompress(&stored, len).map_err(external)
+    };
+
+    let no_state = || Ok(());
+    let decode_block = |_state: &mut (), hash: &H, len: usize| {
+        let location = indices.audio_block_index.get(hash)
+            .ok_or_else(|| UtilError::MissingHash(hash.to_string()))?;
+        let stored = read_stored_at(&read_stored, *location)?;
+        Ok(decompress_flac_block(&stored, len)?)
+    };
 
     scope(|scope| -> Result<(), SpriteShrinkCDError>{
-        /*Dropped on any early return from this closure, which is still
-        before `scope` joins the workers.*/
-        let consumer_guard = ConsumerGuard {
-            buffers: [&shared_data_buffer, &shared_audio_buffer],
-        };
-
-        let data_fetch_handle = spawn_chunk_decomp_worker(
+        /*The streams are dropped on any early return from this closure,
+        which closes their channels, so workers waiting to send stop
+        before `scope` joins them.*/
+        let (mut data_stream, data_workers) = spawn_ordered_decoders(
             scope,
             chunks,
-            &indices.chunk_index,
-            dictionary,
-            &read_stored,
-            cloned_data_buffer,
-            MAX_BUFFER_SIZE,
-            data_tx
+            DATA_RUN_ITEMS,
+            DATA_READ_AHEAD,
+            decoders,
+            &new_decompressor,
+            &decode_chunk,
         );
 
-        let audio_fetch_handle = spawn_audio_decomp_worker(
+        let (mut audio_stream, audio_workers) = spawn_ordered_decoders(
             scope,
             audio_blocks,
-            &indices.audio_block_index,
-            &read_stored,
-            cloned_audio_buffer,
-            MAX_BUFFER_SIZE,
-            audio_tx
+            AUDIO_RUN_ITEMS,
+            AUDIO_READ_AHEAD,
+            decoders,
+            &no_state,
+            &decode_block,
         );
 
         for (i, sector_type) in expanded_sector_types.iter().enumerate() {
@@ -957,15 +950,7 @@ where
                 SectorType::ZeroedAudio => {
                     let mut reconstructed_sector = [0u8; 2352];
 
-                    if let Ok(err) = audio_rx.try_recv() {
-                        return Err(err);
-                    }
-
-                    let audio_data = pull_data(
-                        &shared_audio_buffer,
-                        2352,
-                        &audio_rx
-                    )?;
+                    let audio_data = audio_stream.take(2352)?;
 
                     if audio_data.len() != 2352 {
 
@@ -974,21 +959,13 @@ where
                         ).into());
                     }
 
-                    reconstructed_sector.copy_from_slice(&audio_data);
+                    reconstructed_sector.copy_from_slice(audio_data);
                     Ok(reconstructed_sector)
                 }
                 _ => {
                     let needed = sector_type.data_size() as usize;
 
-                    if let Ok(err) = data_rx.try_recv() {
-                        return Err(err);
-                    }
-
-                    let user_data = pull_data(
-                        &shared_data_buffer,
-                        needed,
-                        &data_rx
-                    )?;
+                    let user_data = data_stream.take(needed)?;
 
                     if user_data.len() != sector_type.data_size() as usize {
                         return Err(ReconstructionError::InternalError(
@@ -1010,7 +987,7 @@ where
                     let metadata = subheader_for(subheader_table, data_id)?;
 
                     rebuild_sector_simd(
-                        &user_data,
+                        user_data,
                         metadata,
                         *sector_type,
                         msf_offsets.sector_num(sector_idx),
@@ -1028,16 +1005,20 @@ where
             writer.write_all(&reconstructed_sector)?;
         }
 
-        /*Every sector is written, so stop the workers before joining them.
-        One with data left over, from a manifest that lists more than the
-        sectors use, would otherwise wait for room forever.*/
-        drop(consumer_guard);
+        /*Every sector is written, so close the streams before joining the
+        workers. One with data left over, from a manifest that lists more
+        than the sectors use, would otherwise wait to send forever.*/
+        drop(data_stream);
+        drop(audio_stream);
 
-        data_fetch_handle.join().map_err(|_| ReconstructionError::ThreadPanic(
-            "Chunk fetching thread panicked.".to_string()))?;
-
-        audio_fetch_handle.join().map_err(|_| ReconstructionError::ThreadPanic(
-            "Audio fetching thread panicked.".to_string()))?;
+        for worker in data_workers {
+            worker.join().map_err(|_| ReconstructionError::ThreadPanic(
+                "A chunk decoding thread panicked.".to_string()))?;
+        }
+        for worker in audio_workers {
+            worker.join().map_err(|_| ReconstructionError::ThreadPanic(
+                "An audio decoding thread panicked.".to_string()))?;
+        }
 
         Ok(())
     })?;

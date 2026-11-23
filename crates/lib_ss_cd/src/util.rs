@@ -1,19 +1,12 @@
 use std::{
-    collections::VecDeque,
     error::Error as StdError,
-    fmt::Display,
     thread,
-    sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError},
     thread::{Scope, ScopedJoinHandle},
 };
 
-use crate::{
-    flac::decompress_flac_block,
-    lib_error_handling::SpriteShrinkCDError,
-};
+use crate::lib_error_handling::SpriteShrinkCDError;
 
-use flume::Sender;
-use sprite_shrink::{ChunkDecompressor, ChunkLocation, ChunkMap, Hashable};
+use sprite_shrink::{ChunkLocation, Hashable};
 use thiserror::Error;
 
 
@@ -25,6 +18,9 @@ pub enum UtilError {
     #[error("Reading the {expected} bytes stored at offset {offset} \
         returned {actual} bytes.")]
     WrongReadLength { offset: u64, expected: u32, actual: usize },
+
+    #[error("A decoding thread stopped before sending its data.")]
+    DecoderStopped,
 }
 
 
@@ -55,136 +51,6 @@ where
     }
     Ok(data)
 }
-
-
-/// What a decompression worker and `write_disc`'s sector loop share.
-pub struct BufferState {
-    /// Decompressed bytes the worker has produced and the loop hasn't
-    /// consumed yet.
-    pub data: VecDeque<u8>,
-    /// The worker has stopped producing: it finished, failed or was told
-    /// the loop stopped.
-    pub producer_done: bool,
-    /// The loop has stopped consuming. A worker waiting for room would
-    /// otherwise wait forever, so it stops instead.
-    pub consumer_stopped: bool,
-}
-
-impl BufferState {
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            data: VecDeque::with_capacity(capacity),
-            producer_done: false,
-            consumer_stopped: false,
-        }
-    }
-}
-
-pub type SharedBuffer = Arc<(Mutex<BufferState>, Condvar)>;
-
-/// Locks a buffer's state, recovering it if another thread panicked while
-/// holding the lock.
-///
-/// Recovering is sound because no invariant spans the state's fields: the
-/// deque is still a valid deque if a panic interrupts an `extend` or a
-/// `drain`, and the flags are plain stores. The panic itself isn't lost: a
-/// worker that panicked is reported as `ThreadPanic` when `write_disc` joins
-/// it.
-fn lock_state(lock: &Mutex<BufferState>) -> MutexGuard<'_, BufferState> {
-    lock.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Waits on `cvar`, recovering the state as [`lock_state`] does.
-fn wait_state<'a>(
-    cvar: &Condvar,
-    state: MutexGuard<'a, BufferState>,
-) -> MutexGuard<'a, BufferState> {
-    cvar.wait(state).unwrap_or_else(PoisonError::into_inner)
-}
-
-struct WorkerGuard {
-       shared_state: SharedBuffer,
-   }
-
-
-impl Drop for WorkerGuard {
-    fn drop(&mut self) {
-        let (lock, cvar) = &*self.shared_state;
-
-        let mut state = lock_state(lock);
-        state.producer_done = true;
-        cvar.notify_all();
-    }
-}
-
-/// Tells the workers feeding `buffers` that the consumer has stopped, when
-/// dropped.
-///
-/// `write_disc` creates one inside its thread scope, so it drops on every
-/// return from the sector loop, early or not, before the scope joins the
-/// workers. Without it, a worker waiting for buffer room after the loop
-/// returned early would never wake, and the join would hang.
-pub struct ConsumerGuard<'a> {
-    pub buffers: [&'a SharedBuffer; 2],
-}
-
-impl Drop for ConsumerGuard<'_> {
-    fn drop(&mut self) {
-        for buffer in self.buffers {
-            let (lock, cvar) = &**buffer;
-            let mut state = lock_state(lock);
-            state.consumer_stopped = true;
-            cvar.notify_all();
-        }
-    }
-}
-
-/// Waits until the buffer has room for `data`, then appends it.
-///
-/// The buffer may hold up to `max_buffer_size` bytes. Once it's full, the
-/// worker waits until the consumer has drained it to half. Returns `false`,
-/// without appending, if the consumer has stopped, so the worker can stop
-/// too.
-///
-/// `data` must fit in the buffer beside the part of a sector the consumer
-/// may be waiting to complete, or both wait forever. `write_disc` checks
-/// this for the largest item at compile time.
-fn push_data(
-    shared_state: &SharedBuffer,
-    data: Vec<u8>,
-    max_buffer_size: usize,
-) -> bool {
-    debug_assert!(
-        data.len() <= max_buffer_size,
-        "a {}-byte item can't fit in a {max_buffer_size}-byte buffer",
-        data.len()
-    );
-    let resume_threshold = max_buffer_size / 2;
-    let (lock, cvar) = &**shared_state;
-    let mut state = lock_state(lock);
-
-    if state.data.len() >= max_buffer_size {
-        while state.data.len() > resume_threshold && !state.consumer_stopped {
-            state = wait_state(cvar, state);
-        }
-    }
-
-    while state.data.len() + data.len() > max_buffer_size
-        && !state.data.is_empty()
-        && !state.consumer_stopped
-    {
-        state = wait_state(cvar, state);
-    }
-
-    if state.consumer_stopped {
-        return false;
-    }
-
-    state.data.extend(data);
-    cvar.notify_all();
-    true
-}
-
 
 
 pub fn spawn_data_fetcher<H, D, E>(
@@ -219,155 +85,214 @@ where
 }
 
 
-/// Spawns a worker that reads, decodes and buffers each audio block in
-/// `blocks`, given as its hash and its decoded length from the disc
-/// manifest. Decoding stops just past that length.
-pub fn spawn_audio_decomp_worker<'scope, 'env, H, R, E>(
+/// A run of data chunks ends at this many chunks. A chunk decodes in about
+/// 2 µs, about what handing it to another thread costs, so workers get
+/// chunks in runs.
+pub const DATA_RUN_ITEMS: usize = 64;
+
+/// A run of audio blocks is one block: decoding a block takes far longer
+/// than handing it over, and single blocks spread the work most evenly.
+pub const AUDIO_RUN_ITEMS: usize = 1;
+
+/// A run also ends once its decoded length reaches this many bytes, so
+/// large chunks still spread across the workers.
+const RUN_BYTE_TARGET: usize = 128 * 1024;
+
+/// How far ahead of the reader the data chunk decoders work, in decoded
+/// bytes, shared among them. zstd decodes much faster than the sector loop
+/// rebuilds sectors, so a few runs refill quickly; decoding further ahead
+/// only keeps more cores busy, which lowers the clock and the cache hits
+/// of the sector loop.
+pub const DATA_READ_AHEAD: usize = 2 * 1024 * 1024;
+
+/// How far ahead the audio block decoders work. FLAC decodes slower than
+/// the sector loop consumes audio, so blocks decoded while the loop is in
+/// a data region are time saved when it reaches the audio.
+pub const AUDIO_READ_AHEAD: usize = 16 * 1024 * 1024;
+
+/// The most decoded bytes the workers of one stream may hold, whatever
+/// the read-ahead: the worker count is lowered so that two runs per worker
+/// (one decoding, one waiting) fit, which only matters for large chunks.
+const IN_FLIGHT_BYTE_BUDGET: usize = 64 * 1024 * 1024;
+
+/// The items for one worker's turn: each item and its decoded length.
+type Run<T> = Vec<(T, usize)>;
+
+/// What a worker sends back for a run: each item's decoded bytes, or the
+/// error that stopped it.
+type RunResult = Result<Vec<Vec<u8>>, SpriteShrinkCDError>;
+
+/// Splits `items` into runs of at most `max_items` items, ending a run
+/// early once its decoded length reaches `RUN_BYTE_TARGET`. Every run
+/// holds at least one item.
+fn split_runs<T>(items: Vec<(T, usize)>, max_items: usize) -> Vec<Run<T>> {
+    let mut runs = Vec::new();
+    let mut run = Vec::new();
+    let mut run_bytes = 0usize;
+    for (item, len) in items {
+        run_bytes = run_bytes.saturating_add(len);
+        run.push((item, len));
+        if run.len() >= max_items || run_bytes >= RUN_BYTE_TARGET {
+            runs.push(std::mem::take(&mut run));
+            run_bytes = 0;
+        }
+    }
+    if !run.is_empty() {
+        runs.push(run);
+    }
+    runs
+}
+
+/// The decoded length of the longest run in `runs`.
+fn largest_run<T>(runs: &[Run<T>]) -> usize {
+    runs.iter()
+        .map(|run| run.iter().fold(0usize, |total, (_, len)| total.saturating_add(*len)))
+        .max()
+        .unwrap_or(0)
+}
+
+/// How many workers to start for `runs`: `requested` (at least 1), no
+/// more than there are runs, and few enough that two runs per worker fit
+/// in `IN_FLIGHT_BYTE_BUDGET`.
+fn worker_count_for<T>(runs: &[Run<T>], requested: usize) -> usize {
+    let affordable = IN_FLIGHT_BYTE_BUDGET / largest_run(runs).saturating_mul(2).max(1);
+    requested.min(affordable).min(runs.len()).max(1)
+}
+
+/// How many runs each of `workers` workers' channels holds: each worker's
+/// share of `read_ahead`, in runs, less the one it's decoding. At least 1.
+fn channel_depth_for<T>(runs: &[Run<T>], workers: usize, read_ahead: usize) -> usize {
+    let per_worker = read_ahead / workers.max(1);
+    (per_worker / largest_run(runs).max(1)).saturating_sub(1).max(1)
+}
+
+/// Decodes `items` on several worker threads, and returns the stream the
+/// caller reads the decoded bytes from, in item order, with the workers'
+/// handles.
+///
+/// `items` holds each item and its decoded length, in the order the bytes
+/// are needed. They're split into runs (see `split_runs`); run `r` goes to
+/// worker `r % workers`, and each worker sends its runs back on its own
+/// channel, sized by `channel_depth_for`. Reading the channels in turn
+/// returns the runs in order without a reorder buffer.
+///
+/// Each worker makes its state with `new_state` once, when it decodes its
+/// first item, and passes it to every `decode` call. An error, from
+/// either, replaces its whole run and reaches the reader at that run's
+/// turn: the bytes before it are those of the earlier runs, in order.
+/// Dropping the stream closes the channels, so a worker waiting to send
+/// stops; join the handles after that.
+pub fn spawn_ordered_decoders<'scope, 'env, T, S, N, D>(
     scope: &'scope Scope<'scope, 'env>,
-    blocks: Vec<(H, usize)>,
-    audio_index: &'env ChunkMap<H, ChunkLocation>,
-    read_stored: &'env R,
-    shared_state: SharedBuffer,
-    max_buffer_size: usize,
-    error_tx: Sender<SpriteShrinkCDError>,
-) -> ScopedJoinHandle<'scope, ()>
+    items: Vec<(T, usize)>,
+    max_run_items: usize,
+    read_ahead: usize,
+    worker_count: usize,
+    new_state: &'env N,
+    decode: &'env D,
+) -> (OrderedStream, Vec<ScopedJoinHandle<'scope, ()>>)
 where
-    H: Hashable + Display + Send + Sync + 'static,
-    R: Fn(ChunkLocation) -> Result<Vec<u8>, E> + Sync,
-    E: StdError + Send + Sync + 'static,
+    T: Send + 'scope,
+    N: Fn() -> Result<S, SpriteShrinkCDError> + Sync,
+    D: Fn(&mut S, &T, usize) -> Result<Vec<u8>, SpriteShrinkCDError> + Sync,
 {
-    scope.spawn(move || {
-        let _guard = WorkerGuard {
-            shared_state: shared_state.clone(),
-        };
+    let runs = split_runs(items, max_run_items);
+    let run_count = runs.len();
+    let workers = worker_count_for(&runs, worker_count);
+    let depth = channel_depth_for(&runs, workers, read_ahead);
 
-        for (hash, len) in blocks {
-
-            let result = (|| -> Result<Vec<u8>, SpriteShrinkCDError> {
-                let chunk_loc = audio_index.get(&hash)
-                    .ok_or_else(|| UtilError::MissingHash(hash.to_string()))?;
-
-                let comp_data = read_stored_at(read_stored, *chunk_loc)?;
-
-                Ok(decompress_flac_block(&comp_data, len)?)
-            })();
-
-
-            match result {
-                Ok(data) => {
-                    if !push_data(&shared_state, data, max_buffer_size) {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    let _ = error_tx.send(e);
-                    break;
-                }
-            }
-        }
-    })
-}
-
-
-/// Spawns a worker that reads, decodes and buffers each data chunk in
-/// `chunks`, given as its hash and its length from the disc manifest.
-/// Decoding stops just past that length.
-pub fn spawn_chunk_decomp_worker<'scope, 'env, H, R, E>(
-    scope: &'scope thread::Scope<'scope, 'env>,
-    chunks: Vec<(H, usize)>,
-    chunk_index: &'env ChunkMap<H, ChunkLocation>,
-    dictionary: &'env [u8],
-    read_stored: &'env R,
-    shared_state: SharedBuffer,
-    max_buffer_size: usize,
-    error_tx: Sender<SpriteShrinkCDError>,
-) -> ScopedJoinHandle<'scope, ()>
-where
-    H: Hashable + Display + Send + Sync + 'static,
-    R: Fn(ChunkLocation) -> Result<Vec<u8>, E> + Sync,
-    E: StdError + Send + Sync + 'static,
-{
-    scope.spawn(move || {
-        let _guard = WorkerGuard {
-            shared_state: shared_state.clone(),
-        };
-
-        /*One decoder for every chunk: setting one up and loading the
-        dictionary takes longer than decoding a 2 KiB chunk. It's made with
-        the first chunk, so a failure goes the way every other error does.*/
-        let mut decompressor = None;
-
-        for (hash, len) in chunks {
-            let result = (|| -> Result<Vec<u8>, SpriteShrinkCDError> {
-                let external = |e| SpriteShrinkCDError::External(Box::new(e));
-
-                let chunk_loc = chunk_index.get(&hash)
-                    .ok_or_else(|| UtilError::MissingHash(hash.to_string()))?;
-
-                let comp_data = read_stored_at(read_stored, *chunk_loc)?;
-
-                let decompressor = match &mut decompressor {
-                    Some(decompressor) => decompressor,
-                    None => decompressor.insert(
-                        ChunkDecompressor::new(dictionary).map_err(external)?
-                    ),
-                };
-
-                decompressor.decompress(&comp_data, len).map_err(external)
-            })();
-
-
-            match result {
-                Ok(data) => {
-                    if !push_data(&shared_state, data, max_buffer_size) {
-                        break;
-                    }
-                }
-                Err(e) => {
-                    let _ = error_tx.send(e);
-                    break;
-                }
-            }
-        }
-    })
-}
-
-
-/// Waits until the buffer holds `amount` bytes, or its worker has stopped,
-/// and takes up to `amount` bytes from it.
-///
-/// # Errors
-///
-/// Returns the worker's error if it sent one on `error_rx` while this
-/// waited, or before it stopped with less than `amount` buffered.
-pub fn pull_data(
-    shared_state: &SharedBuffer,
-    amount: usize,
-    error_rx: &flume::Receiver<SpriteShrinkCDError>,
-) -> Result<Vec<u8>, SpriteShrinkCDError>  {
-    let (lock, cvar) = &**shared_state;
-    let mut state = lock_state(lock);
-
-    while state.data.len() < amount && !state.producer_done {
-        state = wait_state(cvar, state);
-
-        if let Ok(err) = error_rx.try_recv() {
-            return Err(err);
+    let mut assigned: Vec<Vec<Run<T>>> = (0..workers).map(|_| Vec::new()).collect();
+    for (run, slot) in runs.into_iter().zip((0..workers).cycle()) {
+        if let Some(worker_runs) = assigned.get_mut(slot) {
+            worker_runs.push(run);
         }
     }
 
-    if state.data.len() < amount
-        && let Ok(err) = error_rx.try_recv()
-    {
-        return Err(err);
+    let mut receivers = Vec::with_capacity(workers);
+    let mut handles = Vec::with_capacity(workers);
+    for worker_runs in assigned {
+        let (tx, rx) = flume::bounded::<RunResult>(depth);
+        receivers.push(rx);
+        handles.push(scope.spawn(move || {
+            let mut state = None;
+            for run in worker_runs {
+                let result = (|| -> RunResult {
+                    let state = match &mut state {
+                        Some(state) => state,
+                        None => state.insert(new_state()?),
+                    };
+                    run.iter().map(|(item, len)| decode(state, item, *len)).collect()
+                })();
+                let failed = result.is_err();
+                /*A failed send means the reader has stopped, and after an
+                error there's nothing more to do.*/
+                if tx.send(result).is_err() || failed {
+                    break;
+                }
+            }
+        }));
     }
 
-    let to_pull = std::cmp::min(amount, state.data.len());
-    let data: Vec<u8> = state.data.drain(..to_pull).collect();
+    let stream = OrderedStream {
+        receivers,
+        next_run: 0,
+        run_count,
+        buffer: Vec::new(),
+        start: 0,
+    };
+    (stream, handles)
+}
 
-    cvar.notify_all();
+/// The decoded bytes of one stream, in order, from the workers
+/// `spawn_ordered_decoders` started.
+///
+/// It keeps the bytes of at most one run beyond what's been taken, so the
+/// workers' channels and runs bound its memory.
+#[derive(Debug)]
+pub struct OrderedStream {
+    receivers: Vec<flume::Receiver<RunResult>>,
+    /// The run to receive next; it comes from worker `next_run % workers`.
+    next_run: usize,
+    run_count: usize,
+    /// Received bytes; those before `start` have been taken.
+    buffer: Vec<u8>,
+    start: usize,
+}
 
-    Ok(data)
+impl OrderedStream {
+    /// Takes the next `amount` bytes, receiving runs as needed, and lends
+    /// them until the next call. Returns fewer only if the stream has
+    /// ended.
+    ///
+    /// # Errors
+    ///
+    /// The error a worker hit, at its run's turn, or
+    /// `UtilError::DecoderStopped` if a worker stopped without sending its
+    /// run (it panicked; joining it raises the panic).
+    pub fn take(&mut self, amount: usize) -> Result<&[u8], SpriteShrinkCDError> {
+        while self.buffer.len() - self.start < amount && self.next_run < self.run_count {
+            let decoded = self.receivers
+                .get(self.next_run % self.receivers.len().max(1))
+                .ok_or(UtilError::DecoderStopped)?
+                .recv()
+                .map_err(|_disconnected| UtilError::DecoderStopped)??;
+            self.next_run += 1;
+
+            /*Drop the bytes already taken before adding more, so the
+            buffer holds one run plus a partial sector, not the whole
+            stream.*/
+            self.buffer.drain(..self.start);
+            self.start = 0;
+            for data in decoded {
+                self.buffer.extend_from_slice(&data);
+            }
+        }
+
+        let start = self.start;
+        let end = self.buffer.len().min(start.saturating_add(amount));
+        self.start = end;
+        Ok(self.buffer.get(start..end).unwrap_or_default())
+    }
 }
 
 #[cfg(test)]
@@ -399,56 +324,119 @@ mod tests {
         assert!(err.to_string().contains("host read failed"), "{err}");
     }
 
-    /// The worker failed, sent its error and marked itself done before
-    /// the consumer asked for data, so the consumer never waits.
+    /// Decodes `items` with `workers` workers in runs of `run_items` and
+    /// takes the stream `step` bytes at a time until it ends or fails.
+    /// Each item decodes to its value repeated `len` times; item 13 fails.
+    /// Odd items take longer, so workers finish out of turn.
+    fn take_all(
+        items: Vec<(u8, usize)>,
+        run_items: usize,
+        workers: usize,
+        step: usize,
+    ) -> (Vec<u8>, Option<SpriteShrinkCDError>) {
+        let new_state = || Ok(0_usize);
+        let decode = |decoded: &mut usize, item: &u8, len: usize| {
+            if *item == 13 {
+                return Err(UtilError::MissingHash("13".to_string()).into());
+            }
+            if item % 2 == 1 {
+                thread::sleep(std::time::Duration::from_micros(200));
+            }
+            *decoded += 1;
+            Ok(vec![*item; len])
+        };
+        thread::scope(|scope| {
+            let (mut stream, handles) = spawn_ordered_decoders(
+                scope, items, run_items, AUDIO_READ_AHEAD, workers, &new_state, &decode,
+            );
+            let mut taken = Vec::new();
+            let mut error = None;
+            loop {
+                match stream.take(step) {
+                    Ok([]) => break,
+                    Ok(bytes) => taken.extend_from_slice(bytes),
+                    Err(e) => {
+                        error = Some(e);
+                        break;
+                    }
+                }
+            }
+            drop(stream);
+            for handle in handles {
+                handle.join().unwrap();
+            }
+            (taken, error)
+        })
+    }
+
     #[test]
-    fn a_pull_after_the_worker_failed_returns_its_error() {
-        let buffer: SharedBuffer =
-            Arc::new((Mutex::new(BufferState::with_capacity(0)), Condvar::new()));
-        lock_state(&buffer.0).producer_done = true;
-        let (error_tx, error_rx) = flume::unbounded();
-        error_tx.send(UtilError::MissingHash("7".to_string()).into()).unwrap();
+    fn decoded_bytes_come_out_in_item_order_with_any_worker_count() {
+        let items: Vec<(u8, usize)> = (0..12).chain(14..60)
+            .map(|item| (item, usize::from(item % 5) * 700 + 1))
+            .collect();
+        let expected: Vec<u8> = items.iter()
+            .flat_map(|&(item, len)| vec![item; len])
+            .collect();
 
-        let result = pull_data(&buffer, 2048, &error_rx);
+        for (run_items, workers, step) in [(1, 1, 2352), (1, 4, 2048), (64, 4, 2352), (3, 7, 1)] {
+            let (taken, error) = take_all(items.clone(), run_items, workers, step);
+            assert!(error.is_none(), "{error:?}");
+            assert!(taken == expected, "runs of {run_items}, {workers} workers");
+        }
+    }
 
+    #[test]
+    fn an_error_comes_at_its_runs_turn_after_the_runs_before_it() {
+        // Runs of two: item 13 fails, so its run (items 12 and 13) is
+        // replaced by the error. Items 0 to 11 come first, in order.
+        let items: Vec<(u8, usize)> = (0..30).map(|item| (item, 100)).collect();
+        let before: Vec<u8> = (0..12).flat_map(|item| vec![item; 100]).collect();
+
+        let (taken, error) = take_all(items, 2, 4, 64);
+
+        assert!(before.starts_with(&taken), "{} bytes taken", taken.len());
+        assert!(taken.len() > before.len() - 64, "{} bytes taken", taken.len());
         assert!(
-            matches!(result, Err(SpriteShrinkCDError::Util(UtilError::MissingHash(_)))),
-            "{result:?}"
+            matches!(error, Some(SpriteShrinkCDError::Util(UtilError::MissingHash(_)))),
+            "{error:?}"
         );
     }
 
-    /// A buffer whose lock was poisoned by a thread that panicked while
-    /// holding it, after appending `data`.
-    fn poisoned_buffer(data: &[u8]) -> SharedBuffer {
-        let buffer: SharedBuffer =
-            Arc::new((Mutex::new(BufferState::with_capacity(0)), Condvar::new()));
-        let shared = Arc::clone(&buffer);
-        let data = data.to_vec();
-        let result = thread::spawn(move || {
-            let mut state = shared.0.lock().unwrap();
-            state.data.extend(data);
-            panic!("worker panicked while holding the buffer lock");
-        })
-        .join();
-        assert!(result.is_err());
-        assert!(buffer.0.is_poisoned());
-        buffer
+    #[test]
+    fn dropping_the_stream_early_stops_the_workers() {
+        // No read-ahead, so each channel holds one run, and each worker has
+        // more runs than that: all of them are waiting to send when the
+        // stream is dropped, and the joins would hang if a closed channel
+        // didn't stop them.
+        let new_state = || Ok(());
+        let decode = |(): &mut (), item: &u8, len: usize| Ok(vec![*item; len]);
+        let items: Vec<(u8, usize)> = (0..=255).map(|item| (item, 64)).collect();
+
+        thread::scope(|scope| {
+            let (mut stream, handles) =
+                spawn_ordered_decoders(scope, items, 1, 0, 4, &new_state, &decode);
+            assert_eq!(stream.take(64).unwrap(), [0; 64]);
+            drop(stream);
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
     }
 
     #[test]
-    fn a_poisoned_buffer_can_still_be_read_and_written() {
-        let buffer = poisoned_buffer(b"abc");
-        let (_error_tx, error_rx) = flume::unbounded();
+    fn runs_end_at_their_item_or_byte_limit_and_cap_the_workers() {
+        let small: Vec<((), usize)> = vec![((), 2048); 200];
+        let runs = split_runs(small, DATA_RUN_ITEMS);
+        let lengths: Vec<usize> = runs.iter().map(Vec::len).collect();
+        // 64 chunks of 2 KiB reach the 128 KiB target together.
+        assert_eq!(lengths, [64, 64, 64, 8]);
+        assert_eq!(worker_count_for(&runs, 23), 4);
 
-        assert!(push_data(&buffer, b"de".to_vec(), 1024));
-        assert_eq!(pull_data(&buffer, 5, &error_rx).unwrap(), b"abcde");
-    }
-
-    #[test]
-    fn a_poisoned_buffer_still_reports_a_stopped_consumer() {
-        let buffer = poisoned_buffer(b"");
-        drop(ConsumerGuard { buffers: [&buffer, &buffer] });
-
-        assert!(!push_data(&buffer, b"x".to_vec(), 1024));
+        // 16 MiB items: one per run, and two runs per worker in 64 MiB.
+        let large: Vec<((), usize)> = vec![((), 16 << 20); 10];
+        let runs = split_runs(large, DATA_RUN_ITEMS);
+        assert_eq!(runs.len(), 10);
+        assert_eq!(worker_count_for(&runs, 23), 2);
+        assert_eq!(worker_count_for::<()>(&[], 23), 1);
     }
 }
