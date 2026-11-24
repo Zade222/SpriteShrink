@@ -95,8 +95,11 @@ jobs:
       - name: Install QEMU user-mode emulation
         run: sudo apt-get update && sudo apt-get install -y qemu-user
 
-      # GitHub runners have AVX2, so the SIMD dispatch normally never takes
-      # the non-AVX2 path. QEMU's Westmere model has SSE4.2 but no AVX2.
+      # GitHub runners have AVX2, so SIMD detection picks AVX2 or better
+      # there. The ECC tests run the lower levels directly, but only here
+      # does detection itself pick SSE4.2, as on a CPU without AVX2, and the
+      # rest of the crate's tests run at it. QEMU's Westmere model has
+      # SSE4.2 but no AVX2.
       - name: Test sprite_shrink_cd under QEMU (Westmere)
         run: cargo test -p sprite_shrink_cd --release
         env:
@@ -126,8 +129,11 @@ jobs:
         run: >
           cargo miri test -p sprite_shrink --test integration ffi_smoke::
 
-      # The ECC kernel writes and reads SIMD vectors through raw pointers.
-      # The ECC proptests check safe code, so they aren't run here.
+      # The ECC kernel has no unsafe code of its own, but runs on
+      # fearless_simd's loads, stores and intrinsics, which are unsafe inside
+      # that crate. Miri detects only the target's baseline features, so this
+      # runs the SSE2 level and the fallback. The ECC proptests check plain
+      # scalar code, so they aren't run here.
       - name: ECC kernel under Miri
         run: >
           cargo miri test -p sprite_shrink_cd --lib --
