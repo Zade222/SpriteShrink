@@ -21,9 +21,9 @@ bitcode = { version = "~0.6", default-features = false, features = ["derive"] }
 bytemuck = { version = "~1.23", default-features = false, features = ["derive"] }
 crc-fast = { version = "~1.10", default-features = false, features = ["alloc", "std"] }
 dashmap = { version = "~6.1", default-features = false }
+fearless_simd = { version = "~1.2", default-features = false, features = ["std"] }
 flac-codec = { version = "~1.3", default-features = false }
 flume = { version = "~0.11", default-features = false }
-pulp = { version = "~0.22" }
 regex = { version = "~1.13", default-features = false, features = ["unicode-perl"] }
 sha2 = { version = "~0.10", default-features = false}
 serde = { version = "~1.0", default-features = false, features = ["derive"] }
@@ -37,6 +37,9 @@ cbindgen = "0.29"
 
 [dev-dependencies]
 criterion = { version = "~0.8", default-features = false, features = ["cargo_bench_support"] }
+# Builds the fallback level on x86_64 and aarch64 too, so the tests can run
+# the ECC at it. Only test and bench builds get it.
+fearless_simd = { version = "~1.2", default-features = false, features = ["std", "force_support_fallback"] }
 proptest = { version = "~1.12", default-features = false, features = ["std"] }
 sprite_shrink_test_support = { path = "../test_support" }
 zstd = { version = "~0.13", default-features = false }
