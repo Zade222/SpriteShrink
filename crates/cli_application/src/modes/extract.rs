@@ -588,6 +588,7 @@ where
                 &exception_blob,
                 &subheader_table,
                 writer,
+                args.threads.unwrap_or(0),
                 || !running.load(Ordering::SeqCst)
             )
             .map_err(CliError::from)

@@ -63,6 +63,7 @@ fuzz_target!(|data: &[u8]| {
             &parsed.exception_blob,
             &parsed.subheader_table,
             &mut sink,
+            1,
             || {
                 let left = sectors_left.get();
                 sectors_left.set(left.saturating_sub(1));

@@ -30,6 +30,10 @@ use sprite_shrink_cd::{
 use xxhash_rust::xxh3::xxh3_64;
 
 const SECTOR: usize = 2352;
+
+/// Threads `write_disc` uses: several decoders per stream, so every disc
+/// read back here also checks the decoders keep the order.
+const WORKERS: usize = 4;
 const BIN_NAME: &str = "disc.bin";
 
 /// The sector a disc's first sector is numbered as in its headers.
@@ -351,6 +355,7 @@ fn write_out(disc: &Archived) -> Vec<u8> {
         &disc.exception_blob,
         &disc.subheader_table,
         &mut writer,
+        WORKERS,
         || false,
     )
     .unwrap();
@@ -606,6 +611,7 @@ fn a_wrong_integrity_hash_fails_write_disc() {
         &disc.exception_blob,
         &disc.subheader_table,
         &mut writer,
+        WORKERS,
         || false,
     )
     .unwrap_err();
@@ -676,6 +682,7 @@ where
             &disc.exception_blob,
             &disc.subheader_table,
             &mut writer,
+            WORKERS,
             is_cancelled,
         );
         // Fails only if the test already gave up waiting, which the test
