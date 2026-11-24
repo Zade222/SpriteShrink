@@ -4,6 +4,7 @@ use std::{
     hash::Hasher,
     io::{BufWriter, Write},
     num::NonZeroUsize,
+    ops::Range,
     sync::Arc,
     thread::scope
 };
@@ -20,7 +21,8 @@ use crate::{
     util::{
         AUDIO_READ_AHEAD, AUDIO_RUN_ITEMS, DATA_READ_AHEAD, DATA_RUN_ITEMS,
         UtilError,
-        read_stored_at, spawn_data_fetcher, spawn_ordered_decoders
+        read_stored_at, spawn_data_fetcher, spawn_ordered_decoders,
+        spawn_ordered_pool
     },
 };
 
@@ -815,6 +817,105 @@ const fn to_bcd(v: u8) -> u8 {
     ((v / 10) << 4) | (v % 10)
 }
 
+/// Sectors rebuilt per job. Rebuilding one takes about a microsecond and a
+/// half, so a batch is about 0.4 ms of work, far more than handing it to a
+/// thread costs, while a batch's input and output stay near 1.2 MB.
+const REBUILD_BATCH_SECTORS: usize = 256;
+
+/// A data sector for `rebuild_batch` to rebuild into its slot.
+struct DataSectorJob<'a> {
+    sector_type: SectorType,
+    /// Where its 2352 bytes go in the batch's `sectors`.
+    slot: Range<usize>,
+    /// Where its user data sits in the batch's `user_data`.
+    user_data: Range<usize>,
+    metadata: [u8; 8],
+    sector_num: u32,
+    exception: Option<&'a [u8]>,
+}
+
+/// Sectors gathered in disc order for a rebuild worker. Audio sectors are
+/// copied straight into `sectors`; each data sector gets a slot there for
+/// the worker to fill.
+///
+/// Batches are recycled: the worker hands the batch back with `sectors`
+/// filled, and once they're written it's cleared and reused, so after the
+/// first few no batch allocates or regrows.
+struct RebuildBatch<'a> {
+    sectors: Vec<u8>,
+    user_data: Vec<u8>,
+    data_jobs: Vec<DataSectorJob<'a>>,
+    sector_count: usize,
+}
+
+impl<'a> RebuildBatch<'a> {
+    /// An empty batch with room for `REBUILD_BATCH_SECTORS` sectors of any
+    /// type.
+    fn with_capacity() -> Self {
+        Self {
+            sectors: Vec::with_capacity(REBUILD_BATCH_SECTORS * 2352),
+            user_data: Vec::with_capacity(REBUILD_BATCH_SECTORS * 2336),
+            data_jobs: Vec::with_capacity(REBUILD_BATCH_SECTORS),
+            sector_count: 0,
+        }
+    }
+
+    /// Empties the batch, keeping its buffers' capacity.
+    fn clear(&mut self) {
+        self.sectors.clear();
+        self.user_data.clear();
+        self.data_jobs.clear();
+        self.sector_count = 0;
+    }
+
+    fn push_audio(&mut self, sector: &[u8]) {
+        self.sectors.extend_from_slice(sector);
+        self.sector_count += 1;
+    }
+
+    fn push_data(
+        &mut self,
+        sector_type: SectorType,
+        user_data: &[u8],
+        metadata: [u8; 8],
+        sector_num: u32,
+        exception: Option<&'a [u8]>,
+    ) {
+        let slot_start = self.sectors.len();
+        self.sectors.resize(slot_start + 2352, 0);
+        let data_start = self.user_data.len();
+        self.user_data.extend_from_slice(user_data);
+        self.data_jobs.push(DataSectorJob {
+            sector_type,
+            slot: slot_start..self.sectors.len(),
+            user_data: data_start..self.user_data.len(),
+            metadata,
+            sector_num,
+            exception,
+        });
+        self.sector_count += 1;
+    }
+}
+
+/// Rebuilds a batch's data sectors into their slots and hands the batch
+/// back, its `sectors` ready to write.
+fn rebuild_batch(mut batch: RebuildBatch<'_>) -> Result<RebuildBatch<'_>, ReconstructionError> {
+    for job in &batch.data_jobs {
+        let user_data = batch.user_data.get(job.user_data.clone()).unwrap_or_default();
+        let rebuilt = rebuild_sector_simd(
+            user_data,
+            &job.metadata,
+            job.sector_type,
+            job.sector_num,
+            job.exception,
+        )?;
+        if let Some(slot) = batch.sectors.get_mut(job.slot.clone()) {
+            slot.copy_from_slice(&rebuilt);
+        }
+    }
+    Ok(batch)
+}
+
 /// Rebuilds the disc `manifest` describes from the archive and writes its
 /// raw image to `writer`, checking it against the manifest's integrity hash.
 ///
@@ -914,10 +1015,16 @@ where
         Ok(decompress_flac_block(&stored, len)?)
     };
 
+    let rebuild = |batch| rebuild_batch(batch);
+    /*Half as many rebuilders as decoders: rebuilding a data sector costs
+    about what decoding it does, and on an audio disc they have little to
+    do but would still hold cores the FLAC decoders need.*/
+    let rebuilders = decoders.div_ceil(2);
+
     scope(|scope| -> Result<(), SpriteShrinkCDError>{
-        /*The streams are dropped on any early return from this closure,
-        which closes their channels, so workers waiting to send stop
-        before `scope` joins them.*/
+        /*The streams and the rebuild pool are dropped on any early return
+        from this closure, which closes their channels, so workers waiting
+        to send or receive stop before `scope` joins them.*/
         let (mut data_stream, data_workers) = spawn_ordered_decoders(
             scope,
             chunks,
@@ -938,6 +1045,26 @@ where
             &decode_block,
         );
 
+        /*The sectors are rebuilt on workers in batches; this thread
+        gathers each batch's input in disc order, and hashes and writes the
+        rebuilt batches in the same order.*/
+        let (mut rebuilds, rebuild_workers) =
+            spawn_ordered_pool(scope, rebuilders, &rebuild);
+        /*Writes a rebuilt batch and returns it emptied, for reuse.*/
+        let mut write_rebuilt = |rebuilt: Result<_, ReconstructionError>| {
+            let mut batch: RebuildBatch = rebuilt?;
+            hasher.update(&batch.sectors);
+            /*A batch is a few hundred KiB, too little for `BufWriter` to
+            pass straight through, so it would copy it first. Nothing else
+            is buffered, so write it directly.*/
+            writer.flush()?;
+            writer.get_mut().write_all(&batch.sectors)?;
+            batch.clear();
+            Ok::<_, SpriteShrinkCDError>(batch)
+        };
+        let mut spare: Vec<RebuildBatch> = Vec::new();
+        let mut batch = RebuildBatch::with_capacity();
+
         for (i, sector_type) in expanded_sector_types.iter().enumerate() {
             if is_cancelled() {
                 return Err(SpriteShrinkError::Cancelled.into());
@@ -945,11 +1072,9 @@ where
 
             let sector_idx = i as u32;
 
-            let sector_result = match sector_type {
+            match sector_type {
                 SectorType::Audio | SectorType::PregapAudio |
                 SectorType::ZeroedAudio => {
-                    let mut reconstructed_sector = [0u8; 2352];
-
                     let audio_data = audio_stream.take(2352)?;
 
                     if audio_data.len() != 2352 {
@@ -959,8 +1084,7 @@ where
                         ).into());
                     }
 
-                    reconstructed_sector.copy_from_slice(audio_data);
-                    Ok(reconstructed_sector)
+                    batch.push_audio(audio_data);
                 }
                 _ => {
                     let needed = sector_type.data_size() as usize;
@@ -986,23 +1110,38 @@ where
                         .ok_or(ReconstructionError::MissingSubheader(i))?;
                     let metadata = subheader_for(subheader_table, data_id)?;
 
-                    rebuild_sector_simd(
-                        user_data,
-                        metadata,
+                    batch.push_data(
                         *sector_type,
+                        user_data,
+                        *metadata,
                         msf_offsets.sector_num(sector_idx),
                         exception,
-                    )
+                    );
                 }
-            };
+            }
 
-            let reconstructed_sector = sector_result.map_err(|e| {
-                SpriteShrinkCDError::Reconstruction(e)
-            })?;
+            if batch.sector_count == REBUILD_BATCH_SECTORS {
+                let next = spare.pop().unwrap_or_else(RebuildBatch::with_capacity);
+                if let Some(rebuilt) = rebuilds.submit(std::mem::replace(&mut batch, next))? {
+                    spare.push(write_rebuilt(rebuilt)?);
+                }
+            }
+        }
 
-            hasher.update(&reconstructed_sector);
+        if batch.sector_count > 0
+            && let Some(rebuilt) = rebuilds.submit(batch)?
+        {
+            write_rebuilt(rebuilt)?;
+        }
+        while let Some(rebuilt) = rebuilds.next_result()? {
+            write_rebuilt(rebuilt)?;
+        }
+        drop(spare);
 
-            writer.write_all(&reconstructed_sector)?;
+        drop(rebuilds);
+        for worker in rebuild_workers {
+            worker.join().map_err(|_panic| ReconstructionError::ThreadPanic(
+                "A sector rebuilding thread panicked.".to_string()))?;
         }
 
         /*Every sector is written, so close the streams before joining the

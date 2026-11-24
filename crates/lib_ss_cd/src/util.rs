@@ -19,8 +19,8 @@ pub enum UtilError {
         returned {actual} bytes.")]
     WrongReadLength { offset: u64, expected: u32, actual: usize },
 
-    #[error("A decoding thread stopped before sending its data.")]
-    DecoderStopped,
+    #[error("A worker thread stopped before sending its result.")]
+    WorkerStopped,
 }
 
 
@@ -118,9 +118,10 @@ const IN_FLIGHT_BYTE_BUDGET: usize = 64 * 1024 * 1024;
 /// The items for one worker's turn: each item and its decoded length.
 type Run<T> = Vec<(T, usize)>;
 
-/// What a worker sends back for a run: each item's decoded bytes, or the
-/// error that stopped it.
-type RunResult = Result<Vec<Vec<u8>>, SpriteShrinkCDError>;
+/// What a worker sends back for a run: its items' decoded bytes, one
+/// after another, or the error that stopped it. One buffer per run, so
+/// the reader frees one buffer per run rather than one per item.
+type RunResult = Result<Vec<u8>, SpriteShrinkCDError>;
 
 /// Splits `items` into runs of at most `max_items` items, ending a run
 /// early once its decoded length reaches `RUN_BYTE_TARGET`. Every run
@@ -221,7 +222,13 @@ where
                         Some(state) => state,
                         None => state.insert(new_state()?),
                     };
-                    run.iter().map(|(item, len)| decode(state, item, *len)).collect()
+                    let run_bytes = run.iter()
+                        .fold(0usize, |total, (_, len)| total.saturating_add(*len));
+                    let mut decoded = Vec::with_capacity(run_bytes);
+                    for (item, len) in &run {
+                        decoded.extend_from_slice(&decode(state, item, *len)?);
+                    }
+                    Ok(decoded)
                 })();
                 let failed = result.is_err();
                 /*A failed send means the reader has stopped, and after an
@@ -237,8 +244,9 @@ where
         receivers,
         next_run: 0,
         run_count,
-        buffer: Vec::new(),
+        run: Vec::new(),
         start: 0,
+        spanning: Vec::new(),
     };
     (stream, handles)
 }
@@ -246,17 +254,20 @@ where
 /// The decoded bytes of one stream, in order, from the workers
 /// `spawn_ordered_decoders` started.
 ///
-/// It keeps the bytes of at most one run beyond what's been taken, so the
-/// workers' channels and runs bound its memory.
+/// It lends bytes straight from the run it's reading; only a take that
+/// spans two runs is copied, into `spanning`. It holds one run at a time,
+/// so the workers' channels and runs bound its memory.
 #[derive(Debug)]
 pub struct OrderedStream {
     receivers: Vec<flume::Receiver<RunResult>>,
     /// The run to receive next; it comes from worker `next_run % workers`.
     next_run: usize,
     run_count: usize,
-    /// Received bytes; those before `start` have been taken.
-    buffer: Vec<u8>,
+    /// The run being read; its bytes before `start` have been taken.
+    run: Vec<u8>,
     start: usize,
+    /// Holds the bytes of a take that spans runs.
+    spanning: Vec<u8>,
 }
 
 impl OrderedStream {
@@ -267,31 +278,150 @@ impl OrderedStream {
     /// # Errors
     ///
     /// The error a worker hit, at its run's turn, or
-    /// `UtilError::DecoderStopped` if a worker stopped without sending its
+    /// `UtilError::WorkerStopped` if a worker stopped without sending its
     /// run (it panicked; joining it raises the panic).
     pub fn take(&mut self, amount: usize) -> Result<&[u8], SpriteShrinkCDError> {
-        while self.buffer.len() - self.start < amount && self.next_run < self.run_count {
-            let decoded = self.receivers
-                .get(self.next_run % self.receivers.len().max(1))
-                .ok_or(UtilError::DecoderStopped)?
-                .recv()
-                .map_err(|_disconnected| UtilError::DecoderStopped)??;
-            self.next_run += 1;
-
-            /*Drop the bytes already taken before adding more, so the
-            buffer holds one run plus a partial sector, not the whole
-            stream.*/
-            self.buffer.drain(..self.start);
-            self.start = 0;
-            for data in decoded {
-                self.buffer.extend_from_slice(&data);
-            }
+        let start = self.start;
+        if self.run.len() - start >= amount {
+            self.start = start + amount;
+            return Ok(self.run.get(start..self.start).unwrap_or_default());
         }
 
-        let start = self.start;
-        let end = self.buffer.len().min(start.saturating_add(amount));
-        self.start = end;
-        Ok(self.buffer.get(start..end).unwrap_or_default())
+        /*The take spans the end of this run, so gather it from as many runs
+        as it covers.*/
+        self.spanning.clear();
+        loop {
+            let wanted = amount - self.spanning.len();
+            let end = self.run.len().min(self.start.saturating_add(wanted));
+            self.spanning.extend_from_slice(
+                self.run.get(self.start..end).unwrap_or_default()
+            );
+            self.start = end;
+            if self.spanning.len() == amount || self.next_run == self.run_count {
+                break;
+            }
+            self.run = self.receive_next()?;
+            self.start = 0;
+        }
+        Ok(&self.spanning)
+    }
+
+    /// Receives the next run, in turn.
+    fn receive_next(&mut self) -> Result<Vec<u8>, SpriteShrinkCDError> {
+        let run = self.receivers
+            .get(self.next_run % self.receivers.len().max(1))
+            .ok_or(UtilError::WorkerStopped)?
+            .recv()
+            .map_err(|_disconnected| UtilError::WorkerStopped)??;
+        self.next_run += 1;
+        Ok(run)
+    }
+}
+
+/// Jobs each worker of an `OrderedPool` holds at once: one it's working on
+/// and one waiting.
+const POOL_JOBS_PER_WORKER: usize = 2;
+
+/// Starts `worker_count` workers (at least 1) that each run `work` on the
+/// jobs they're given, and returns the pool that hands them out with the
+/// workers' handles.
+///
+/// Job `k` goes to worker `k % workers`, and each worker returns its
+/// results on its own channel, so reading the channels in turn gives the
+/// results in the order the jobs were submitted. Dropping the pool closes
+/// the channels, so the workers stop; join the handles after that.
+pub fn spawn_ordered_pool<'scope, 'env, I, O, F>(
+    scope: &'scope Scope<'scope, 'env>,
+    worker_count: usize,
+    work: &'env F,
+) -> (OrderedPool<I, O>, Vec<ScopedJoinHandle<'scope, ()>>)
+where
+    I: Send + 'scope,
+    O: Send + 'scope,
+    F: Fn(I) -> O + Sync,
+{
+    let workers = worker_count.max(1);
+    let mut senders = Vec::with_capacity(workers);
+    let mut receivers = Vec::with_capacity(workers);
+    let mut handles = Vec::with_capacity(workers);
+    for _ in 0..workers {
+        let (job_tx, job_rx) = flume::bounded::<I>(POOL_JOBS_PER_WORKER);
+        let (result_tx, result_rx) = flume::bounded::<O>(POOL_JOBS_PER_WORKER);
+        senders.push(job_tx);
+        receivers.push(result_rx);
+        handles.push(scope.spawn(move || {
+            //Ends once the pool drops its sender and the queue is empty.
+            for job in &job_rx {
+                if result_tx.send(work(job)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    let pool = OrderedPool { senders, receivers, submitted: 0, received: 0 };
+    (pool, handles)
+}
+
+/// Hands jobs to the workers `spawn_ordered_pool` started and returns their
+/// results in submission order.
+///
+/// At most `POOL_JOBS_PER_WORKER` jobs per worker are out at once, which
+/// both bounds memory and means a submit never waits on a full channel.
+#[derive(Debug)]
+pub struct OrderedPool<I, O> {
+    senders: Vec<flume::Sender<I>>,
+    receivers: Vec<flume::Receiver<O>>,
+    submitted: usize,
+    received: usize,
+}
+
+impl<I, O> OrderedPool<I, O> {
+    /// Submits `job`. If as many jobs as the workers can hold are already
+    /// out, first waits for the oldest one's result and returns it.
+    ///
+    /// # Errors
+    ///
+    /// `UtilError::WorkerStopped` if a worker has stopped (it panicked;
+    /// joining it raises the panic).
+    pub fn submit(&mut self, job: I) -> Result<Option<O>, UtilError> {
+        let window = self.senders.len() * POOL_JOBS_PER_WORKER;
+        let oldest = if self.submitted - self.received >= window {
+            Some(self.receive_oldest()?)
+        } else {
+            None
+        };
+
+        self.senders
+            .get(self.submitted % self.senders.len().max(1))
+            .ok_or(UtilError::WorkerStopped)?
+            .send(job)
+            .map_err(|_disconnected| UtilError::WorkerStopped)?;
+        self.submitted += 1;
+        Ok(oldest)
+    }
+
+    /// The oldest result not yet returned, waiting for it if needed, or
+    /// `None` once every submitted job's result has been returned.
+    ///
+    /// # Errors
+    ///
+    /// As `submit`.
+    pub fn next_result(&mut self) -> Result<Option<O>, UtilError> {
+        if self.received == self.submitted {
+            return Ok(None);
+        }
+        self.receive_oldest().map(Some)
+    }
+
+    fn receive_oldest(&mut self) -> Result<O, UtilError> {
+        let result = self.receivers
+            .get(self.received % self.receivers.len().max(1))
+            .ok_or(UtilError::WorkerStopped)?
+            .recv()
+            .map_err(|_disconnected| UtilError::WorkerStopped)?;
+        self.received += 1;
+        Ok(result)
     }
 }
 
@@ -417,6 +547,45 @@ mod tests {
                 spawn_ordered_decoders(scope, items, 1, 0, 4, &new_state, &decode);
             assert_eq!(stream.take(64).unwrap(), [0; 64]);
             drop(stream);
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+    }
+
+    #[test]
+    fn an_ordered_pool_returns_results_in_submission_order_and_stops_when_dropped() {
+        // Odd jobs take longer, so workers finish out of turn; 200 jobs on
+        // 3 workers go round the window many times.
+        let work = |job: u32| {
+            if job % 2 == 1 {
+                thread::sleep(std::time::Duration::from_micros(100));
+            }
+            job * 10
+        };
+        thread::scope(|scope| {
+            let (mut pool, handles) = spawn_ordered_pool(scope, 3, &work);
+            let mut results = Vec::new();
+            for job in 0..200 {
+                results.extend(pool.submit(job).unwrap());
+            }
+            while let Some(result) = pool.next_result().unwrap() {
+                results.push(result);
+            }
+            assert_eq!(results, (0..200).map(|job| job * 10).collect::<Vec<_>>());
+            drop(pool);
+            for handle in handles {
+                handle.join().unwrap();
+            }
+        });
+
+        // Dropped with jobs out: the workers stop instead of waiting.
+        thread::scope(|scope| {
+            let (mut pool, handles) = spawn_ordered_pool(scope, 2, &work);
+            for job in 0..4 {
+                pool.submit(job).unwrap();
+            }
+            drop(pool);
             for handle in handles {
                 handle.join().unwrap();
             }
