@@ -25,8 +25,10 @@ use serde::{Serialize};
 use sha2::{Digest};
 use sprite_shrink::Hashable;
 use tempfile::tempfile_in;
+use indicatif::ProgressBar;
 use tracing::{
     debug,
+    info,
 };
 use sprite_shrink::{
     SS_SEED,
@@ -49,6 +51,10 @@ use xxhash_rust::xxh3::Xxh3;
 use crate::{
     arg_handling::Args,
     cli_types::DiscCompleteData,
+    progress::{
+        AnalysisBars, CompressionProgress, byte_bar, compression_summary,
+        count_bar, shows_progress
+    },
     storage_io::{ExistingFile, parent_dir, write_archive},
 };
 use crate::cli_types::{
@@ -108,6 +114,57 @@ impl<'a, R: io::Read + io::Seek> SectorDataProvider for AppSectorDataProvider<'a
 trait ReadSeekSend: io::Read + io::Seek + Send {}
 
 impl<T: Read + Seek + Send> ReadSeekSend for T {}
+
+/// A disc's BIN data that advances a progress bar as it's read.
+///
+/// The disc is read through several times (to hash it, to classify its
+/// sectors and to chunk them), each counted on its own bar. Each read adds
+/// exactly the disc's length to its bar, so the bars end at the total size
+/// of the discs: bytes read past the length (a sector read twice) aren't
+/// counted, and bytes a read skips are added when it ends.
+struct CountingReader<R> {
+    inner: R,
+    /// The bar of the read in progress.
+    bar: ProgressBar,
+    /// Bytes added to `bar` by this read, at most `disc_len`.
+    counted: u64,
+    disc_len: u64,
+}
+
+impl<R> CountingReader<R> {
+    fn new(inner: R, disc_len: u64) -> Self {
+        Self { inner, bar: ProgressBar::hidden(), counted: 0, disc_len }
+    }
+
+    /// Ends the read in progress and counts the reads after it on `bar`.
+    fn start_read(&mut self, bar: &ProgressBar) {
+        self.finish_read();
+        self.bar = bar.clone();
+        self.counted = 0;
+    }
+
+    /// Ends the read in progress, adding what it skipped to its bar.
+    fn finish_read(&mut self) {
+        self.bar.inc(self.disc_len.saturating_sub(self.counted));
+        self.counted = self.disc_len;
+    }
+}
+
+impl<R: Read> Read for CountingReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        let counted = (read as u64).min(self.disc_len - self.counted);
+        self.counted += counted;
+        self.bar.inc(counted);
+        Ok(read)
+    }
+}
+
+impl<R: Seek> Seek for CountingReader<R> {
+    fn seek(&mut self, pos: SeekFrom) -> io::Result<u64> {
+        self.inner.seek(pos)
+    }
+}
 
 
 pub(super) fn compress_optical_mode<H>(
@@ -210,14 +267,23 @@ where
     let dictionary_size = args.dictionary.map_or(
         128 * 1024, |byte| byte.as_u64());
 
+    let show_progress = shows_progress(args);
+
+    let analysis_bars = AnalysisBars::new(
+        show_progress,
+        cue_analysis.total_data_size
+    );
+
     let proc_result = process_optical_discs::<H>(
         &discs,
         &data_temp_cache,
         &audio_temp_cache,
         &running,
         process_threads,
-        window_size
+        window_size,
+        &analysis_bars
     )?;
+    analysis_bars.finish();
 
     let disc_manifiests = proc_result.manifests;
     veri_hashes = proc_result.veri_hashes;
@@ -281,6 +347,12 @@ where
 
     let archive_toc_arc = Arc::new(&archive_toc);
 
+    let verification_bar = byte_bar(
+        show_progress,
+        archive_toc.iter().map(|toc| toc.uncompressed_size).sum(),
+        "Verifying discs..."
+    );
+
     //This can be parallelized to accelerate the validation step.
     for (i, manifest) in disc_manifests.iter().enumerate() {
         let archive_toc_clone = archive_toc_arc.clone();
@@ -323,7 +395,7 @@ where
             &veri_hash,
             get_chunk_data_for_verify,
             get_chunk_audio_for_verify,
-            //progress_cb
+            |bytes| verification_bar.inc(bytes),
         );
 
         match result {
@@ -346,7 +418,8 @@ where
         }
     }
 
-    println!("Verification passed!");
+    verification_bar.finish_with_message("Disc verification passed!");
+    debug!("Disc verification passed!");
 
     //Compress audio
     let mut audio_block_index: Vec<(H, ChunkLocation)> = Vec::new();
@@ -378,13 +451,23 @@ where
             }
         };
 
+        let audio_bar = count_bar(
+            show_progress,
+            audio_chunk_hashes.len() as u64,
+            "Compressing audio blocks..."
+        );
+
+        /*Called once per compressed block, in order, so it also counts
+        the blocks done.*/
         let tmp_audio_write_cb = {
             let blob_size_clone = Arc::clone(&audio_blob_size);
             let writer_clone = Arc::clone(&writer);
+            let audio_bar = audio_bar.clone();
             move |data: &[u8]| -> Result<(), CliError>{
                 blob_size_clone.fetch_add(data.len() as u64, Ordering::SeqCst);
 
                 writer_clone.lock().unwrap().write_all(data)?;
+                audio_bar.inc(1);
                 Ok(())
             }
         };
@@ -395,6 +478,7 @@ where
             tmp_audio_write_cb,
             process_threads
         )?;
+        audio_bar.finish_with_message("Audio compression complete.");
     }
 
     let final_audio_blob_size = audio_blob_size.load(Ordering::SeqCst);
@@ -430,12 +514,17 @@ where
         tmp_chunk_write_cb
     );
 
+    let compression_progress = CompressionProgress::new(args);
+
     comp_data_builder.compression_level(level)
         .dictionary_size(dictionary_size)
         .optimize_dictionary(args.optimize_dictionary)
         .worker_threads(args.threads.unwrap_or(0));
 
-    let comp_data = comp_data_builder.build()?;
+    let comp_data = comp_data_builder
+        .with_progress(compression_progress.callback())
+        .build()?;
+    compression_progress.finish();
     super::note_if_no_dictionary(&comp_data);
 
     /*Flush, then take a second handle to the file. It shares the first
@@ -445,8 +534,6 @@ where
         writer.flush()?;
         writer.get_ref().try_clone()?
     };
-    let blob_size = tmp_file.metadata()?.len();
-
     archive_toc.iter_mut().for_each(|toc|{
         toc.filename.push_str(".bin");
     });
@@ -466,10 +553,15 @@ where
         hash_type: hash_type.id(),
     })?;
 
-    println!("Estimated final data size with blob: {}", final_data.len() + blob_size as usize);
-
     let existing = ExistingFile::from_force(args.force);
     write_archive(final_output_path, existing, &final_data, &mut tmp_file)?;
+
+    let archive_size = fs::metadata(final_output_path)?.len();
+    info!("{}", compression_summary(
+        final_output_path,
+        cue_analysis.total_data_size,
+        archive_size
+    ));
 
     Ok(())
 }
@@ -565,6 +657,7 @@ fn process_optical_discs<H>(
     running: &Arc<AtomicBool>,
     thread_count: usize,
     window_size: u64,
+    bars: &AnalysisBars,
 ) -> Result<OptProcResult<H>, CliError>
 where
     H: Hashable
@@ -642,6 +735,7 @@ where
     let worker_exception_reg = shared_exception_registry.clone();
 
     let discs_owned = discs.to_owned();
+    let worker_bars = bars.clone();
 
     let worker_handle = thread::spawn(move || -> Result<(), CliError>{
         worker_pool.install(|| -> Result<(), CliError> {
@@ -655,7 +749,8 @@ where
                         window_size,
                         sender_clone,
                         &worker_subheader_reg,
-                        &worker_exception_reg
+                        &worker_exception_reg,
+                        &worker_bars
                     )?;
 
                     worker_veri_hashes.insert(
@@ -725,9 +820,6 @@ where
             ))).map_err(|e| CliError::FlumeSendError(e.to_string()))?;
             audio_chunk_batch.reserve(BATCH_SIZE);
         }
-
-        //Need to implement progress logic. I'm thinking sector count would be
-        // best.
     };
 
     if !data_chunk_batch.is_empty() {
@@ -743,8 +835,6 @@ where
     drop(batch_sender);
     cache_handle.join().expect("The cache writer thread panicked.")?;
     worker_handle.join().expect("A file chunk worker thread panicked.")?;
-
-    //Finish progress bar here
 
     let final_disc_man = Arc::try_unwrap(shared_disc_manifest)
         .map_err(|_| CliError::InternalError(
@@ -782,7 +872,8 @@ fn cue_sheet_worker<H>(
     window_size: u64,
     send_channel: flume::Sender<OpticalChunkMessage<H>>,
     subheader_registry: &SubheaderRegistry,
-    exception_registry: &ExceptionRegistry
+    exception_registry: &ExceptionRegistry,
+    bars: &AnalysisBars,
 ) -> Result<DiscCompleteData<H>, CliError>
 where
     H: Hashable + Send + Display
@@ -791,13 +882,15 @@ where
         .iter()
         .map(|f| base_dir.join(&f.name))
         .collect();
-    let mut source_stream: Box<dyn ReadSeekSend> = if bin_paths.len() == 1 {
+    let mut bin_stream: Box<dyn ReadSeekSend> = if bin_paths.len() == 1 {
         Box::new(File::open(&bin_paths[0])?)
     } else {
         //The library joins the parts; opening them is the application's job.
         let parts = bin_paths.iter().map(File::open).collect::<io::Result<_>>()?;
         Box::new(MultiBinStream::<File>::new(parts)?)
     };
+    let disc_len = bin_stream.seek(SeekFrom::End(0))?;
+    let mut source_stream = CountingReader::new(bin_stream, disc_len);
 
     let file_provider = AppFileSizeProvider {
         base_dir: base_dir.to_path_buf(),
@@ -807,6 +900,7 @@ where
     let mut xxh3_hasher = Xxh3::new();
     let mut buffer = [0u8; 65536];
     source_stream.seek(SeekFrom::Start(0))?;
+    source_stream.start_read(&bars.hashing);
     loop {
         let count = source_stream.read(&mut buffer)?;
         if count == 0 { break; }
@@ -815,6 +909,7 @@ where
     }
     source_stream.seek(SeekFrom::Start(0))?;
 
+    source_stream.start_read(&bars.classifying);
     let mut sector_provider = AppSectorDataProvider {
         source_stream: &mut source_stream,
     };
@@ -850,6 +945,8 @@ where
     let rle_sector_map = rle_encode_map(sector_map);
 
     let mut curr_sector_offset: u32 = 0;
+
+    source_stream.start_read(&bars.chunking);
 
     let mut data_stream_layout: Vec<DataChunkLayout<H>> = Vec::new();
     let mut audio_block_map: Vec<ContentBlock<H>> = Vec::new();
@@ -961,6 +1058,7 @@ where
         }
         curr_sector_offset += run_length;
     }
+    source_stream.finish_read();
 
     //collection_id, exception_blob_offset and exception_index_length to be
     //  set elsewhere

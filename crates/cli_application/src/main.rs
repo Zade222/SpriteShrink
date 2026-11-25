@@ -42,6 +42,7 @@ mod cli_types;
 mod error_handling;
 use error_handling::{
     CliError, initiate_logging, offset_to_line_col};
+mod progress;
 mod storage_io;
 use crate::{
     cli_types::SpriteShrinkConfig,

@@ -42,6 +42,7 @@ use crate::{
     archive_parser::{get_file_header, get_ssmc_prefix, get_ssmd_prefix},
     arg_handling::Args,
     error_handling::CliError,
+    progress::{byte_bar, shows_progress},
     storage_io::{
         ArchiveFile, ExistingFile,
         has_extension, write_via_temp
@@ -123,11 +124,15 @@ fn cue_name(bin_name: &str) -> String {
 /// `CliError::SpriteShrinkError`) for an unusable name,
 /// `CliError::ClashingNames` for two entries writing one name, or
 /// `CliError::FilesExist` listing every name already in `out_dir`.
+///
+/// # Returns
+///
+/// The bytes the entries write.
 fn check_plan(
     out_dir: &Path,
     plans: &[EntryPlan],
     existing: ExistingFile,
-) -> Result<(), CliError> {
+) -> Result<u64, CliError> {
     let mut seen: HashMap<String, (usize, &str)> = HashMap::new();
     for plan in plans {
         for name in &plan.names {
@@ -161,7 +166,7 @@ fn check_plan(
         .iter()
         .fold(0_u64, |total, plan| total.saturating_add(plan.size));
     println!("Extracting {} entries, {total} bytes.", plans.len());
-    Ok(())
+    Ok(total)
 }
 
 /// Executes the file extraction process from an archive.
@@ -407,7 +412,7 @@ where
             )
         })
         .collect::<Result<Vec<_>, CliError>>()?;
-    check_plan(out_dir, &plans, existing)?;
+    let total = check_plan(out_dir, &plans, existing)?;
 
     if !out_dir.exists() && !args.force{
         return Err(CliError::InvalidOutputPath())
@@ -419,6 +424,7 @@ where
     file has no shared position to keep in step.*/
     let archive = ArchiveFile::open(file_path)?;
     let worker_count = args.threads.unwrap_or(0);
+    let bar = byte_bar(shows_progress(args), total, "Extracting files...");
 
     for &index in rom_indices {
         let (fmp, entry) = ssmc_entry(file_manifest, toc, index)?;
@@ -472,7 +478,9 @@ where
                 if !running.load(Ordering::SeqCst) {
                     return Err(keep(CliError::Cancelled));
                 }
-                writer.write_all(data).map_err(|e| keep(e.into()))
+                writer.write_all(data).map_err(|e| keep(e.into()))?;
+                bar.inc(data.len() as u64);
+                Ok(())
             };
 
             decompress_chunks_with(
@@ -487,6 +495,7 @@ where
 
         debug!("{} extracted successfully", entry.filename);
     }
+    bar.finish_with_message("Extraction complete.");
 
     Ok(())
 }
@@ -544,7 +553,7 @@ where
             )
         })
         .collect::<Result<Vec<_>, CliError>>()?;
-    check_plan(out_dir, &plans, existing)?;
+    let total = check_plan(out_dir, &plans, existing)?;
 
     if !out_dir.exists() && !args.force{
         return Err(CliError::InvalidOutputPath())
@@ -552,7 +561,7 @@ where
         create_dir_all(out_dir)?;
     }
 
-    println!("Opening archive...");
+    debug!("Opening archive...");
     let archive_file = ArchiveFile::open(file_path)?;
     let read_stored = |location: ChunkLocation| {
         archive_file.read(
@@ -561,7 +570,9 @@ where
         )
     };
 
-    println!("Beginning extraction loop...");
+    let bar = byte_bar(shows_progress(args), total, "Extracting discs...");
+
+    debug!("Beginning extraction loop...");
     for &index in disc_indices {
         let (dm, entry) = disc_entry(index)?;
 
@@ -589,7 +600,8 @@ where
                 &subheader_table,
                 writer,
                 args.threads.unwrap_or(0),
-                || !running.load(Ordering::SeqCst)
+                || !running.load(Ordering::SeqCst),
+                |bytes| bar.inc(bytes),
             )
             .map_err(CliError::from)
         })?;
@@ -601,6 +613,7 @@ where
 
         debug!("{} extracted successfully", entry.filename);
     }
+    bar.finish_with_message("Extraction complete.");
 
     Ok(())
 }
