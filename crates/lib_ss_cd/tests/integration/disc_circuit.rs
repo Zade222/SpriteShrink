@@ -332,6 +332,7 @@ fn verify(disc: &Archived) {
         }
     };
     let veri_hash: [u8; 64] = Sha512::digest(&disc.bin).into();
+    let mut reported = 0;
 
     verify_disc_integrity(
         &disc.manifest,
@@ -341,12 +342,15 @@ fn verify(disc: &Archived) {
         &veri_hash,
         fetcher(disc.data_chunks.clone()),
         fetcher(disc.audio_blocks.clone()),
+        |bytes| reported += bytes,
     )
     .unwrap();
+    assert_eq!(reported, disc.bin.len() as u64, "verification progress");
 }
 
 fn write_out(disc: &Archived) -> Vec<u8> {
     let mut writer = BufWriter::new(Vec::new());
+    let mut reported = 0;
     write_disc(
         &disc.manifest,
         &disc.indices,
@@ -357,8 +361,10 @@ fn write_out(disc: &Archived) -> Vec<u8> {
         &mut writer,
         WORKERS,
         || false,
+        |bytes| reported += bytes,
     )
     .unwrap();
+    assert_eq!(reported, disc.bin.len() as u64, "write_disc progress");
     writer.into_inner().unwrap()
 }
 
@@ -613,6 +619,7 @@ fn a_wrong_integrity_hash_fails_write_disc() {
         &mut writer,
         WORKERS,
         || false,
+        |_| {},
     )
     .unwrap_err();
 }
@@ -684,6 +691,7 @@ where
             &mut writer,
             WORKERS,
             is_cancelled,
+            |_| {},
         );
         // Fails only if the test already gave up waiting, which the test
         // reports itself.

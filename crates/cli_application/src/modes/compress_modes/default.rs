@@ -11,21 +11,20 @@ use std::{
     fs::{File, create_dir_all},
     io::{BufWriter, IntoInnerError, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, atomic::{
+    sync::{Arc, atomic::{
         AtomicBool, Ordering
     }},
-    thread, time::{Duration}
+    thread,
 };
 
 use bitcode::Encode;
 use dashmap::DashMap;
 use directories::ProjectDirs;
-use indicatif::{ProgressBar, ProgressStyle};
 use fastcdc::v2020::{StreamCDC, Normalization};
 use flume::{bounded};
 use sprite_shrink::{
     SS_SEED,
-    ArchiveBuilder, FileManifestParent, HashType, Hashable, Progress,
+    ArchiveBuilder, FileManifestParent, HashType, Hashable,
     SSAChunkMeta,
     build_ssmc_prefix, serialize_uncompressed_data, verify_single_file
 };
@@ -46,6 +45,9 @@ use crate::{
         ChunkMessage, FileData, FileCompleteData,
     },
     error_handling::CliError,
+    progress::{
+        CompressionProgress, byte_bar, compression_summary, shows_progress
+    },
     storage_io::{
         calc_tot_input_size, get_cache_paths, parent_dir, write_archive,
         ExistingFile, TempCache
@@ -262,7 +264,7 @@ where
             &file_paths,
             best_window_size,
             &input_data_size,
-            args.progress,
+            shows_progress(args),
             insert_batch_cb,
             &running
         )?;
@@ -296,7 +298,7 @@ where
             &file_paths,
             best_window_size,
             &input_data_size,
-            args.progress,
+            shows_progress(args),
             insert_batch_cb,
             &running,
         )?;
@@ -330,21 +332,11 @@ where
 
     let archive_toc = serialized_data.archive_toc;
 
-    let verification_pb = if args.progress {
-        let bar = ProgressBar::new(input_data_size);
-        bar.set_style(
-            ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bytes}/{total_bytes} ({eta}) {msg}\n[{bar:40}]")
-                .unwrap()
-                .progress_chars("#>-"),
-        );
-        bar.set_message("Verifying files...");
-        Some(bar)
-    } else {
-        None
-    };
-
-    let verification_pb_arc = Arc::new(verification_pb);
+    let verification_bar = byte_bar(
+        shows_progress(args),
+        input_data_size,
+        "Verifying files..."
+    );
 
     //Vector used to track status of each thread.
     let mut thread_handles = vec![];
@@ -374,12 +366,9 @@ where
             }
         };
 
-        let pb_clone = Arc::clone(&verification_pb_arc);
-
+        let bar = verification_bar.clone();
         let progress_closure = move |bytes_processed: u64| {
-            if let Some(bar) = &*pb_clone {
-                bar.inc(bytes_processed);
-            }
+            bar.inc(bytes_processed);
         };
 
         let handle = thread::spawn(move ||{
@@ -403,89 +392,14 @@ where
         }
     }
 
-    if let Some(bar) = &*verification_pb_arc {
-        bar.set_position(input_data_size);
-
-        bar.finish_with_message("File verification passed!");
-    }
+    verification_bar.set_position(input_data_size);
+    verification_bar.finish_with_message("File verification passed!");
     //At this point, verification is complete. We can free all related data.
     drop(veri_hashes);
 
     debug!("File verification passed!");
 
-    //Define progress bar to be used by callback
-    let progress_bar = Arc::new(Mutex::new(None));
-
-    /*Make separate vars for storing quiet and verbose arguments due to
-    closure using move.*/
-    let is_quiet = args.quiet;
-    let is_progress = args.progress;
-
-    /*Creates a callback function that updates the progress as milestones are
-    met and prints a progress bar.*/
-    let progress_bar_clone = Arc::clone(&progress_bar);
-    let progress_callback = move |progress| {
-        if is_quiet || !is_progress{
-            return; //Do nothing in quiet mode
-        }
-
-        let mut guard = progress_bar_clone.lock().unwrap();
-
-        match progress {
-            Progress::GeneratingDictionary => {
-                debug!("Generating compression dictionary...");
-
-                let dict_spin = ProgressBar::new_spinner();
-                dict_spin.enable_steady_tick(Duration::from_millis(500));
-                dict_spin.set_style(
-                    ProgressStyle::with_template("{msg} {spinner}")
-                        .unwrap()
-                        .tick_strings(&[
-                            "   ",
-                            ".  ",
-                            ".. ",
-                            "...",
-                            " ..",
-                            "  .",
-                            "   ",
-                        ]),
-                );
-                dict_spin.set_message("Generating compression dictionary");
-
-                *guard = Some(dict_spin);
-            }
-            Progress::DictionaryDone => {
-                if let Some(dict_spin) = guard.as_ref() {
-                    dict_spin.finish_with_message("Dictionary created.");
-                }
-
-                *guard = None;
-
-                debug!("Dictionary created.");
-            }
-            Progress::Compressing { total_chunks } => {
-                let new_bar = ProgressBar::new(total_chunks);
-                new_bar.set_style(ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] {pos}/{len} (eta {eta}) {msg}\n[{bar:40}]")
-                    .unwrap()
-                    .progress_chars("#>-"));
-                new_bar.set_message("Compressing chunks...");
-
-                //Lock the mutex and place the new bar inside the Option.
-                *guard = Some(new_bar);
-
-            }
-            Progress::ChunkCompressed => {
-                //Verify if the progress bar exists, if yes increment it.
-                if let Some(bar) = guard.as_ref() {
-                    bar.inc(1);
-                }
-            }
-            Progress::Finalizing => {
-                debug!("Finalizing archive...");
-            }
-        }
-    };
+    let compression_progress = CompressionProgress::new(args);
 
     let get_chunk_data_for_lib = {
         let cb = Arc::clone(&chunk_ret_cb);
@@ -532,7 +446,7 @@ where
         .worker_threads(args.threads.unwrap_or(0));
 
     //Start the build process using the progress callback.
-    let comp_data = builder.with_progress(progress_callback)
+    let comp_data = builder.with_progress(compression_progress.callback())
         .build()?;
     super::note_if_no_dictionary(&comp_data);
 
@@ -541,11 +455,7 @@ where
     let mut tmp_file = writer.into_inner()
         .map_err(IntoInnerError::into_error)?;
 
-    if let Some(bar) = progress_bar.lock().unwrap().take()
-        && !args.quiet
-    {
-        bar.finish_with_message("Compression complete.");
-    }
+    compression_progress.finish();
 
     /*Builds every byte of the archive that comes before the compressed
     data: header, TOC, format data, manifest, dictionary and chunk index.*/
@@ -560,10 +470,12 @@ where
     let existing = ExistingFile::from_force(args.force);
     write_archive(final_output_path, existing, &final_data, &mut tmp_file)?;
 
-    info!(
-        "Successfully created sprite-shrink multicart archive at: \
-            {final_output_path:?}"
-    );
+    let archive_size = std::fs::metadata(final_output_path)?.len();
+    info!("{}", compression_summary(
+        final_output_path,
+        input_data_size,
+        archive_size
+    ));
 
     Ok(())
 }
@@ -629,19 +541,11 @@ where
     W: FnMut(&[(H, Vec<u8>)]) -> Result<(), CliError> + Send + 'static,
 
 {
-    let progress_bar = if print_progress {
-        let bar = ProgressBar::new(*total_input_size);
-        bar.set_style(
-            ProgressStyle::default_bar()
-                .template("[{elapsed_precise}] {bytes}/{total_bytes} ({eta}) {msg}\n[{bar:40}]")
-                .unwrap()
-                .progress_chars("#>-"),
-        );
-        bar.set_message("Chunking files...");
-        Some(bar)
-    } else {
-        None
-    };
+    let progress_bar = byte_bar(
+        print_progress,
+        *total_input_size,
+        "Chunking files..."
+    );
 
     const BATCH_SIZE: usize = 1000;
 
@@ -748,9 +652,7 @@ where
         }
 
         //For every received chunk, increment progress bar.
-        if let Some(bar) = &progress_bar {
-            bar.inc(message.chunk_size as u64);
-        }
+        progress_bar.inc(message.chunk_size as u64);
     };
 
     //Write any remaining chunks in the batch
@@ -766,10 +668,7 @@ where
     //Check for any worker errors.
     worker_handle.join().expect("A file chunk worker thread panicked.")?;
 
-    //Finish the progress bar
-    if let Some(bar) = progress_bar {
-        bar.finish_with_message("File chunking complete.");
-    }
+    progress_bar.finish_with_message("File chunking complete.");
 
     //Pull manifest and hashes from their Arcs.
     let final_manifest = Arc::try_unwrap(shared_file_manifest)

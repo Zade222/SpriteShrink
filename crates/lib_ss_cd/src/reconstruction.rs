@@ -244,7 +244,30 @@ pub fn expand_subheader_map(
 }
 
 
-pub fn verify_disc_integrity<A, D, E, H>(
+/// Sectors between two calls of a `progress` callback.
+const PROGRESS_SECTORS: usize = 256;
+
+/// Rebuilds every sector of the disc `manifest` describes and checks the
+/// SHA-512 of the result against `veri_hash`, without writing anything.
+///
+/// `get_data_chunks` and `get_audio_blocks` return the uncompressed data
+/// chunks and audio blocks for a list of hashes, in order. They run on
+/// their own threads, ahead of the sectors being rebuilt.
+///
+/// `progress` is called with the bytes rebuilt since its last call, every
+/// 256 sectors and once for the sectors left at the end. Its calls add up
+/// to the disc's size if the disc is rebuilt in full.
+///
+/// # Errors
+///
+/// Returns an error if either fetch callback fails, a sector can't be
+/// rebuilt, or the rebuilt disc doesn't match `veri_hash`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each archive section is a separate borrow; grouping them is \
+              an API change of its own"
+)]
+pub fn verify_disc_integrity<A, D, E, H, P>(
     manifest: &DiscManifest<H>,
     exception_index: &[u64],
     exception_blob: &[u8],
@@ -252,14 +275,14 @@ pub fn verify_disc_integrity<A, D, E, H>(
     veri_hash: &[u8; 64],
     get_data_chunks: D,
     get_audio_blocks: A,
-    //mut progress_cb: P
+    mut progress: P,
 ) -> Result<(), SpriteShrinkCDError>
 where
     A: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
     D: Fn(&[H]) -> Result<Vec<Vec<u8>>, E> + Send + Sync + 'static,
     E: std::error::Error + Send + Sync + 'static,
     H: Hashable,
-    //P: FnMut(u64) + Sync + Send + 'static,
+    P: FnMut(u64),
 {
     /*A batch size of 64 provides a good balance between reducing the overhead
     of the get_chunk_data callback and keeping memory usage low per
@@ -388,8 +411,15 @@ where
         })?;
 
         hasher.update(reconstructed_sector);
-        //progress_cb(2352);
 
+        if (i + 1).is_multiple_of(PROGRESS_SECTORS) {
+            progress((PROGRESS_SECTORS * 2352) as u64);
+        }
+    }
+
+    let left = total_sectors % PROGRESS_SECTORS;
+    if left > 0 {
+        progress((left * 2352) as u64);
     }
 
     data_fetch_handle.join().map_err(|_| ReconstructionError::ThreadPanic(
@@ -935,6 +965,10 @@ fn rebuild_batch(mut batch: RebuildBatch<'_>) -> Result<RebuildBatch<'_>, Recons
 /// writing stops and the error is a `SpriteShrinkError::Cancelled`, for which
 /// `is_cancelled()` holds. Pass `|| false` to never cancel.
 ///
+/// `progress` is called with the bytes written since its last call, after
+/// each batch of up to 256 sectors is written. Its calls add up to the
+/// disc's size once the disc is written.
+///
 /// # Errors
 ///
 /// Returns an error if `read_stored` fails or returns the wrong number of
@@ -947,7 +981,7 @@ fn rebuild_batch(mut batch: RebuildBatch<'_>) -> Result<RebuildBatch<'_>, Recons
     reason = "each archive section is a separate borrow; grouping them is \
               an API change of its own"
 )]
-pub fn write_disc<H, W, C, R, E>(
+pub fn write_disc<H, W, C, R, E, P>(
     manifest: &DiscManifest<H>,
     indices: &SSMDIndices<H>,
     dictionary: &[u8],
@@ -957,7 +991,7 @@ pub fn write_disc<H, W, C, R, E>(
     writer: &mut BufWriter<W>,
     worker_count: usize,
     is_cancelled: C,
-    //mut progress_cb: P
+    mut progress: P,
 ) -> Result<(), SpriteShrinkCDError>
 where
     H: Hashable + Display,
@@ -965,6 +999,7 @@ where
     C: Fn() -> bool,
     R: Fn(ChunkLocation) -> Result<Vec<u8>, E> + Sync,
     E: std::error::Error + Send + Sync + 'static,
+    P: FnMut(u64),
 {
     let chunks: Vec<(H, usize)> = manifest.data_stream_layout.iter()
         .map(|data| (data.hash, data.uncomp_len as usize))
@@ -1059,6 +1094,7 @@ where
             is buffered, so write it directly.*/
             writer.flush()?;
             writer.get_mut().write_all(&batch.sectors)?;
+            progress(batch.sectors.len() as u64);
             batch.clear();
             Ok::<_, SpriteShrinkCDError>(batch)
         };
@@ -1889,6 +1925,7 @@ mod tests {
             &manifest, &[], &[], &[], &hash,
             fetch_from(Vec::new()),
             fetch_from(vec![(1, audio)]),
+            |_| {},
         ).unwrap();
     }
 
@@ -1915,6 +1952,7 @@ mod tests {
             &manifest, exception_index, &[0; 296], &[[0; 8]], &[0; 64],
             fetch_from(vec![(1, vec![0; 2048])]),
             fetch_from(Vec::new()),
+            |_| {},
         ).unwrap_err()
     }
 

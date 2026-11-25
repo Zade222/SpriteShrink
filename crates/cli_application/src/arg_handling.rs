@@ -226,7 +226,7 @@ pub struct Args {
         long,
         help_heading = "Behavior and Output Control",
         default_value_t = false,
-        help = "Activates printing progress to console."
+        help = "Shows progress bars while compressing or extracting,\nunless --quiet is set."
     )]
     pub progress: bool,
 

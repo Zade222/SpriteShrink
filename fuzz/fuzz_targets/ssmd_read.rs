@@ -69,6 +69,7 @@ fuzz_target!(|data: &[u8]| {
                 sectors_left.set(left.saturating_sub(1));
                 left == 0
             },
+            |_| {},
         ));
     }
 });

@@ -136,7 +136,8 @@ Let's say you have your game variants in a folder named `MyGameCollection`.
 
 *   This command reads all files inside `MyGame`.
 *   It creates a new archive named `MyGame.ssmc` in the current directory.
-*   The `-p` flag shows a progress bar so you can see what's happening.
+*   The `-p` flag shows a progress bar for each step so you can see what's happening.
+*   When it's done, it prints the archive's size and the input's size, with the archive as a percentage of the input.
 
 Each file is stored under its file name, so every input must have a different name. If you give several folders with `-i` and two of them hold a file with the same name, such as `USA/game.rom` and `Europe/game.rom`, SpriteShrink lists the clashing names and stops before writing anything. Rename one of the files and run it again.
 
@@ -239,7 +240,7 @@ This is a quick reference for the most common arguments. For a full list, run `.
 | `-o`       | `--output`            | Path to the compression/extraction output path.                          |
 | `-l`       | `--list`              | View archive contents in a plain text table.                             |
 | `-e`       | `--extract`           | Extract files by index (e.g., `1,3,5-7`).                                |
-| `-p`       | `--progress`          | Show a progress bar.                                                     |
+| `-p`       | `--progress`          | Show progress bars while compressing or extracting (not with `-q`).      |
 | `-f`       | `--force`             | Replace output files that already exist, and create the output directory if it doesn't exist. |
 | `-q`       | `--quiet`             | Suppress all non-error output.                                           |
 | `-h`       | `--help`              | Print the full help message and exit.                                    |

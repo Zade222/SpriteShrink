@@ -188,7 +188,7 @@ Here's a quick reference for the main arguments:
 |            | `ignore-config`       | Forces application to not read it's config and won't create one if it doesn't already exist. | `false`       |
 |            | `--low-memory`        | Forces low-memory mode by using an on disk cache for temporarily storing data. Can adversely affect application performance. | `false`       |
 | `-f`       | `--force`             | Replaces output files that already exist (the archive, or extracted files) and creates the output directory if it doesn't exist. | `false`       |
-| `-p`       | `--progress`          | Activates printing progress to console.                                                  | `false`       |
+| `-p`       | `--progress`          | Shows progress bars while compressing or extracting, unless `--quiet` is set.            | `false`       |
 | `-q`       | `--quiet`             | Activates quiet mode, suppressing non-essential output.                                  | `false`       |
 | `-h`       | `--help`              | Prints comprehensive help information and exits.                                         | N/A           |
 |            | `--disable-logging`   | Disables logging messages to log file.                                                   | `false`       |
